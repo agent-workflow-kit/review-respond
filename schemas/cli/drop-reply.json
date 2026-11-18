@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/drop-reply.json",
+  "title": "drop-reply --json",
+  "type": "object",
+  "properties": {
+    "pending_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "comment_id": {
+      "$ref": "../defs.json#/$defs/comment_id"
+    },
+    "removed": {
+      "type": "boolean"
+    },
+    "replies_left": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "required": [
+    "pending_id",
+    "comment_id",
+    "removed",
+    "replies_left"
+  ],
+  "additionalProperties": false
+}

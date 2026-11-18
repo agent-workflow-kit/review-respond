@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/edit.json",
+  "title": "edit --json",
+  "type": "object",
+  "properties": {
+    "pending_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "edited": {
+      "type": "boolean"
+    },
+    "reply_comment_id": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/comment_id"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "message_replaced": {
+      "type": "boolean"
+    },
+    "gate_outcome": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/outcome"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "pending_id",
+    "edited",
+    "reply_comment_id",
+    "message_replaced",
+    "gate_outcome"
+  ],
+  "additionalProperties": false
+}

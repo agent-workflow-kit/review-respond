@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/artifact.json",
+  "title": "respond agent artifact",
+  "description": "The one JSON artifact the respond agent files. Every field is agent-written and untrusted. Unknown keys are refused.",
+  "type": "object",
+  "properties": {
+    "skill_marker": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "x-untrusted": true
+    },
+    "replies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "comment_id": {
+            "$ref": "defs.json#/$defs/comment_id"
+          },
+          "body": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 65536,
+            "x-untrusted": true
+          }
+        },
+        "required": [
+          "comment_id",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "maxItems": 1000
+    },
+    "changed_files": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/path"
+      },
+      "maxItems": 1000,
+      "uniqueItems": true
+    },
+    "deleted_files": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/path"
+      },
+      "maxItems": 1000,
+      "uniqueItems": true
+    },
+    "commit_message": {
+      "type": "string",
+      "maxLength": 4096,
+      "x-untrusted": true
+    }
+  },
+  "required": [
+    "skill_marker",
+    "replies",
+    "changed_files",
+    "deleted_files",
+    "commit_message"
+  ],
+  "additionalProperties": false
+}

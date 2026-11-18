@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/stop.json",
+  "title": "stop --json",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "round_id": {
+      "$ref": "../defs.json#/$defs/round_id"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/round_state"
+    },
+    "noop": {
+      "type": "boolean"
+    },
+    "job_canceled": {
+      "type": "boolean"
+    },
+    "agent_stopped": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "dry_run",
+    "round_id",
+    "state",
+    "noop",
+    "job_canceled",
+    "agent_stopped"
+  ],
+  "additionalProperties": false
+}

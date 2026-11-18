@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/check.json",
+  "title": "check --json",
+  "type": "object",
+  "properties": {
+    "already_running": {
+      "type": "boolean"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "prs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pr": {
+            "$ref": "../defs.json#/$defs/pr"
+          },
+          "state": {
+            "$ref": "../defs.json#/$defs/pr_state_name"
+          },
+          "started_round": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/round_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "pr",
+          "state",
+          "started_round",
+          "errors"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "$ref": "../defs.json#/$defs/host"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "code": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "host",
+          "ok",
+          "code"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "already_running",
+    "dry_run",
+    "prs",
+    "hosts",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

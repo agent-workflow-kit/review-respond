@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/gate-input.json",
+  "title": "gatectl check input for review-respond",
+  "description": "Closed declared-field input, one call per round. No free text. Paths are agent-chosen and untrusted.",
+  "type": "object",
+  "properties": {
+    "repo": {
+      "$ref": "defs.json#/$defs/repo_id"
+    },
+    "pr": {
+      "$ref": "defs.json#/$defs/pr"
+    },
+    "round": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "head_sha": {
+      "$ref": "defs.json#/$defs/sha"
+    },
+    "diff_sha256": {
+      "oneOf": [
+        {
+          "$ref": "defs.json#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "files_changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "files_deleted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "additions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "deletions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reply_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "paths": {
+      "type": "array",
+      "items": {
+        "$ref": "defs.json#/$defs/path"
+      },
+      "maxItems": 1000,
+      "uniqueItems": true
+    },
+    "rule_no_off_limits": {
+      "type": "boolean"
+    },
+    "rule_ci_passing": {
+      "type": "boolean"
+    },
+    "rule_pr_open_head_match": {
+      "type": "boolean"
+    },
+    "rule_authors_trusted": {
+      "type": "boolean"
+    },
+    "rule_no_edited": {
+      "type": "boolean"
+    },
+    "rule_artifact_valid": {
+      "type": "boolean"
+    },
+    "rule_paths_allowed": {
+      "type": "boolean"
+    },
+    "rule_not_rerun_after_escalation": {
+      "type": "boolean"
+    },
+    "author_kinds": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "reviewer",
+          "write_access"
+        ]
+      },
+      "uniqueItems": true
+    },
+    "edited_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ci_state": {
+      "$ref": "defs.json#/$defs/ci_state"
+    },
+    "mentions_person": {
+      "type": "boolean"
+    },
+    "sandbox_active": {
+      "type": "boolean"
+    },
+    "tools_unexpected": {
+      "type": "boolean"
+    },
+    "implicit": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "repo",
+    "pr",
+    "round",
+    "head_sha",
+    "diff_sha256",
+    "files_changed",
+    "files_deleted",
+    "additions",
+    "deletions",
+    "reply_count",
+    "paths",
+    "rule_no_off_limits",
+    "rule_ci_passing",
+    "rule_pr_open_head_match",
+    "rule_authors_trusted",
+    "rule_no_edited",
+    "rule_artifact_valid",
+    "rule_paths_allowed",
+    "rule_not_rerun_after_escalation",
+    "author_kinds",
+    "edited_count",
+    "ci_state",
+    "mentions_person",
+    "sandbox_active",
+    "tools_unexpected",
+    "implicit"
+  ],
+  "additionalProperties": false
+}

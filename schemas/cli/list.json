@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/list.json",
+  "title": "list --json",
+  "type": "object",
+  "properties": {
+    "prs": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/pr_state"
+      }
+    }
+  },
+  "required": [
+    "prs"
+  ],
+  "additionalProperties": false
+}

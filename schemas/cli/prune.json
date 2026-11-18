@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/prune.json",
+  "title": "prune --json",
+  "type": "object",
+  "properties": {
+    "older_than": {
+      "$ref": "../defs.json#/$defs/duration"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "object_type": {
+            "enum": [
+              "round",
+              "pending",
+              "comments",
+              "throwaway"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/#=+-]{0,255}$"
+          },
+          "result": {
+            "enum": [
+              "deleted",
+              "would_delete",
+              "skipped"
+            ]
+          },
+          "reason": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "object_type",
+          "id",
+          "result",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]{0,63}$"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "older_than",
+    "dry_run",
+    "results",
+    "warnings"
+  ],
+  "additionalProperties": false
+}

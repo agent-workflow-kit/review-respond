@@ -1,12 +1,780 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "review-respond/config",
+  "$id": "review-respond/config.json",
   "title": "review-respond config",
+  "description": "Merged config (config.yaml plus config.d drop-ins). Unknown keys are refused. Self-contained: no external $ref.",
   "type": "object",
   "properties": {
+    "me": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9._@-]+$",
+          "description": "Your name for audit and the trailer; defaults to the OS username."
+        },
+        "accounts": {
+          "type": "object",
+          "patternProperties": {
+            "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9._@=+:-]+$"
+            }
+          },
+          "additionalProperties": false,
+          "default": {},
+          "description": "Optional per-host account ids; otherwise forgectl whoami."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "hosts": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$": {
+          "type": "object",
+          "properties": {
+            "token_env": {
+              "$ref": "#/$defs/env_name"
+            },
+            "token_command": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "description": "An argv list run without a shell; prints the push credential."
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "description": "Push credentials per host; a variable name or a command, never the value."
+    },
+    "hosts_to_check": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/host"
+      },
+      "uniqueItems": true,
+      "description": "Hosts whose PRs check lists. Default: all hosts forgectl knows."
+    },
+    "reviewers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/account_entry"
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Entries <host>:<id> whose comments are always eligible."
+    },
+    "bot_authors": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/account_entry"
+      },
+      "uniqueItems": true,
+      "default": [],
+      "description": "Extra account ids treated as bots."
+    },
+    "respond_to_own_comments_prefix": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\s]+$"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Opt-in prefix that admits your own comments."
+    },
+    "settle": {
+      "$ref": "#/$defs/duration",
+      "default": "5m",
+      "description": "Minimum age of the newest eligible comment."
+    },
+    "max_rounds": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000,
+      "default": 3,
+      "description": "Counted rounds per PR."
+    },
+    "pending_ttl": {
+      "$ref": "#/$defs/duration",
+      "default": "7d"
+    },
+    "access_cache_ttl": {
+      "$ref": "#/$defs/duration",
+      "default": "1h"
+    },
+    "prefer_owner": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9._-]+$",
+      "default": "ticket-work"
+    },
+    "fresh_label": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "resolve_after_confirm": {
+      "type": "boolean",
+      "default": false
+    },
+    "off_limits": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/glob"
+      },
+      "uniqueItems": true,
+      "default": [
+        ".github/**",
+        ".gitlab-ci.yml",
+        ".gitlab/**",
+        ".circleci/**",
+        "Jenkinsfile",
+        "azure-pipelines.yml",
+        "Dockerfile*",
+        "docker-compose*",
+        "Makefile",
+        "GNUmakefile",
+        "**/.husky/**",
+        ".pre-commit-config.yaml",
+        ".gitmodules",
+        "**/.claude/**",
+        "**/.cursor/**",
+        "**/.gemini/**",
+        "**/.codex/**",
+        ".mcp.json",
+        "CLAUDE*.md",
+        "AGENTS.md",
+        "GEMINI.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".clinerules",
+        "**/.vscode/**",
+        "**/.devcontainer/**",
+        "**/.zed/**",
+        ".envrc",
+        ".gitattributes",
+        "CODEOWNERS",
+        "**/auth/**",
+        "**/security/**",
+        "**/secrets/**",
+        "**/crypto/**",
+        "*.pem",
+        "*.key",
+        ".env",
+        ".env.*"
+      ],
+      "description": "Globs; the default list is review-watch's."
+    },
+    "skill": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "default": "respond-to-review"
+    },
+    "permission_profile": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Path replacing the bundled profile."
+    },
+    "sandbox": {
+      "$ref": "#/$defs/sandbox_level",
+      "default": "required"
+    },
+    "setting_sources": {
+      "type": "string",
+      "pattern": "^(?:(?:user|project|local)(?:,(?:user|project|local))*)?$",
+      "default": "",
+      "description": "Passed as --setting-sources; empty loads none."
+    },
+    "env_allowlist": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/env_name"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "model": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "agent": {
+      "type": "object",
+      "properties": {
+        "timeout": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/duration"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-run timeout passed to agent-spawn; null keeps its default."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "jobs": {
+      "type": "object",
+      "properties": {
+        "queue": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "default": "respond"
+        },
+        "kill_grace": {
+          "$ref": "#/$defs/duration",
+          "default": "125s"
+        },
+        "max_running": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64,
+          "default": 1,
+          "description": "Used without jobsctl."
+        },
+        "pass_env": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/env_name"
+          },
+          "uniqueItems": true,
+          "default": []
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "gate": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "$ref": "#/$defs/policy_name",
+          "default": "respond-auto"
+        },
+        "timeout": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600,
+          "default": 540,
+          "description": "Seconds, passed to gatectl check --timeout."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "user_name": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Null reads your global git config."
+        },
+        "user_email": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 3,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "trailer": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "Assisted-by: review-respond (confirmed by <me.name>)",
+          "description": "Null turns the trailer off."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "requests_per_host": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000,
+          "default": 120
+        },
+        "prompt_comments": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 50
+        },
+        "prompt_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 16777216,
+          "default": 65536
+        },
+        "reply_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536,
+          "default": 8192
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "attention": {
+      "type": "object",
+      "properties": {
+        "ineligible_comment": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "retention": {
+      "type": "object",
+      "properties": {
+        "records": {
+          "$ref": "#/$defs/duration",
+          "default": "30d"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "cron": {
+      "type": "object",
+      "properties": {
+        "env_file": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1024,
+              "pattern": "^[^'\\s]+$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Sourced before check in the cron line."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
     "hooks": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "pre-round": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600
+                  },
+                  {
+                    "$ref": "#/$defs/duration"
+                  }
+                ],
+                "default": 30,
+                "description": "A duration; a bare integer means seconds (1 to 600)."
+              },
+              "async": {
+                "type": "boolean",
+                "default": false,
+                "description": "Post hooks only."
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "pre-push": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600
+                  },
+                  {
+                    "$ref": "#/$defs/duration"
+                  }
+                ],
+                "default": 30,
+                "description": "A duration; a bare integer means seconds (1 to 600)."
+              },
+              "async": {
+                "type": "boolean",
+                "default": false,
+                "description": "Post hooks only."
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "post-pending": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600
+                  },
+                  {
+                    "$ref": "#/$defs/duration"
+                  }
+                ],
+                "default": 30,
+                "description": "A duration; a bare integer means seconds (1 to 600)."
+              },
+              "async": {
+                "type": "boolean",
+                "default": false,
+                "description": "Post hooks only."
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "post-attention": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600
+                  },
+                  {
+                    "$ref": "#/$defs/duration"
+                  }
+                ],
+                "default": 30,
+                "description": "A duration; a bare integer means seconds (1 to 600)."
+              },
+              "async": {
+                "type": "boolean",
+                "default": false,
+                "description": "Post hooks only."
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        },
+        "post-confirm": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+              },
+              "timeout": {
+                "oneOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600
+                  },
+                  {
+                    "$ref": "#/$defs/duration"
+                  }
+                ],
+                "default": 30,
+                "description": "A duration; a bare integer means seconds (1 to 600)."
+              },
+              "async": {
+                "type": "boolean",
+                "default": false,
+                "description": "Post hooks only."
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          },
+          "default": []
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "default": {},
+      "description": "Hook command lists (design guide section 8). pre-round and pre-push may veto or escalate; the post hooks may be async."
+    },
+    "repos": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?![.][.]?(?:/|$))[A-Za-z0-9._-]+)+$": {
+          "type": "object",
+          "properties": {
+            "respond_fresh": {
+              "type": "boolean",
+              "default": false,
+              "description": "Opt a PR with no original agent into a fresh session."
+            },
+            "auto_reply": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "description": "Post replies without a push or diff behind the gate."
+            },
+            "auto_push": {
+              "type": "object",
+              "properties": {
+                "enabled": {
+                  "type": "boolean",
+                  "default": false
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/glob"
+                  },
+                  "uniqueItems": true,
+                  "default": [],
+                  "description": "Allowlist of changed paths; empty means none."
+                }
+              },
+              "required": [],
+              "additionalProperties": false,
+              "description": "Commit, push and reply behind the gate."
+            },
+            "respond": {
+              "type": "object",
+              "properties": {
+                "allow_commands": {
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 256
+                    },
+                    "minItems": 1,
+                    "maxItems": 32
+                  },
+                  "maxItems": 64,
+                  "default": [],
+                  "description": "Argv patterns for test and build commands added to the permission profile."
+                },
+                "read_dirs": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1024
+                  },
+                  "maxItems": 64,
+                  "default": []
+                }
+              },
+              "required": [],
+              "additionalProperties": false
+            },
+            "settle": {
+              "$ref": "#/$defs/duration",
+              "default": "5m"
+            },
+            "max_rounds": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000,
+              "default": 3
+            },
+            "reviewers": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/account_entry"
+              },
+              "uniqueItems": true,
+              "default": []
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false,
+      "default": {},
+      "description": "Per-repo overrides keyed by repo id (host/<full project path>)."
     }
   },
-  "additionalProperties": true
+  "required": [],
+  "additionalProperties": false,
+  "$defs": {
+    "account_entry": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?:[A-Za-z0-9._@=+-]{1,128}$",
+      "description": "<host>:<account id>."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+      "description": "0 or an integer and a unit (ms, s, m, h, d)."
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+    },
+    "glob": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!/)(?!.*/$)(?!.*//)(?!(?:.*/)?[.][.]?(?:/|$))[A-Za-z0-9._*?/:@+-]+$",
+      "description": "A path glob (review-watch's path matching): * and ? within a segment, a ** segment matches zero or more whole segments."
+    },
+    "host": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",
+      "description": "Lowercase host, optional :port."
+    },
+    "policy_name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+    },
+    "sandbox_level": {
+      "enum": [
+        "required",
+        "preferred",
+        "off"
+      ]
+    }
+  }
 }

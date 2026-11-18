@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/export.json",
+  "title": "export (JSON lines, or one array with --json)",
+  "description": "Each record is an audit or a log record.",
+  "oneOf": [
+    {
+      "$ref": "../audit.json"
+    },
+    {
+      "$ref": "../log.json"
+    },
+    {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "../audit.json"
+          },
+          {
+            "$ref": "../log.json"
+          }
+        ]
+      }
+    }
+  ]
+}

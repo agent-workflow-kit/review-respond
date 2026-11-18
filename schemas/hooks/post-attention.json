@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/hooks/post-attention.json",
+  "title": "post-attention hook payload (stdin)",
+  "description": "Something needs a human. Fires once per cause; at least once, deduplicate by event_id. No text.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-respond"
+    },
+    "hook": {
+      "const": "post-attention"
+    },
+    "object_type": {
+      "$ref": "../defs.json#/$defs/object_type"
+    },
+    "object_id": {
+      "anyOf": [
+        {
+          "$ref": "../defs.json#/$defs/round_id"
+        },
+        {
+          "$ref": "../defs.json#/$defs/pending_id"
+        },
+        {
+          "$ref": "../defs.json#/$defs/pr"
+        }
+      ]
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
+    "reason": {
+      "$ref": "../defs.json#/$defs/attention_reason"
+    },
+    "details": {
+      "type": "object",
+      "properties": {
+        "failure_reason": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/failure_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "refusal_reason": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/refusal_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pr": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/pr"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "round_id": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/round_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pending_id": {
+          "oneOf": [
+            {
+              "$ref": "../defs.json#/$defs/pending_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comment_count": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempts": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "description": "Closed codes, ids and counts; never text."
+    },
+    "dedupe_key": {
+      "$ref": "../defs.json#/$defs/dedupe_key"
+    },
+    "reads_third_party": {
+      "type": "boolean"
+    },
+    "tainted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "event_id",
+    "reason",
+    "details",
+    "dedupe_key",
+    "reads_third_party",
+    "tainted"
+  ],
+  "additionalProperties": false
+}
