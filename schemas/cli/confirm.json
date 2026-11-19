@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/confirm.json",
+  "title": "confirm --json",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "pending_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/pending_state"
+    },
+    "pushed": {
+      "type": "boolean"
+    },
+    "commit_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "replies": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "comment_id": {
+            "$ref": "../defs.json#/$defs/comment_id"
+          },
+          "status": {
+            "$ref": "../defs.json#/$defs/reply_status"
+          },
+          "status_reason": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/reply_reason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "threaded": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "comment_id",
+          "status",
+          "status_reason",
+          "threaded"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "replies_posted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "replies_skipped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "threads_resolved": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "decision_ids": {
+      "$ref": "../defs.json#/$defs/decision_ids"
+    },
+    "error": {
+      "$ref": "../defs.json#/$defs/error_body"
+    }
+  },
+  "required": [
+    "dry_run",
+    "pending_id",
+    "pr",
+    "state",
+    "pushed",
+    "commit_sha",
+    "replies",
+    "replies_posted",
+    "replies_skipped",
+    "threads_resolved",
+    "decision_ids"
+  ],
+  "additionalProperties": false
+}

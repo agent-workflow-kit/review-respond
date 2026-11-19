@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/hooks/pre-push.json",
+  "title": "pre-push hook payload (stdin)",
+  "description": "In confirm, after the preconditions and before the commit and push. Exit 13 escalates, any other non-zero exit vetoes. No diff or message text.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-respond"
+    },
+    "hook": {
+      "const": "pre-push"
+    },
+    "object_type": {
+      "const": "pending"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "pending_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "diff_sha256": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha256"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "files_changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "additions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "deletions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sensitive": {
+      "type": "boolean"
+    },
+    "actor_class": {
+      "$ref": "../defs.json#/$defs/actor_class"
+    },
+    "reads_third_party": {
+      "type": "boolean"
+    },
+    "tainted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "pending_id",
+    "pr",
+    "head_sha",
+    "diff_sha256",
+    "files_changed",
+    "additions",
+    "deletions",
+    "sensitive",
+    "actor_class",
+    "reads_third_party",
+    "tainted"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/hooks/pre-round.json",
+  "title": "pre-round hook payload (stdin)",
+  "description": "Once per round start, after the due rule and before the round is created, so the object is the PR. Exit 13 escalates, any other non-zero exit vetoes. Not delivered later, so it has no event_id. No comment text.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-respond"
+    },
+    "hook": {
+      "const": "pre-round"
+    },
+    "object_type": {
+      "const": "pr"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "round_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "head_sha": {
+      "$ref": "../defs.json#/$defs/sha"
+    },
+    "comment_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "trigger": {
+      "$ref": "../defs.json#/$defs/trigger"
+    },
+    "forced": {
+      "type": "boolean"
+    },
+    "reads_third_party": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "pr",
+    "round_number",
+    "head_sha",
+    "comment_count",
+    "trigger",
+    "forced",
+    "reads_third_party"
+  ],
+  "additionalProperties": false
+}

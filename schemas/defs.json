@@ -1,0 +1,1450 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/defs.json",
+  "title": "review-respond shared definitions",
+  "description": "Not an output on its own. Shared definitions referenced by the CLI, hook, artifact, audit and log schemas. config.json embeds its own copies.",
+  "$defs": {
+    "host": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",
+      "description": "Lowercase host, optional :port."
+    },
+    "repo_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?![.][.]?(?:/|$))[A-Za-z0-9._-]+)+$",
+      "description": "host/<full project path>."
+    },
+    "pr": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?(?:/(?![.][.]?(?:/|#))[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9}$",
+      "description": "Canonical PR form host/<full project path>#N."
+    },
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,255}$",
+      "description": "An opaque id issued by a sibling tool or a host (agent, throwaway, thread, comment)."
+    },
+    "comment_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,255}$",
+      "description": "forgectl's full comment id, for example gh:rc:<node id>."
+    },
+    "thread_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,255}$",
+      "description": "forgectl's thread id."
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "description": "agent-spawn's agent id, opaque."
+    },
+    "throwaway_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "description": "wtctl's throwaway id, opaque."
+    },
+    "sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "ts": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:[.][0-9]{1,6})?Z$",
+      "description": "UTC timestamp, YYYY-MM-DDTHH:MM:SS[.ffffff]Z."
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^(?:0|[0-9]+(?:ms|s|m|h|d))$",
+      "description": "0 or an integer and a unit (ms, s, m, h, d)."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "pending_id": {
+      "type": "string",
+      "pattern": "^rp-[a-z2-7]{8}$",
+      "description": "rp- plus 8 lowercase base32 characters."
+    },
+    "round_id": {
+      "type": "string",
+      "pattern": "^rd-[a-z2-7]{8}$",
+      "description": "rd- plus 8 lowercase base32 characters."
+    },
+    "job_id": {
+      "type": "string",
+      "pattern": "^jb-[a-z2-7]{8}$",
+      "description": "jobsctl's job id."
+    },
+    "actor": {
+      "type": "string",
+      "pattern": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$"
+    },
+    "actor_class": {
+      "enum": [
+        "human",
+        "auto"
+      ]
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:@/-]{1,128}$"
+    },
+    "decision_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/decision_id"
+      },
+      "maxItems": 16
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_.-]{0,63}=[A-Za-z0-9_.:/#@+=,-]{0,256}$",
+      "description": "key=value."
+    },
+    "labels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/label"
+      },
+      "uniqueItems": true,
+      "maxItems": 32,
+      "description": "The object's labels as key=value strings."
+    },
+    "dedupe_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._/#-]{0,255}$",
+      "description": "A hook deduplication key in notice-route's plain grammar: <object id or PR digest>.<reason>.<episode>, rp-<id>.recorded or rp-<id>.done."
+    },
+    "reply_dedupe_key": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._:-]{1,128}$",
+      "description": "respond:<pending id>:<first 20 hex of sha256 of the comment id>, in forgectl's key grammar."
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^ev-[a-z2-7]{16}$",
+      "description": "ev- plus 16 lowercase base32 characters, the outbox deduplication id."
+    },
+    "glob": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!/)(?!.*/$)(?!.*//)(?!(?:.*/)?[.][.]?(?:/|$))[A-Za-z0-9._*?/:@+-]+$",
+      "description": "A path glob (review-watch's path matching): * and ? within a segment, a ** segment matches zero or more whole segments."
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^(?!/)(?!.*//)(?!.*/$)(?!(?:.*/)?[.][.]?(?:/|$))(?!(?:.*/)?[.][gG][iI][tT](?:/|$)).+$",
+      "description": "A relative, normalized repo path with no .. or .git component (case-folded). Untrusted: chosen by the agent.",
+      "x-untrusted": true
+    },
+    "login": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._@-]+$"
+    },
+    "account_entry": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?:[A-Za-z0-9._@=+-]{1,128}$",
+      "description": "<host>:<account id>."
+    },
+    "env_name": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+    },
+    "code": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$",
+      "description": "A closed lowercase code."
+    },
+    "branch": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255,
+      "description": "Untrusted: a branch name as reported by forgectl.",
+      "x-untrusted": true
+    },
+    "pr_state_name": {
+      "enum": [
+        "idle",
+        "settling",
+        "queued",
+        "running",
+        "pending",
+        "waiting",
+        "closed"
+      ]
+    },
+    "round_state": {
+      "enum": [
+        "queued",
+        "running",
+        "pending",
+        "confirmed",
+        "rejected",
+        "expired",
+        "closed",
+        "escalated",
+        "failed",
+        "canceled"
+      ]
+    },
+    "pending_state": {
+      "enum": [
+        "pending",
+        "pushing",
+        "pushed",
+        "done",
+        "rejected",
+        "expired",
+        "closed"
+      ]
+    },
+    "comment_state": {
+      "enum": [
+        "seen",
+        "unhandled",
+        "delivered",
+        "handled",
+        "deleted"
+      ]
+    },
+    "handled_reason": {
+      "enum": [
+        "resolved"
+      ]
+    },
+    "delivered_from": {
+      "enum": [
+        "seen",
+        "unhandled"
+      ]
+    },
+    "ineligible_detail": {
+      "enum": [
+        "not_yours",
+        "fork_pr",
+        "default_branch"
+      ],
+      "description": "The closed details.reason of an ineligible refusal."
+    },
+    "flag_cause": {
+      "enum": [
+        "off_limits",
+        "binary",
+        "oversized",
+        "long_line",
+        "secret_pattern",
+        "truncated"
+      ]
+    },
+    "ineligible_reason": {
+      "enum": [
+        "own",
+        "bot",
+        "unknown_author",
+        "no_access",
+        "unknown_access",
+        "resolved",
+        "minimized"
+      ]
+    },
+    "waiting_reason": {
+      "enum": [
+        "escalated",
+        "failed",
+        "stopped",
+        "round_limit",
+        "hook_vetoed",
+        "hook_escalated",
+        "no_agent",
+        "agent_live",
+        "capacity"
+      ]
+    },
+    "block_reason": {
+      "enum": [
+        "escalated",
+        "failed",
+        "stopped",
+        "round_limit",
+        "no_agent",
+        "hook_vetoed",
+        "hook_escalated"
+      ]
+    },
+    "cancel_reason": {
+      "enum": [
+        "stopped",
+        "pr_closed",
+        "nothing_to_respond",
+        "read_failed"
+      ]
+    },
+    "failure_detail": {
+      "enum": [
+        "frozen_file",
+        "json",
+        "schema",
+        "skill_marker",
+        "replies",
+        "paths",
+        "commit_message",
+        "path_state"
+      ]
+    },
+    "failure_reason": {
+      "enum": [
+        "throwaway_failed",
+        "launch_failed",
+        "vetoed",
+        "refused",
+        "agent_gone",
+        "unreported",
+        "agent_failed",
+        "agent_lost",
+        "timeout",
+        "job_terminated",
+        "job_lost",
+        "artifact_missing",
+        "artifact_invalid",
+        "implicit_done",
+        "empty_result",
+        "diff_failed",
+        "internal"
+      ]
+    },
+    "refusal_reason": {
+      "enum": [
+        "live",
+        "busy",
+        "pending_exists",
+        "round_active",
+        "round_limit",
+        "remote_moved",
+        "diff_changed",
+        "sensitive_paths",
+        "expired",
+        "not_pending",
+        "ineligible",
+        "pr_closed"
+      ]
+    },
+    "attention_reason": {
+      "enum": [
+        "escalated",
+        "failed",
+        "round_limit",
+        "pending_expired",
+        "confirm_incomplete",
+        "remote_moved",
+        "push_failed",
+        "reply_failed",
+        "job_lost",
+        "ineligible_comment",
+        "pr_closed",
+        "teardown_refused",
+        "no_agent"
+      ]
+    },
+    "object_type": {
+      "enum": [
+        "round",
+        "pending",
+        "pr"
+      ]
+    },
+    "trigger": {
+      "enum": [
+        "check",
+        "respond"
+      ]
+    },
+    "sandbox_level": {
+      "enum": [
+        "required",
+        "preferred",
+        "off"
+      ]
+    },
+    "pending_action": {
+      "enum": [
+        "push_and_reply",
+        "reply"
+      ],
+      "description": "push_and_reply: a record with changed or deleted files; reply: a replies-only record."
+    },
+    "reply_status": {
+      "enum": [
+        "pending",
+        "posted",
+        "skipped",
+        "dropped",
+        "failed",
+        "unknown"
+      ]
+    },
+    "reply_reason": {
+      "enum": [
+        "comment_deleted",
+        "thread_resolved",
+        "comment_edited",
+        "vetoed",
+        "escalated",
+        "host_error"
+      ]
+    },
+    "hook_name": {
+      "enum": [
+        "pre-round",
+        "pre-push",
+        "post-pending",
+        "post-attention",
+        "post-confirm"
+      ]
+    },
+    "error_code": {
+      "enum": [
+        "internal",
+        "lease_lost",
+        "lease_timeout",
+        "usage",
+        "config_invalid",
+        "human_only",
+        "not_found",
+        "vetoed",
+        "tool_missing",
+        "tool_too_old",
+        "lower_failed",
+        "all_hosts_failed",
+        "push_failed",
+        "reply_failed",
+        "outcome_unknown",
+        "identity_missing",
+        "throwaway_missing",
+        "state_unsafe",
+        "version_skew",
+        "confirmation_required",
+        "escalated",
+        "refused",
+        "ambiguous",
+        "nothing_to_respond"
+      ]
+    },
+    "error_reason": {
+      "enum": [
+        "live",
+        "busy",
+        "pending_exists",
+        "round_active",
+        "round_limit",
+        "remote_moved",
+        "diff_changed",
+        "sensitive_paths",
+        "expired",
+        "not_pending",
+        "ineligible",
+        "pr_closed"
+      ],
+      "description": "Only an exit 20 refusal carries a reason."
+    },
+    "lower_error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096,
+          "x-untrusted": true
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "details": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "additionalProperties": false,
+      "description": "A sibling tool's error object, passed through."
+    },
+    "error_body": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/error_code"
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 4096,
+          "x-untrusted": true
+        },
+        "reason": {
+          "$ref": "#/$defs/error_reason"
+        },
+        "details": {
+          "type": "object",
+          "description": "Ids, enums and counts. reason (ineligible_detail) for an ineligible refusal; cause for diff_changed (expect_mismatch, recomputed, path_state) and remote_moved (retry); causes (flag_cause) for sensitive_paths; ref_missing for remote_moved.",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/ineligible_detail"
+            },
+            "cause": {
+              "enum": [
+                "expect_mismatch",
+                "recomputed",
+                "path_state",
+                "retry"
+              ]
+            },
+            "causes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/flag_cause"
+              },
+              "uniqueItems": true
+            },
+            "ref_missing": {
+              "type": "boolean"
+            }
+          }
+        },
+        "lower_error": {
+          "$ref": "#/$defs/lower_error"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "additionalProperties": false
+    },
+    "diff_stats": {
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "additions": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "deletions": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "files",
+        "additions",
+        "deletions"
+      ],
+      "additionalProperties": false
+    },
+    "flag": {
+      "type": "object",
+      "properties": {
+        "where": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "A path, commit_message or a reply's comment id.",
+              "x-untrusted": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cause": {
+          "$ref": "#/$defs/flag_cause"
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "where",
+        "cause",
+        "line"
+      ],
+      "additionalProperties": false,
+      "description": "One reason the confirm needs --allow-sensitive."
+    },
+    "failure": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/failure_reason"
+        },
+        "detail": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/failure_detail"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "reason",
+        "detail"
+      ],
+      "additionalProperties": false
+    },
+    "block": {
+      "type": "object",
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/block_reason"
+        },
+        "set_at": {
+          "$ref": "#/$defs/ts"
+        }
+      },
+      "required": [
+        "reason",
+        "set_at"
+      ],
+      "additionalProperties": false
+    },
+    "round": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/round_id"
+        },
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "state": {
+          "$ref": "#/$defs/round_state"
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "agent_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/agent_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "job_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/job_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "base_agent_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/agent_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comment_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/comment_id"
+          },
+          "uniqueItems": true
+        },
+        "delivered": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/comment_id"
+          },
+          "uniqueItems": true
+        },
+        "counted": {
+          "type": "boolean"
+        },
+        "cancel_requested_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cancel_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/cancel_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "note_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "include_existing": {
+          "type": "boolean"
+        },
+        "escalation": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "x-untrusted": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "summary": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "x-untrusted": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "reason",
+                "summary"
+              ],
+              "additionalProperties": false,
+              "description": "The agent's question at an escalation; agent-written and untrusted."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "failure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/failure"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "started": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ended": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "id",
+        "pr",
+        "number",
+        "state",
+        "head_sha",
+        "agent_id",
+        "job_id",
+        "base_agent_id",
+        "comment_ids",
+        "delivered",
+        "counted",
+        "cancel_requested_at",
+        "cancel_reason",
+        "note_sha256",
+        "include_existing",
+        "escalation",
+        "failure",
+        "started",
+        "ended",
+        "warnings"
+      ],
+      "additionalProperties": false
+    },
+    "pr_state": {
+      "type": "object",
+      "properties": {
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id"
+        },
+        "state": {
+          "$ref": "#/$defs/pr_state_name"
+        },
+        "waiting_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/waiting_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "block": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/block"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "head_ref": {
+          "$ref": "#/$defs/branch"
+        },
+        "base_ref": {
+          "$ref": "#/$defs/branch"
+        },
+        "is_fork": {
+          "type": "boolean"
+        },
+        "base_agent": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/agent_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unhandled": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "seen": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ineligible": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "edited": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/pending_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated": {
+          "$ref": "#/$defs/ts"
+        }
+      },
+      "required": [
+        "pr",
+        "repo",
+        "state",
+        "waiting_reason",
+        "block",
+        "head_sha",
+        "head_ref",
+        "base_ref",
+        "is_fork",
+        "base_agent",
+        "rounds",
+        "unhandled",
+        "seen",
+        "ineligible",
+        "edited",
+        "pending_id",
+        "updated"
+      ],
+      "additionalProperties": false
+    },
+    "reply": {
+      "type": "object",
+      "properties": {
+        "comment_id": {
+          "$ref": "#/$defs/comment_id"
+        },
+        "thread_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/thread_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "Agent-written reply, sanitized.",
+          "x-untrusted": true
+        },
+        "dedupe_key": {
+          "$ref": "#/$defs/reply_dedupe_key"
+        },
+        "status": {
+          "$ref": "#/$defs/reply_status"
+        },
+        "status_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/reply_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "threaded": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      },
+      "required": [
+        "comment_id",
+        "thread_id",
+        "body",
+        "dedupe_key",
+        "status",
+        "status_reason",
+        "threaded",
+        "sha256"
+      ],
+      "additionalProperties": false
+    },
+    "pending": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/pending_id"
+        },
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "repo": {
+          "$ref": "#/$defs/repo_id"
+        },
+        "round": {
+          "$ref": "#/$defs/round_id"
+        },
+        "head_sha": {
+          "$ref": "#/$defs/sha"
+        },
+        "head_ref": {
+          "$ref": "#/$defs/branch"
+        },
+        "base_ref": {
+          "$ref": "#/$defs/branch"
+        },
+        "agent_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/agent_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "throwaway_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/throwaway_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "changed_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "deleted_files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/path"
+          },
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "commit_message": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Agent-written commit message, sanitized.",
+          "x-untrusted": true
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/reply"
+          },
+          "maxItems": 1000
+        },
+        "diff_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "diff_stats": {
+          "$ref": "#/$defs/diff_stats"
+        },
+        "diff_file_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "removed_line_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/flag"
+          },
+          "maxItems": 101
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "no_reply_comment_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/comment_id"
+          },
+          "uniqueItems": true
+        },
+        "commit_shas": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sha"
+          },
+          "uniqueItems": true,
+          "maxItems": 1000
+        },
+        "commit_sha": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "moved_head": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redone_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clean_throwaway_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/throwaway_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "push_started_at": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ts"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "edited": {
+          "type": "boolean"
+        },
+        "state": {
+          "$ref": "#/$defs/pending_state"
+        },
+        "created": {
+          "$ref": "#/$defs/ts"
+        },
+        "expires": {
+          "$ref": "#/$defs/ts"
+        }
+      },
+      "required": [
+        "id",
+        "pr",
+        "repo",
+        "round",
+        "head_sha",
+        "head_ref",
+        "base_ref",
+        "agent_id",
+        "throwaway_id",
+        "changed_files",
+        "deleted_files",
+        "commit_message",
+        "replies",
+        "diff_sha256",
+        "diff_stats",
+        "diff_file_sha256",
+        "message_sha256",
+        "removed_line_count",
+        "flags",
+        "content_sha256",
+        "no_reply_comment_ids",
+        "commit_shas",
+        "commit_sha",
+        "moved_head",
+        "redone_at",
+        "clean_throwaway_id",
+        "push_started_at",
+        "edited",
+        "state",
+        "created",
+        "expires"
+      ],
+      "additionalProperties": false,
+      "description": "A pending confirmation. Free text appears only in fields marked x-untrusted."
+    },
+    "pending_row": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/pending_id"
+        },
+        "tool": {
+          "const": "review-respond"
+        },
+        "action": {
+          "$ref": "#/$defs/pending_action"
+        },
+        "target": {
+          "$ref": "#/$defs/pr"
+        },
+        "created": {
+          "$ref": "#/$defs/ts"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "A fixed phrase with counts, never agent text."
+        },
+        "expires": {
+          "$ref": "#/$defs/ts"
+        },
+        "state": {
+          "$ref": "#/$defs/pending_state"
+        },
+        "pr": {
+          "$ref": "#/$defs/pr"
+        },
+        "diff_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "files_changed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "reply_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "tool",
+        "action",
+        "target",
+        "created",
+        "summary",
+        "expires",
+        "state",
+        "pr",
+        "diff_sha256",
+        "content_sha256",
+        "files_changed",
+        "reply_count"
+      ],
+      "additionalProperties": false
+    },
+    "comment_record": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/comment_id"
+        },
+        "author_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "x-untrusted": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "eligible": {
+          "type": "boolean"
+        },
+        "reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ineligible_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/comment_state"
+        },
+        "delivered_sha256": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivered_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/delivered_from"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "handled_reason": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/handled_reason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "first_seen_at": {
+          "$ref": "#/$defs/ts"
+        },
+        "edited": {
+          "type": "boolean"
+        },
+        "thread_id": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/thread_id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "x-untrusted": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "body": {
+          "type": "string",
+          "maxLength": 65536,
+          "description": "Comment text, sanitized.",
+          "x-untrusted": true
+        }
+      },
+      "required": [
+        "id",
+        "author_id",
+        "eligible",
+        "reason",
+        "state",
+        "delivered_sha256",
+        "delivered_from",
+        "handled_reason",
+        "first_seen_at",
+        "edited",
+        "thread_id",
+        "path",
+        "line",
+        "body"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

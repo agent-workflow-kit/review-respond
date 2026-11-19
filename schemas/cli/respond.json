@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/respond.json",
+  "title": "respond --json",
+  "description": "round is the started round; null on a dry run, where comment_ids names what would be answered.",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "round": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/round"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "comment_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/comment_id"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "dry_run",
+    "round",
+    "comment_ids"
+  ],
+  "additionalProperties": false
+}

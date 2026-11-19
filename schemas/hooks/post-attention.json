@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/hooks/post-attention.json",
+  "title": "post-attention hook payload (stdin)",
+  "description": "Something needs a human. Fires once per cause; at least once, deduplicate by event_id. No text.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-respond"
+    },
+    "hook": {
+      "const": "post-attention"
+    },
+    "object_type": {
+      "$ref": "../defs.json#/$defs/object_type"
+    },
+    "object_id": {
+      "anyOf": [
+        {
+          "$ref": "../defs.json#/$defs/round_id"
+        },
+        {
+          "$ref": "../defs.json#/$defs/pending_id"
+        },
+        {
+          "$ref": "../defs.json#/$defs/pr"
+        }
+      ]
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
+    "reason": {
+      "$ref": "../defs.json#/$defs/attention_reason"
+    },
+    "details": {
+      "type": "object",
+      "properties": {
+        "round_id": {
+          "$ref": "../defs.json#/$defs/round_id"
+        },
+        "cause": {
+          "enum": [
+            "agent",
+            "hook"
+          ]
+        },
+        "failure_reason": {
+          "$ref": "../defs.json#/$defs/failure_reason"
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_id": {
+          "$ref": "../defs.json#/$defs/pending_id"
+        },
+        "head_sha": {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        "comment_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_id": {
+          "$ref": "../defs.json#/$defs/agent_id"
+        },
+        "pr": {
+          "$ref": "../defs.json#/$defs/pr"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "description": "Closed keys per reason (see the interface); ids, enums and counts, never text."
+    },
+    "dedupe_key": {
+      "$ref": "../defs.json#/$defs/dedupe_key"
+    },
+    "reads_third_party": {
+      "type": "boolean"
+    },
+    "tainted": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "event_id",
+    "reason",
+    "details",
+    "dedupe_key",
+    "reads_third_party",
+    "tainted"
+  ],
+  "additionalProperties": false
+}

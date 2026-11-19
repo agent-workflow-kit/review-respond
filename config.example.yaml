@@ -1,3 +1,134 @@
-# Example config for review-respond. Location: ~/.config/review-respond/config.yaml (drop-ins: config.d/*.yaml). Keys are defined in docs/interface.md once designed.
-hooks: {}
-# token_env: ...
+# review-respond example configuration. Location: ~/.config/review-respond/config.yaml
+# (drop-ins in config.d/). Every key is shown with its default; delete what you do not change.
+# Precedence: flags > repos.<id> > environment > config > defaults. Unknown keys are refused.
+# A few keys can also be set as REVIEW_RESPOND_<KEY> (see the interface, Environment variables); jobs never see them.
+# Durations: an integer and a unit (ms, s, m, h, d).
+
+me:
+  name: me                 # your name for audit and the commit trailer; defaults to the OS username
+  accounts: {}             # optional per-host account ids, for example git.example.test: "12345"; otherwise forgectl whoami
+
+# Credentials for the push, per host: the name of an environment variable or an argv list
+# that prints the token. The value is never stored in config.
+hosts:
+  git.example.test:
+    token_env: EXAMPLE_PUSH_TOKEN
+    # token_command: ["/usr/local/bin/print-token", "git.example.test"]
+
+# Hosts whose PRs `check` lists. Default when omitted: the hosts that `forgectl whoami` lists with a credential.
+hosts_to_check:
+  - git.example.test
+
+reviewers: []              # <host>:<account id> entries whose comments are always eligible (a per-repo list replaces this one)
+bot_authors: []            # <host>:<account id> entries treated as bots
+respond_to_own_comments_prefix: null   # opt-in prefix that admits your own comments, for example "/awkit"
+
+settle: 5m                 # minimum age of the newest eligible comment before a round starts
+max_rounds: 3              # counted rounds per PR
+pending_ttl: 7d            # lifetime of a pending confirmation
+access_cache_ttl: 1h       # cache of forgectl access answers
+prefer_owner: ticket-work  # preferred owner label when several agents match a PR
+resolve_after_confirm: false   # resolve replied threads after a confirm
+
+# Paths that make a confirm need --allow-sensitive (binary paths, oversized diffs and known token prefixes need it too).
+# This list matches review-watch's default off_limits list.
+off_limits:
+  - ".github/**"
+  - ".gitlab-ci.yml"
+  - ".gitlab/**"
+  - ".circleci/**"
+  - "Jenkinsfile"
+  - "azure-pipelines.yml"
+  - "Dockerfile*"
+  - "docker-compose*"
+  - "Makefile"
+  - "GNUmakefile"
+  - "**/.husky/**"
+  - ".pre-commit-config.yaml"
+  - ".gitmodules"
+  - "**/.claude/**"
+  - "**/.cursor/**"
+  - "**/.gemini/**"
+  - "**/.codex/**"
+  - ".mcp.json"
+  - "CLAUDE*.md"
+  - "AGENTS.md"
+  - "GEMINI.md"
+  - ".cursorrules"
+  - ".windsurfrules"
+  - ".clinerules"
+  - "**/.vscode/**"
+  - "**/.devcontainer/**"
+  - "**/.zed/**"
+  - ".envrc"
+  - ".gitattributes"
+  - "CODEOWNERS"
+  - "**/auth/**"
+  - "**/security/**"
+  - "**/secrets/**"
+  - "**/crypto/**"
+  - "*.pem"
+  - "*.key"
+  - ".env"
+  - ".env.*"
+
+# Per-call safety settings for the respond session.
+skill: respond-to-review
+permission_profile: null   # a path replaces the bundled profile
+sandbox: required          # required, preferred or off (the last two warn)
+setting_sources: ""        # passed as --setting-sources; empty loads none
+env_allowlist: []          # variable names passed with --env-allowlist-only (an empty list passes an empty value)
+model: null
+agent:
+  timeout: null            # per-run timeout passed to agent-spawn; null keeps its default
+
+jobs:
+  queue: respond           # jobsctl queue
+  kill_grace: 125s
+  max_running: 1           # queued plus running rounds over all PRs, with and without jobsctl
+  pass_env: []             # variable names passed to the job (with jobsctl their values come from jobsctl's env_file)
+
+git:
+  user_name: null          # null reads your global git config
+  user_email: null
+  trailer: "Assisted-by: review-respond (confirmed by <me.name>)"   # a non-empty string, always the last paragraph
+
+limits:
+  requests_per_host: 120   # forgectl requests per host and pass
+  prompt_bytes: 65536      # bytes per prompt
+  reply_bytes: 8192        # bytes per reply
+  diff_bytes: 262144       # a stored diff over this size needs --allow-sensitive
+
+attention:
+  ineligible_comment: false   # fire post-attention for the first ineligible comment of a PR
+
+retention:
+  records: 30d             # prune age
+
+cron:
+  env_file: null           # sourced before check in the cron line, for example ~/.config/review-respond/env
+
+# Hooks: pre-round and pre-push may veto (non-zero exit) or escalate (exit 13); the post
+# hooks cannot veto. Each entry: cmd (run with sh -c), timeout (a duration or seconds,
+# default 30), async (post hooks only). Payloads are JSON on stdin and never hold text.
+hooks:
+  pre-round: []
+  pre-push: []
+  post-pending: []
+  post-attention: []
+  post-confirm: []
+  # post-attention:
+  #   - cmd: "notify-send review-respond"
+  #     timeout: 30
+  #     async: true
+
+# Per-repo overrides, keyed by repo id (host/<full project path>).
+repos:
+  git.example.test/team/service:
+    respond_fresh: false   # opt this repo's PRs with no original agent into a fresh session
+    respond:
+      allow_commands: []   # argv patterns for test and build commands, for example [["make", "test"]]
+      read_dirs: []        # extra directories the session may read
+    settle: 5m
+    max_rounds: 3
+    reviewers: []          # replaces the global reviewers list for this repo

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/reject.json",
+  "title": "reject --json",
+  "type": "object",
+  "properties": {
+    "dry_run": {
+      "type": "boolean"
+    },
+    "pending_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "state": {
+      "$ref": "../defs.json#/$defs/pending_state"
+    },
+    "redo": {
+      "type": "boolean"
+    },
+    "comments_unhandled": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "noop": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "dry_run",
+    "pending_id",
+    "state",
+    "redo",
+    "comments_unhandled",
+    "noop"
+  ],
+  "additionalProperties": false
+}

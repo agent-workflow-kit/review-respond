@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/cli/check.json",
+  "title": "check --json",
+  "type": "object",
+  "properties": {
+    "already_running": {
+      "type": "boolean"
+    },
+    "dry_run": {
+      "type": "boolean"
+    },
+    "prs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "pr": {
+            "$ref": "../defs.json#/$defs/pr"
+          },
+          "state": {
+            "$ref": "../defs.json#/$defs/pr_state_name"
+          },
+          "started_round": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/round_id"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lease_held": {
+            "type": "boolean"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "../defs.json#/$defs/error_code"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "pr",
+          "state",
+          "started_round",
+          "lease_held",
+          "errors"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "hosts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "host": {
+            "$ref": "../defs.json#/$defs/host"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "code": {
+            "oneOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            },
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "host",
+          "ok",
+          "code",
+          "warnings"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "error": {
+      "$ref": "../defs.json#/$defs/error_body"
+    }
+  },
+  "required": [
+    "already_running",
+    "dry_run",
+    "prs",
+    "hosts"
+  ],
+  "additionalProperties": false
+}

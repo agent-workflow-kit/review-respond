@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/hooks/post-confirm.json",
+  "title": "post-confirm hook payload (stdin)",
+  "description": "After a confirm reached done. At least once; deduplicate by event_id. Carries reads_third_party and tainted like the other post hooks.",
+  "type": "object",
+  "properties": {
+    "tool": {
+      "const": "review-respond"
+    },
+    "hook": {
+      "const": "post-confirm"
+    },
+    "object_type": {
+      "const": "pending"
+    },
+    "object_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "repo": {
+      "$ref": "../defs.json#/$defs/repo_id"
+    },
+    "labels": {
+      "$ref": "../defs.json#/$defs/labels"
+    },
+    "event_id": {
+      "$ref": "../defs.json#/$defs/event_id"
+    },
+    "pending_id": {
+      "$ref": "../defs.json#/$defs/pending_id"
+    },
+    "pr": {
+      "$ref": "../defs.json#/$defs/pr"
+    },
+    "commit_sha": {
+      "oneOf": [
+        {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pushed": {
+      "type": "boolean"
+    },
+    "replies_posted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "replies_skipped": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "dedupe_key": {
+      "$ref": "../defs.json#/$defs/dedupe_key"
+    },
+    "reads_third_party": {
+      "type": "boolean"
+    },
+    "tainted": {
+      "const": true
+    }
+  },
+  "required": [
+    "tool",
+    "hook",
+    "object_type",
+    "object_id",
+    "repo",
+    "labels",
+    "event_id",
+    "pending_id",
+    "pr",
+    "commit_sha",
+    "pushed",
+    "replies_posted",
+    "replies_skipped",
+    "dedupe_key",
+    "reads_third_party",
+    "tainted"
+  ],
+  "additionalProperties": false
+}

@@ -1,47 +1,189 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "review-respond/audit",
+  "$id": "review-respond/audit.json",
   "title": "review-respond audit.jsonl record",
-  "description": "Audit record for review-respond. Whether this tool writes audit records is decided in its design session (architecture §14).",
+  "description": "Public, append-only. One record pair per external action: phase attempted, then phase outcome, sharing attempt_id. Human decisions are single outcome records. No text from a host or a model.",
   "type": "object",
   "properties": {
     "ts": {
+      "$ref": "defs.json#/$defs/ts"
+    },
+    "phase": {
+      "enum": [
+        "attempted",
+        "outcome"
+      ]
+    },
+    "attempt_id": {
       "type": "string",
-      "format": "date-time"
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "description": "128 random bits, URL-safe base64 without padding."
     },
     "actor": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/actor"
     },
     "decision_id": {
       "oneOf": [
         {
-          "type": "string"
+          "$ref": "defs.json#/$defs/decision_id"
         },
         {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+          "$ref": "defs.json#/$defs/decision_ids"
+        },
+        {
+          "type": "null"
         }
       ]
     },
     "target": {
-      "type": "string"
+      "$ref": "defs.json#/$defs/pr"
     },
     "action": {
-      "type": "string"
+      "enum": [
+        "push",
+        "reply",
+        "resolve",
+        "confirm",
+        "reject",
+        "edit",
+        "drop_reply",
+        "stop",
+        "teardown"
+      ]
     },
     "inputs": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "head_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "diff_sha256": {
+          "$ref": "defs.json#/$defs/sha256"
+        },
+        "commit_sha": {
+          "$ref": "defs.json#/$defs/sha"
+        },
+        "pending_id": {
+          "$ref": "defs.json#/$defs/pending_id"
+        },
+        "round": {
+          "$ref": "defs.json#/$defs/round_id"
+        },
+        "comment_id": {
+          "$ref": "defs.json#/$defs/comment_id"
+        },
+        "config_sha256": {
+          "$ref": "defs.json#/$defs/sha256"
+        },
+        "actor_source": {
+          "enum": [
+            "flag",
+            "tty",
+            "default"
+          ]
+        },
+        "override_escalation": {
+          "type": "boolean"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
     },
-    "result": {}
+    "result": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "status": {
+              "enum": [
+                "ok",
+                "failed",
+                "refused",
+                "vetoed",
+                "escalated",
+                "noop"
+              ]
+            },
+            "exit_code": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "oneOf": [
+                {
+                  "$ref": "defs.json#/$defs/error_reason"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "comment_id": {
+              "oneOf": [
+                {
+                  "$ref": "defs.json#/$defs/comment_id"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "commit_sha": {
+              "oneOf": [
+                {
+                  "$ref": "defs.json#/$defs/sha"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lower_code": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "lower_reason": {
+              "oneOf": [
+                {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
   },
   "required": [
     "ts",
+    "phase",
+    "attempt_id",
     "actor",
+    "decision_id",
     "target",
     "action",
+    "inputs",
     "result"
   ],
-  "additionalProperties": true
+  "additionalProperties": false
 }
