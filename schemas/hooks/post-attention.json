@@ -54,10 +54,6 @@
         "failure_reason": {
           "$ref": "../defs.json#/$defs/failure_reason"
         },
-        "attempts": {
-          "type": "integer",
-          "minimum": 0
-        },
         "rounds": {
           "type": "integer",
           "minimum": 0

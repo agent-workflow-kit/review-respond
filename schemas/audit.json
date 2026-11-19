@@ -81,6 +81,9 @@
             "tty",
             "default"
           ]
+        },
+        "override_escalation": {
+          "type": "boolean"
         }
       },
       "required": [],

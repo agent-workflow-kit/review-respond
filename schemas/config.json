@@ -270,7 +270,7 @@
           "minimum": 1,
           "maximum": 64,
           "default": 1,
-          "description": "Used without jobsctl."
+          "description": "Bounds queued plus running rounds over all PRs, with and without jobsctl."
         },
         "pass_env": {
           "type": "array",
@@ -346,6 +346,13 @@
           "minimum": 1,
           "maximum": 65536,
           "default": 8192
+        },
+        "diff_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 268435456,
+          "default": 262144,
+          "description": "A stored diff over this size needs --allow-sensitive."
         }
       },
       "required": [],

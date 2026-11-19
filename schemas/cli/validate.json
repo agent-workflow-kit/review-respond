@@ -89,6 +89,9 @@
                 "type": "null"
               }
             ]
+          },
+          "skipped": {
+            "type": "boolean"
           }
         },
         "required": [

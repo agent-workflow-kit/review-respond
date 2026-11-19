@@ -37,8 +37,7 @@
           "errors": {
             "type": "array",
             "items": {
-              "type": "string",
-              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              "$ref": "../defs.json#/$defs/error_code"
             },
             "uniqueItems": true
           }
@@ -92,6 +91,9 @@
         ],
         "additionalProperties": false
       }
+    },
+    "error": {
+      "$ref": "../defs.json#/$defs/error_body"
     }
   },
   "required": [

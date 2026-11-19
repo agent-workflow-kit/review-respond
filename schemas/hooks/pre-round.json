@@ -30,10 +30,6 @@
       "type": "integer",
       "minimum": 1
     },
-    "attempt": {
-      "type": "integer",
-      "minimum": 1
-    },
     "head_sha": {
       "$ref": "../defs.json#/$defs/sha"
     },
@@ -60,7 +56,6 @@
     "labels",
     "pr",
     "round_number",
-    "attempt",
     "head_sha",
     "comment_count",
     "trigger",

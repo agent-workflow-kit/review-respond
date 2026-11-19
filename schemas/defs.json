@@ -203,7 +203,6 @@
         "pending",
         "pushing",
         "pushed",
-        "posting",
         "done",
         "rejected",
         "expired",
@@ -224,6 +223,29 @@
         "resolved"
       ]
     },
+    "delivered_from": {
+      "enum": [
+        "seen",
+        "unhandled"
+      ]
+    },
+    "ineligible_detail": {
+      "enum": [
+        "not_yours",
+        "fork_pr",
+        "default_branch"
+      ],
+      "description": "The closed details.reason of an ineligible refusal."
+    },
+    "flag_cause": {
+      "enum": [
+        "off_limits",
+        "binary",
+        "oversized",
+        "long_line",
+        "secret_pattern"
+      ]
+    },
     "ineligible_reason": {
       "enum": [
         "own",
@@ -232,15 +254,14 @@
         "no_access",
         "unknown_access",
         "resolved",
-        "minimized",
-        "closed",
-        "fork_pr"
+        "minimized"
       ]
     },
     "waiting_reason": {
       "enum": [
         "escalated",
         "failed",
+        "stopped",
         "round_limit",
         "hook_vetoed",
         "hook_escalated",
@@ -253,7 +274,9 @@
       "enum": [
         "escalated",
         "failed",
+        "stopped",
         "round_limit",
+        "no_agent",
         "hook_vetoed",
         "hook_escalated"
       ]
@@ -262,7 +285,8 @@
       "enum": [
         "stopped",
         "pr_closed",
-        "nothing_to_respond"
+        "nothing_to_respond",
+        "read_failed"
       ]
     },
     "failure_detail": {
@@ -368,7 +392,7 @@
         "unknown"
       ]
     },
-    "reply_skip_reason": {
+    "reply_reason": {
       "enum": [
         "comment_deleted",
         "thread_resolved",
@@ -481,7 +505,30 @@
         },
         "details": {
           "type": "object",
-          "description": "Ids, enums and counts; free object."
+          "description": "Ids, enums and counts. reason (ineligible_detail) for an ineligible refusal; cause for diff_changed (expect_mismatch, recomputed, path_state) and remote_moved (retry); causes (flag_cause) for sensitive_paths; ref_missing for remote_moved.",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/ineligible_detail"
+            },
+            "cause": {
+              "enum": [
+                "expect_mismatch",
+                "recomputed",
+                "path_state",
+                "retry"
+              ]
+            },
+            "causes": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/flag_cause"
+              },
+              "uniqueItems": true
+            },
+            "ref_missing": {
+              "type": "boolean"
+            }
+          }
         },
         "lower_error": {
           "$ref": "#/$defs/lower_error"
@@ -516,6 +563,45 @@
       ],
       "additionalProperties": false
     },
+    "flag": {
+      "type": "object",
+      "properties": {
+        "where": {
+          "oneOf": [
+            {
+              "type": "string",
+              "maxLength": 4096,
+              "description": "A path, commit_message or a reply's comment id.",
+              "x-untrusted": true
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cause": {
+          "$ref": "#/$defs/flag_cause"
+        },
+        "line": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "where",
+        "cause",
+        "line"
+      ],
+      "additionalProperties": false,
+      "description": "One reason the confirm needs --allow-sensitive."
+    },
     "failure": {
       "type": "object",
       "properties": {
@@ -547,22 +633,11 @@
         },
         "set_at": {
           "$ref": "#/$defs/ts"
-        },
-        "hook": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/hook_name"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "required": [
         "reason",
-        "set_at",
-        "hook"
+        "set_at"
       ],
       "additionalProperties": false
     },
@@ -576,10 +651,6 @@
           "$ref": "#/$defs/pr"
         },
         "number": {
-          "type": "integer",
-          "minimum": 1
-        },
-        "attempt": {
           "type": "integer",
           "minimum": 1
         },
@@ -666,6 +737,51 @@
             }
           ]
         },
+        "include_existing": {
+          "type": "boolean"
+        },
+        "escalation": {
+          "oneOf": [
+            {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "x-untrusted": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "summary": {
+                  "oneOf": [
+                    {
+                      "type": "string",
+                      "maxLength": 4096,
+                      "x-untrusted": true
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "reason",
+                "summary"
+              ],
+              "additionalProperties": false,
+              "description": "The agent's question at an escalation; agent-written and untrusted."
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "failure": {
           "oneOf": [
             {
@@ -709,7 +825,6 @@
         "id",
         "pr",
         "number",
-        "attempt",
         "state",
         "head_sha",
         "agent_id",
@@ -721,6 +836,8 @@
         "cancel_requested_at",
         "cancel_reason",
         "note_sha256",
+        "include_existing",
+        "escalation",
         "failure",
         "started",
         "ended",
@@ -868,7 +985,7 @@
         "status_reason": {
           "oneOf": [
             {
-              "$ref": "#/$defs/reply_skip_reason"
+              "$ref": "#/$defs/reply_reason"
             },
             {
               "type": "null"
@@ -1004,21 +1121,15 @@
           "type": "integer",
           "minimum": 0
         },
-        "sensitive_paths": {
+        "flags": {
           "type": "array",
           "items": {
-            "$ref": "#/$defs/path"
+            "$ref": "#/$defs/flag"
           },
-          "maxItems": 1000,
-          "uniqueItems": true
+          "maxItems": 4000
         },
-        "binary_paths": {
-          "type": "array",
-          "items": {
-            "$ref": "#/$defs/path"
-          },
-          "maxItems": 1000,
-          "uniqueItems": true
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
         },
         "no_reply_comment_ids": {
           "type": "array",
@@ -1027,15 +1138,13 @@
           },
           "uniqueItems": true
         },
-        "escalated_by": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/hook_name"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "commit_shas": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sha"
+          },
+          "uniqueItems": true,
+          "maxItems": 1000
         },
         "commit_sha": {
           "oneOf": [
@@ -1047,7 +1156,17 @@
             }
           ]
         },
-        "commit_date": {
+        "moved_head": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sha"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redone_at": {
           "oneOf": [
             {
               "$ref": "#/$defs/ts"
@@ -1109,12 +1228,13 @@
         "diff_file_sha256",
         "message_sha256",
         "removed_line_count",
-        "sensitive_paths",
-        "binary_paths",
+        "flags",
+        "content_sha256",
         "no_reply_comment_ids",
-        "escalated_by",
+        "commit_shas",
         "commit_sha",
-        "commit_date",
+        "moved_head",
+        "redone_at",
         "clean_throwaway_id",
         "push_started_at",
         "edited",
@@ -1167,6 +1287,9 @@
             }
           ]
         },
+        "content_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
         "files_changed": {
           "type": "integer",
           "minimum": 0
@@ -1187,6 +1310,7 @@
         "state",
         "pr",
         "diff_sha256",
+        "content_sha256",
         "files_changed",
         "reply_count"
       ],
@@ -1231,6 +1355,16 @@
           "oneOf": [
             {
               "$ref": "#/$defs/sha256"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "delivered_from": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/delivered_from"
             },
             {
               "type": "null"
@@ -1300,6 +1434,7 @@
         "reason",
         "state",
         "delivered_sha256",
+        "delivered_from",
         "handled_reason",
         "first_seen_at",
         "edited",

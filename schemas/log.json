@@ -296,10 +296,6 @@
             "job_resolved",
             "teardown"
           ]
-        },
-        "attempt": {
-          "type": "integer",
-          "minimum": 0
         }
       },
       "required": [
@@ -374,7 +370,8 @@
             "acquired",
             "released",
             "taken_over",
-            "lost"
+            "lost",
+            "stalled"
           ]
         },
         "pr": {

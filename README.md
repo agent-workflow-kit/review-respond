@@ -15,18 +15,18 @@ L3 (workflow)
 - Finds your open PRs on the hosts you configure and reads their comments through forgectl. Only comments from reviewers you list or from accounts with write access start work; your own comments, bots and everyone else's are recorded and never shown to the agent. Review bodies are not read in 0.x (a review's inline comments are), and a PR whose head lives in a fork gets no round of any kind.
 - Waits for a short quiet period, then runs one round per PR: it creates a throwaway checkout at the PR head and forks the PR's agent session into it, with the eligible comments as fenced data. The fork cannot stage, commit, push or reach the network.
 - The fork edits files and reports replies, the files it changed or deleted and a proposed commit message. That becomes a pending confirmation with the diff computed in a clean checkout.
-- `confirm` acts only on what you saw: it rebuilds the clean checkout, refuses if the diff changed, commits with your identity through hardened git, pushes fast-forward only to the PR head ref and then posts the replies through pr-comment.
+- `confirm` acts only on what you saw: it rebuilds the clean checkout, refuses if the diff changed or the content hash you saw differs, commits with your identity through hardened git, pushes fast-forward only to the PR head ref and then posts the replies through pr-comment.
 - Every reply and push needs your `confirm`. Automatic replies and pushes are planned for a later version.
 
 ## Commands
 
 ```text
 review-respond check
-review-respond respond <pr> [--force] [--include-existing] [--note-file F]
-review-respond list
-review-respond show <pr | round | pending id>
+review-respond respond <pr> [--force] [--include-existing] [--note-file F] [--skill S] [--mode headless|interactive] [--override-escalation]
+review-respond list [--state S] [--repo ID] [--waiting]
+review-respond show <pr | round id | pending id>
 review-respond pending
-review-respond confirm <id>  (alias: approve)
+review-respond confirm <id> [--allow-sensitive] [--expect SHA] [--override-escalation]  (alias: approve)
 review-respond reject <id> [--redo]
 review-respond edit <id> [--reply COMMENT_ID --body-file F] [--message-file F]
 review-respond drop-reply <id> <comment_id>
@@ -61,7 +61,7 @@ uv tool install git+https://github.com/agent-workflow-kit/review-respond
 
 ## Configuration
 
-`~/.config/review-respond/config.yaml` (plus `config.d/*.yaml`), documented key by key in `config.example.yaml`. Credentials for the push are named in config (`hosts.<host>.token_env` or `token_command`) and read from the environment. Environment overrides use `REVIEW_RESPOND_<KEY>` for top-level scalars.
+`~/.config/review-respond/config.yaml` (plus `config.d/*.yaml`), documented key by key in `config.example.yaml`. Credentials for the push are named in config (`hosts.<host>.token_env` or `token_command`) and read from the environment. Environment overrides: the interface's Environment variables section lists the few keys `REVIEW_RESPOND_<KEY>` can set.
 
 ## Hooks
 
