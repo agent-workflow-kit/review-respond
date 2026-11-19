@@ -17,7 +17,7 @@ review-respond works standalone: forgectl, agent-spawn, pr-comment, wtctl and gi
 | Tool | Binding | Used for | Minimum |
 |---|---|---|---|
 | forgectl | A | `prs`, `show`, `comments`, `access`, `whoami`, `compare` | 0.55.2 |
-| agent-spawn | A | `list`, `show`, `resume --fork`, `launch`, `wait`, `stop`, `teardown` | 0.30.0 |
+| agent-spawn | A | `list`, `show`, `resume --fork`, `launch`, `wait`, `stop`, `teardown`; `--no-implicit-done` on `resume --fork` and `launch` | 0.34.0 |
 | pr-comment | A | `reply`, `resolve` | 0.33.0 |
 | wtctl | A | `create --throwaway`, `extract`, `locate` (for `fetch_url`), `remove`, `list`, `label add`, `show` | 0.31.0 |
 | claude-session | A, `validate` only | `kinds --kind respond --json` (the sandbox probe) | 0.45.2 |
@@ -347,7 +347,7 @@ One table maps every exit of `resume`, `launch` and `wait`, with the result's `p
 | 12 | the same, any other case | `failed` | `launch_failed` | no | 12 |
 | 13 | session phase (report `blocked` or `needs-input`) | `escalated` | | yes | 13 |
 | 13 | launch phase (envelope `code: escalated`, a lower hook) | `escalated` (`details.cause: hook`) | | no | 13 |
-| 14 | `exited-unreported` | `failed` | `unreported` | yes | 12 |
+| 14 | `exited-unreported`, after agent-spawn's single automatic report resume (the resumed run's outcome maps by its own row) or when none ran | `failed` | `unreported` | yes | 12 |
 | 15 | `killed` with end reason `stopped` or `forwarded_*` and `cancel_requested_at` set | `canceled` | | yes | 0 |
 | 15 | `killed`, any other case | `failed` | `agent_failed` | yes | 12 |
 | 16 | `timeout` | `failed` | `timeout` | yes | 12 |
@@ -460,7 +460,7 @@ The prompt file lives in the state directory and is deleted when the round ends.
 
 ### Session settings
 
-Every round passes these to agent-spawn per call (design guide section 11), always with `--mode headless` (unless `respond --mode interactive`, unverified in 0.x), `--no-promote`, `--prompt-file`, `--actor auto:review-respond`, `--env-allowlist-only` (with an empty value for an empty list) and, when `agent.timeout` is set, `--timeout`. There is no `--wait`: the job records the agent id and then runs `wait` (Job).
+Every round passes these to agent-spawn per call (design guide section 11), always with `--mode headless` (unless `respond --mode interactive`, unverified in 0.x), `--no-promote`, `--no-implicit-done`, `--prompt-file`, `--actor auto:review-respond`, `--env-allowlist-only` (with an empty value for an empty list) and, when `agent.timeout` is set, `--timeout`. There is no `--wait`: the job records the agent id and then runs `wait` (Job). `--no-implicit-done` is passed on every fork and every fresh launch, because agent-spawn passes it on a resume only when given on that call and a change of `--kind` drops claude-session's carry. It makes a clean headless exit with no report end `exited-unreported` (exit 14, `failure.reason` `unreported`) instead of counting as an implicit `done`; agent-spawn then re-prompts for the report once (its automatic report resume) and the resumed run's outcome is the round's. Artifact validation keeps the `report.implicit` check as a defense: a run whose outcome is an implicit done is `failed` (`implicit_done`).
 
 ```text
 fork:   agent-spawn resume <base agent id> --fork --cwd <throwaway root realpath>
@@ -468,7 +468,7 @@ fork:   agent-spawn resume <base agent id> --fork --cwd <throwaway root realpath
           --prompt-file <prompt file> --permission-profile <generated profile file>
           --sandbox <sandbox> --setting-sources "<setting_sources, comma-joined, empty for none>"
           --env-allowlist-only <VAR> ... | --env-allowlist-only ''
-          [--model <model>] [--timeout <agent.timeout>] --no-promote
+          [--model <model>] [--timeout <agent.timeout>] --no-promote --no-implicit-done
           --label pr=<pr> --label owner=review-respond --label repo=<repo id> --label round=<round id>
           --actor auto:review-respond --json
 fresh:  agent-spawn launch --kind respond --mode headless --worktree none --cwd <throwaway root realpath> --repo <repo id>
