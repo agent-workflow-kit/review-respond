@@ -10,41 +10,47 @@ Respond to review comments on your own pull requests, with fixes and replies you
 
 | Tool | Binding | Why |
 |---|---|---|
-| forgectl | A | reads (open PRs, comments, PR facts, access, CI, identity); never writes |
-| agent-spawn | A | finds, forks and launches respond agents, reads the frozen artifact, tears forks down |
+| forgectl | A | reads (open PRs, comments, PR facts, access, identity, `compare` to decide an unclear push); never writes |
+| agent-spawn | A | finds, forks and launches respond agents, waits for the run, reads the frozen artifact, tears forks down |
 | pr-comment | A | posts replies and resolves threads (the only writer to the host besides the push) |
-| wtctl | A | round and clean throwaway checkouts, `extract`, `locate`, `remove` |
+| wtctl | A | round and clean throwaway checkouts, `extract`, `locate`, `remove`, `list`, `show`, `label add` |
 | git | A | hardened commit and fast-forward push, in the clean throwaway only |
 | jobsctl | A, optional | queue `respond`; without it a detached `_job` under an internal cap |
-| gatectl | A, optional | gate for the automatic modes |
 
-pr-watch is not used (decision D-2). review-respond does not call claude-session directly: agent-spawn passes the session settings through, and `validate` reads `claude-session kinds --json` only for the sandbox probe.
+pr-watch is not used (decision D-2). gatectl is not used in 0.x (decision D-12). review-respond does not call claude-session directly: agent-spawn passes the session settings through, and `validate` reads `claude-session kinds --json` only for the sandbox probe. Minimum versions of every sibling are in the interface Dependencies table, not here.
 
 ## Decisions
 
 | ID | Decision | Rationale | Interface |
 |---|---|---|---|
 | D-1 | Skill-wrapper tool with one default slot `respond-to-review`, kind `respond`, always a fork, headless by default | architecture section 5.3; spike: the verified path | [Session settings](interface.md#session-settings) |
-| D-2 | Detection uses forgectl only; pr-watch is dropped from Uses | pr-watch is design-only, its events carry no text or edits, and it reports review-respond's own replies; forgectl is needed for text anyway | [Detection](interface.md#detection) |
-| D-3 | Eligibility: not own, not a bot (`null` counts as a bot), `reviewers` or `write_access: true`, open own PR | comments carry no `author_association`, so `access` is the only write-access source | [Eligibility](interface.md#eligibility) |
-| D-4 | Handled set keyed by the full comment id with a body hash; edits re-open, deletions drop, resolved threads leave prompts | `updated_at` alone is noisy on review comments | [Handled set](interface.md#handled-set) |
+| D-2 | Detection uses forgectl only; pr-watch is dropped from Uses | pr-watch is design-only, its events carry no text or edits, and it reports review-respond's own replies; forgectl is needed for text anyway. Every pass reads every open PR, least recently read first, because `updated_at` does not change on every edit, deletion or resolution | [Detection](interface.md#detection) |
+| D-3 | Eligibility: not own, not a bot (`null` counts as a bot), `reviewers` or `write_access: true`, open own PR that is not a fork | comments carry no `author_association`, so `access` is the only write-access source; a `null` author and a minimized comment are ineligible, and the access cache is keyed by author id | [Eligibility](interface.md#eligibility) |
+| D-4 | Handled set keyed by the full comment id with a body hash; edits re-open, deletions drop, resolved threads leave prompts | `updated_at` alone is noisy on review comments; the settle clock is the local time a body hash was first seen, so host clock skew does not matter; comments on PRs created after installation are never treated as pre-existing | [Handled set](interface.md#handled-set) |
 | D-5 | A settle delay, one round per PR, none while a pending confirmation exists, a round limit | reviewers post in bursts; a second round on a stale checkout would fork stale work | [Settle and round start](interface.md#settle-and-round-start) |
 | D-6 | Handled means validated: comments are marked handled in the transaction that records the pending confirmation; `working` only starts the round | the run reaches `working` before the prompt is read, and several failures exit 0 | [Artifact](interface.md#artifact) |
 | D-7 | The diff you review is computed in a clean checkout at record time and recomputed at confirm (`diff_changed`) | no trusted process may run git in an agent-written throwaway | [Stored diff](interface.md#stored-diff) |
-| D-8 | Confirm order: push first, then replies, with an intent state per step | a crash must never repeat a push or lose a reply | [Confirm order](interface.md#confirm-order) |
-| D-9 | Fork lineage: each round forks the last confirmed fork (or the original); a rejected or failed fork is never a base | a fork remembers edits that exist only in an old throwaway | [Fork lineage](interface.md#fork-lineage) |
+| D-8 | Confirm order: push first, then replies, with an intent state per step | a crash must never repeat a push or lose a reply; each record state allows a fixed set of commands, and intent states never expire | [Confirm order](interface.md#confirm-order) |
+| D-9 | Fork lineage: each round forks the last confirmed fork (or the original); a rejected or failed fork is never a base | a fork remembers edits that exist only in an old throwaway; the switch happens in the transaction that records the landed push, and escalated forks are torn down too | [Fork lineage](interface.md#fork-lineage) |
 | D-10 | review-respond owns a hardened-git module; wtctl runs no commit or push | wtctl's git wrapper is internal | [Hardened git](interface.md#hardened-git) |
-| D-11 | Two corrections to the hardened recipe (protocol scheme, shallow file) | verified against git 2.43; the literal recipe breaks pushes | [Hardened git](interface.md#hardened-git) |
-| D-12 | Automatic modes: separate `auto_reply` and `auto_push`, one gate call per round with a closed input, hard rules before and after | architecture section 12.3 | [Automatic modes](interface.md#automatic-modes) |
-| D-13 | One job per round attempt through jobsctl (`--max-retries 0`) or a detached `_job` | the same pattern as the other L3 tools | [Job](interface.md#job) |
-| D-14 | Replies post after the push through pr-comment with a per-comment dedupe key and no head check | its own push moves the head | [Replies](interface.md#replies) |
-| D-15 | The agent is told the throwaway's real path; the artifact echoes a marker from the plugin | the forked conversation names the original paths; a missing skill exits 0 | [Prompt](interface.md#prompt) |
+| D-11 | Five deviations from the hardened recipe: the allowed protocol is the URL's scheme for `push` and `ls-remote` only, the shallow file is the clean checkout's own, pathspecs are literal by environment, `core.sshCommand` is one argument, and review-respond's own diff flags | verified against git 2.43; the literal recipe breaks pushes | [Hardened git](interface.md#hardened-git) |
+| D-12 | Automatic modes are a 1.x item | gatectl is not implemented, and an automatic reply publishes agent text that may carry the forked conversation's secrets with no human look | none in 0.x |
+| D-13 | One job per round attempt through jobsctl (`--max-retries 0`) or a detached `_job` | the same pattern as the other L3 tools; the job records the agent id before it waits, and every fork carries a `round=` label, so a crashed job can be finalized; the job environment is built from scratch in both placements | [Job](interface.md#job) |
+| D-14 | Replies post after the push through pr-comment with a per-comment dedupe key and no head check | its own push moves the head; the key hashes the comment id, which can hold characters the forge key grammar refuses | [Replies](interface.md#replies) |
+| D-15 | The agent is told the throwaway's real path; the artifact echoes a marker from the plugin | the forked conversation names the original paths; a missing skill exits 0, so a wrong or missing marker is an invalid artifact | [Prompt](interface.md#prompt) |
 | D-16 | No TUI in 0.x | a forgectl-style feature inventory is needed first | [TUI](interface.md#tui) |
 | D-17 | Config under XDG as usual (not a home-only tool) | a session cannot reach its config directory (sandbox and profile denies) | [Config](interface.md#config) |
+| D-18 | Round and PR states: terminal `confirmed` and `rejected`; a stored PR block stops escalated, failed, limited and vetoed PRs; a hook escalation creates no round | a PR that waits for a human must not start a round every pass | [Round states](interface.md#round-states) |
+| D-19 | One lease design: `pass`, `pr:` and `round:` leases with one takeover rule; only `check` and `prune` report `already_running` | a contended `confirm` that exits 0 would look done | [Concurrency](interface.md#concurrency) |
+| D-20 | Fork PRs get no round in 0.x; every push also needs the head repository to equal the base repository and a head ref that is not the default branch | the push URL and the head fetch reach the base repository, not the fork; a push would create or advance a branch there | [Eligibility](interface.md#eligibility) |
+| D-21 | The reviewed diff is a full-text, full-index, rename-free diff; binary paths need the same explicit allow as off-limits paths | a NUL byte or a `-diff` attribute hides content from a normal diff; rename detection hides the deleted side of an off-limits path | [Stored diff](interface.md#stored-diff) |
+| D-22 | No file mode is carried from the round | a mode set after the reviewed diff would land unreviewed | [Stored diff](interface.md#stored-diff) |
+| D-23 | The commit message is sanitized by a closed procedure and always ends with review-respond's trailer paragraph | git and the forge read trailers and closing keywords from agent text otherwise | [Commit](interface.md#commit) |
+| D-24 | A pending reply to a deleted inline comment is posted to its thread; one to an edited comment is skipped and the comment re-opens | the reviewer's current text is what gets answered | [Replies](interface.md#replies) |
 
 ## Resolved open topics
 
-The seed's four questions: comment detection (events, cursors and watermarks are replaced by a stored handled set, D-2 and D-4), reply drafting and thread attachment (the agent proposes replies, you edit them, pr-comment attaches them to the comment's thread, D-14), the pending-confirmation format ([Record](interface.md#record)), and the gate input ([Automatic modes](interface.md#automatic-modes)).
+The seed's four questions: comment detection (events and watermarks are replaced by a stored handled set, D-2 and D-4), reply drafting and thread attachment (the agent proposes replies, you edit them, pr-comment attaches them to the comment's thread, D-14), the pending-confirmation format ([Record](interface.md#record)), and the gate input (not needed in 0.x: automatic modes are deferred, D-12).
 
 ## Live verification
 
@@ -57,13 +63,17 @@ The seed's four questions: comment detection (events, cursors and watermarks are
 | V-5 | A fork carries the original conversation; a second round forks the first fork with no extra flags | spike | verified |
 | V-6 | `wtctl remove` of a throwaway exits 0 after the run ended and 20 `in_use` during it; `teardown` is idempotent | spike | verified |
 | V-7 | Interactive forks | needs termctl | unverified |
-| V-8 | `extract` refusals are atomic and exit 12; the executable bit is not carried; `--delete-from` and `--dest` are not checked against the source or to throwaways | spike on git 2.43 | verified (review-respond checks both itself) |
-| V-9 | Hardened-git corrections; push moves and races give three different texts | spike | verified on git 2.43; git 2.34 unverified |
+| V-8 | `extract` refusals are atomic and exit 12; file modes are not carried; `--delete-from` and `--dest` are not checked against the source or to throwaways | spike on git 2.43 | verified (review-respond checks both itself; see Artifact) |
+| V-9 | Hardened-git corrections; push moves and races give three different texts | spike | verified on git 2.43; 2.34 to be run by the `live` suite before 1.0 |
 | V-10 | Planted config in the round throwaway does not affect the clean throwaway | spike | verified |
 | V-11 | forgectl `comments` shape, ids, no `author_association`, no edit flag, `access` costs and nulls | read-only spike on GitHub | verified |
-| V-12 | Deleted comments, `changes_requested` reviews, GitLab behavior, the pr-comment marker in real data | no data found or no host | unverified |
+| V-12 | Deleted comments, GitLab behavior, the pr-comment marker in real data | no data found or no host | unverified |
 | V-13 | A push to a real forge from a shallow clean throwaway | local bare remote only | unverified (live test) |
-| V-14 | pr-comment `reply` and `resolve` | not implemented on main when designed | unverified (a minimum version is pinned) |
+| V-14 | pr-comment `reply` and `resolve` | not in a pr-comment release when designed | unverified (a minimum is pinned once released) |
+| V-15 | `agent-spawn resume --fork` without `--wait` returns the fork id at run start; `wait` returns the outcome | agent-spawn interface | unverified (live test) |
+| V-16 | `--no-promote` keeps an exit-13 respond round headless | agent-spawn interface | unverified (needs a blocked report) |
+| V-17 | A `--porcelain` push to a real forge reports `!` lines for moved and rejected refs; `ls-remote` decides | git documentation | unverified (live test) |
+| V-18 | forgectl `compare` reports `ahead` from a pushed commit to a later head | forgectl interface | unverified (live test) |
 
 Every verified item becomes a `live` or process regression test (Test strategy); every unverified item has a conservative default.
 
@@ -73,8 +83,8 @@ Every verified item becomes a `live` or process regression test (Test strategy);
 |---|---|
 | `cli.py` | argparse, global flags, exit codes, the error envelope |
 | `config.py` | config load and validation, per-repo overrides |
-| `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, gatectl, git) |
-| `store.py` | SQLite access, migrations, compare-and-set, leases |
+| `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, git) |
+| `store.py` | SQLite access, migrations, compare-and-set, the three lease kinds (no separate module) |
 | `detect.py` | listing, comment reads, the eligibility rules, the handled set |
 | `rounds.py` | round states, due checks, lineage, job submission and finalizing |
 | `job.py` | the hidden `_job` command: throwaway, prompt, fork, artifact, stored diff |
@@ -83,7 +93,6 @@ Every verified item becomes a `live` or process regression test (Test strategy);
 | `pending.py` | the pending record, edits, expiry |
 | `confirm.py` | the confirm order, recovery |
 | `hgit.py` | the hardened-git module |
-| `gate.py` | hard rules and the gatectl call |
 | `hooks.py` | hook running and the outbox |
 | `audit.py` | `audit.jsonl` and `log.jsonl` |
 | `cron.py` | the managed crontab block |
@@ -91,19 +100,19 @@ Every verified item becomes a `live` or process regression test (Test strategy);
 
 ## Data model
 
-Tables in `state.db` (additive migrations): `meta`, `prs` (PR key, repo, head, base agent, last read, state), `comments` (PR, comment id, author id, body hash, `updated_at`, state, round, eligibility reason), `rounds` (id, PR, number, attempt, state, `rev`, lease, job id, agent id, throwaway id, failure), `pendings` (id, round, state, `rev`, intent fields, expiry), `replies` (pending, comment id, status, dedupe key), `forks` (agent id, PR, role, state), `access_cache`, `outbox`, `leases`. Text lives in files named by hash under the state directory.
+Tables in `state.db` (additive migrations): `meta`, `meta` (including `installed_at`, the end of the first successful `check` pass), `prs` (PR key, repo, head, base agent, last read, state, `block`), `comments` (PR, comment id, author id, body hash, `delivered_sha256`, `first_seen_at`, `handled_reason`, `updated_at`, state, round, eligibility reason), `rounds` (id, PR, number, attempt, state, `rev`, `cancel_requested_at`, `counted`, job id, agent id, throwaway id, failure), `pendings` (id, round, state, `rev`, intent fields, expiry), `replies` (pending, comment id, status, dedupe key), `forks` (agent id, PR, role, state: base, round, superseded, teardown_pending, torn_down), `access_cache`, `outbox`, `leases` (one row per `pass`, `pr:` and `round:` key). Text lives in files named by hash under the state directory.
 
 ## Concurrency
 
-One instance per state directory (a lock; a second caller exits 0 "already running"). Round and pending transitions are compare-and-set on `rev`. Leases carry the holder's PID, start time and boot id plus a heartbeat and an expiry; a takeover needs the holder verified gone. `check`, `show` and `confirm` finalize idempotently. Two racing `confirm` calls are serialized by the lock and, for the push, by the host's ref lock.
+One lease design for every command, with one takeover rule: see [Concurrency](interface.md#concurrency) (decision D-19). Round and pending transitions are compare-and-set on `rev`; `check`, `show` and `confirm` finalize idempotently.
 
 ## Error handling
 
-A sibling's failure maps to exit 12 with the sibling's error in `lower_error`; a refusal maps to exit 20 with its reason; an unknown outcome (a push or a post that may have landed) is recorded as an intent state and resolved by re-running the same command. A dead sibling never loses a comment: comments are handled only in the transaction that records a validated result.
+A sibling's failure maps to exit 12 with the sibling's error in `lower_error`; a refusal maps to exit 20 with its reason (the exit and error code tables are in [Exit codes](interface.md#exit-codes)); an unknown outcome (a push or a post that may have landed) is recorded as an intent state and resolved by re-running the same command. A dead sibling never loses a comment: comments are handled only in the transaction that records a validated result.
 
 ## Test strategy
 
-All subprocess and HTTP calls go through `gateway.py`; fake binaries for each sibling live in `tests/fakebin/` with pinned copies of the siblings' schemas. Golden files cover every `--json` output and every hook payload. Process tests cover the job, the lease, the confirm intent states and the crash recovery (a kill between each pair of steps). `live` tests (deselected by default, never in CI) cover a real headless fork round, the hardened-git recipe against real git (every vector in architecture section 13.2 rule 10), a push from a shallow clean throwaway to a real forge, and each verified spike behavior above. `make verify` runs ruff, pyright, pytest and markdown lint.
+All subprocess and HTTP calls go through `gateway.py`; fake binaries for each sibling live in `tests/fakebin/` with pinned copies of the siblings' schemas. Golden files cover every `--json` output and every hook payload. Process tests cover the job, the leases, the confirm intent states and the crash recovery (a kill between each pair of steps 4 to 9 of the confirm order, a kill of `_job` between `resume` returning and the agent id record, and SIGTERM of `_job` during `wait`). A glob-named file (`a*.py`) must stage literally. `live` tests (deselected by default, never in CI) cover a real headless fork round, the hardened-git recipe against real git (every vector in architecture section 13.2 rule 10), a push from a shallow clean throwaway to a real forge, each verified spike behavior above, a NUL-byte change and a `-diff` attribute that show in the stored diff, and a rename out of an off-limits path that is refused. `make verify` runs ruff, pyright, pytest and markdown lint.
 
 ## Dependencies justified
 
@@ -111,4 +120,8 @@ All subprocess and HTTP calls go through `gateway.py`; fake binaries for each si
 
 ## Non-goals for 0.x
 
-A TUI, interactive forks, a dollar or per-round cost cap, macOS verification, GitLab write-access verification, and a recipe for wiring pr-watch events to `check` (the harness owns it).
+A TUI, interactive forks, fork PRs, automatic replies and pushes (a 1.x item), review bodies (inline and general comments only), a dollar or per-round cost cap, macOS verification, GitLab write-access verification, and a recipe for wiring pr-watch events to `check` (the harness owns it).
+
+## Deviations from the design session
+
+Review of the first design changed these decisions: fork PRs get no round in 0.x; the automatic modes (`auto_reply`, `auto_push`) and the gatectl dependency moved to 1.x; no file mode is carried from the round; fresh sessions are opted in only by `repos.<id>.respond_fresh`, not by a PR label (anyone with triage rights can set a label); detection has no `updated_since` cursor and reads every open PR each pass; comments on a PR created after installation are answered on first sight; and review-respond's dedupe keys, base switch and label rules were tightened (label values may contain `_` once the siblings accept it, until then such labels are skipped).
