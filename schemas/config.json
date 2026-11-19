@@ -27,7 +27,7 @@
           },
           "additionalProperties": false,
           "default": {},
-          "description": "Optional per-host account ids; otherwise forgectl whoami."
+          "description": "Per-host account ids; default none, so forgectl whoami is used."
         }
       },
       "required": [],
@@ -68,7 +68,7 @@
         "$ref": "#/$defs/host"
       },
       "uniqueItems": true,
-      "description": "Hosts whose PRs check lists. Default: all hosts forgectl knows."
+      "description": "Hosts whose PRs check lists. Default: the hosts that forgectl whoami lists with a credential."
     },
     "reviewers": {
       "type": "array",
@@ -77,7 +77,7 @@
       },
       "uniqueItems": true,
       "default": [],
-      "description": "Entries <host>:<id> whose comments are always eligible."
+      "description": "Entries <host>:<id>, split at the last colon, whose comments are always eligible. repos.<id>.reviewers replaces this list."
     },
     "bot_authors": {
       "type": "array",
@@ -86,7 +86,7 @@
       },
       "uniqueItems": true,
       "default": [],
-      "description": "Extra account ids treated as bots."
+      "description": "Entries <host>:<id> treated as bots."
     },
     "respond_to_own_comments_prefix": {
       "oneOf": [
@@ -129,19 +129,6 @@
       "maxLength": 64,
       "pattern": "^[A-Za-z0-9._-]+$",
       "default": "ticket-work"
-    },
-    "fresh_label": {
-      "oneOf": [
-        {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null
     },
     "resolve_after_confirm": {
       "type": "boolean",
@@ -231,7 +218,8 @@
         "$ref": "#/$defs/env_name"
       },
       "uniqueItems": true,
-      "default": []
+      "default": [],
+      "description": "Names passed with --env-allowlist-only; an empty list passes an empty value."
     },
     "model": {
       "oneOf": [
@@ -290,25 +278,8 @@
             "$ref": "#/$defs/env_name"
           },
           "uniqueItems": true,
-          "default": []
-        }
-      },
-      "required": [],
-      "additionalProperties": false
-    },
-    "gate": {
-      "type": "object",
-      "properties": {
-        "policy": {
-          "$ref": "#/$defs/policy_name",
-          "default": "respond-auto"
-        },
-        "timeout": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 600,
-          "default": 540,
-          "description": "Seconds, passed to gatectl check --timeout."
+          "default": [],
+          "description": "Variable names passed to the job; with jobsctl their values come from jobsctl's env_file."
         }
       },
       "required": [],
@@ -345,18 +316,11 @@
           "default": null
         },
         "trailer": {
-          "oneOf": [
-            {
-              "type": "string",
-              "minLength": 1,
-              "maxLength": 256
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
           "default": "Assisted-by: review-respond (confirmed by <me.name>)",
-          "description": "Null turns the trailer off."
+          "description": "A non-empty string; always the last paragraph of the commit message."
         }
       },
       "required": [],
@@ -370,12 +334,6 @@
           "minimum": 1,
           "maximum": 100000,
           "default": 120
-        },
-        "prompt_comments": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 1000,
-          "default": 50
         },
         "prompt_bytes": {
           "type": "integer",
@@ -640,40 +598,7 @@
             "respond_fresh": {
               "type": "boolean",
               "default": false,
-              "description": "Opt a PR with no original agent into a fresh session."
-            },
-            "auto_reply": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "default": false
-                }
-              },
-              "required": [],
-              "additionalProperties": false,
-              "description": "Post replies without a push or diff behind the gate."
-            },
-            "auto_push": {
-              "type": "object",
-              "properties": {
-                "enabled": {
-                  "type": "boolean",
-                  "default": false
-                },
-                "paths": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/$defs/glob"
-                  },
-                  "uniqueItems": true,
-                  "default": [],
-                  "description": "Allowlist of changed paths; empty means none."
-                }
-              },
-              "required": [],
-              "additionalProperties": false,
-              "description": "Commit, push and reply behind the gate."
+              "description": "Opt the repo's PRs with no original agent into a fresh session."
             },
             "respond": {
               "type": "object",
@@ -764,10 +689,6 @@
       "type": "string",
       "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:[.][a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?$",
       "description": "Lowercase host, optional :port."
-    },
-    "policy_name": {
-      "type": "string",
-      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
     },
     "sandbox_level": {
       "enum": [

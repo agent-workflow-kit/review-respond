@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-respond/audit.json",
   "title": "review-respond audit.jsonl record",
-  "description": "Public, append-only. One record pair per external action: phase attempted, then phase outcome, sharing attempt_id. Human and gate decisions are single outcome records. No text from a host or a model.",
+  "description": "Public, append-only. One record pair per external action: phase attempted, then phase outcome, sharing attempt_id. Human decisions are single outcome records. No text from a host or a model.",
   "type": "object",
   "properties": {
     "ts": {
@@ -16,7 +16,8 @@
     },
     "attempt_id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9._-]{8,64}$"
+      "pattern": "^[A-Za-z0-9_-]{22}$",
+      "description": "128 random bits, URL-safe base64 without padding."
     },
     "actor": {
       "$ref": "defs.json#/$defs/actor"
@@ -45,8 +46,9 @@
         "confirm",
         "reject",
         "edit",
-        "gate_check",
-        "gate_outcome"
+        "drop_reply",
+        "stop",
+        "teardown"
       ]
     },
     "inputs": {
@@ -129,16 +131,6 @@
               "oneOf": [
                 {
                   "$ref": "defs.json#/$defs/sha"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "outcome": {
-              "oneOf": [
-                {
-                  "$ref": "defs.json#/$defs/outcome"
                 },
                 {
                   "type": "null"

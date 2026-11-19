@@ -31,6 +31,9 @@
               }
             ]
           },
+          "lease_held": {
+            "type": "boolean"
+          },
           "errors": {
             "type": "array",
             "items": {
@@ -44,6 +47,7 @@
           "pr",
           "state",
           "started_round",
+          "lease_held",
           "errors"
         ],
         "additionalProperties": false
@@ -70,31 +74,31 @@
                 "type": "null"
               }
             ]
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]{0,63}$"
+            },
+            "uniqueItems": true
           }
         },
         "required": [
           "host",
           "ok",
-          "code"
+          "code",
+          "warnings"
         ],
         "additionalProperties": false
       }
-    },
-    "warnings": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "pattern": "^[a-z][a-z0-9_]{0,63}$"
-      },
-      "uniqueItems": true
     }
   },
   "required": [
     "already_running",
     "dry_run",
     "prs",
-    "hosts",
-    "warnings"
+    "hosts"
   ],
   "additionalProperties": false
 }

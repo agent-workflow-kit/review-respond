@@ -22,24 +22,13 @@
     },
     "message_replaced": {
       "type": "boolean"
-    },
-    "gate_outcome": {
-      "oneOf": [
-        {
-          "$ref": "../defs.json#/$defs/outcome"
-        },
-        {
-          "type": "null"
-        }
-      ]
     }
   },
   "required": [
     "pending_id",
     "edited",
     "reply_comment_id",
-    "message_replaced",
-    "gate_outcome"
+    "message_replaced"
   ],
   "additionalProperties": false
 }

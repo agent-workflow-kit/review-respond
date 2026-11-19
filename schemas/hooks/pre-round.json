@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "review-respond/hooks/pre-round.json",
   "title": "pre-round hook payload (stdin)",
-  "description": "Once per round, after the eligibility, settle and cap checks, before the job is submitted. Exit 13 escalates, any other non-zero exit vetoes. Not delivered later, so it has no event_id. No comment text.",
+  "description": "Once per round start, after the due rule and before the round is created, so the object is the PR. Exit 13 escalates, any other non-zero exit vetoes. Not delivered later, so it has no event_id. No comment text.",
   "type": "object",
   "properties": {
     "tool": {
@@ -12,10 +12,10 @@
       "const": "pre-round"
     },
     "object_type": {
-      "const": "round"
+      "const": "pr"
     },
     "object_id": {
-      "$ref": "../defs.json#/$defs/round_id"
+      "$ref": "../defs.json#/$defs/pr"
     },
     "repo": {
       "$ref": "../defs.json#/$defs/repo_id"
@@ -26,7 +26,11 @@
     "pr": {
       "$ref": "../defs.json#/$defs/pr"
     },
-    "round": {
+    "round_number": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "attempt": {
       "type": "integer",
       "minimum": 1
     },
@@ -55,7 +59,8 @@
     "repo",
     "labels",
     "pr",
-    "round",
+    "round_number",
+    "attempt",
     "head_sha",
     "comment_count",
     "trigger",

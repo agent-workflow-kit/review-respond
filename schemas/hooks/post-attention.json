@@ -42,82 +42,46 @@
     "details": {
       "type": "object",
       "properties": {
-        "failure_reason": {
-          "oneOf": [
-            {
-              "$ref": "../defs.json#/$defs/failure_reason"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "refusal_reason": {
-          "oneOf": [
-            {
-              "$ref": "../defs.json#/$defs/refusal_reason"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "pr": {
-          "oneOf": [
-            {
-              "$ref": "../defs.json#/$defs/pr"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "round_id": {
-          "oneOf": [
-            {
-              "$ref": "../defs.json#/$defs/round_id"
-            },
-            {
-              "type": "null"
-            }
+          "$ref": "../defs.json#/$defs/round_id"
+        },
+        "cause": {
+          "enum": [
+            "agent",
+            "hook"
           ]
         },
-        "pending_id": {
-          "oneOf": [
-            {
-              "$ref": "../defs.json#/$defs/pending_id"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "comment_count": {
-          "oneOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "failure_reason": {
+          "$ref": "../defs.json#/$defs/failure_reason"
         },
         "attempts": {
-          "oneOf": [
-            {
-              "type": "integer",
-              "minimum": 0
-            },
-            {
-              "type": "null"
-            }
-          ]
+          "type": "integer",
+          "minimum": 0
+        },
+        "rounds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_id": {
+          "$ref": "../defs.json#/$defs/pending_id"
+        },
+        "head_sha": {
+          "$ref": "../defs.json#/$defs/sha"
+        },
+        "comment_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agent_id": {
+          "$ref": "../defs.json#/$defs/agent_id"
+        },
+        "pr": {
+          "$ref": "../defs.json#/$defs/pr"
         }
       },
       "required": [],
       "additionalProperties": false,
-      "description": "Closed codes, ids and counts; never text."
+      "description": "Closed keys per reason (see the interface); ids, enums and counts, never text."
     },
     "dedupe_key": {
       "$ref": "../defs.json#/$defs/dedupe_key"

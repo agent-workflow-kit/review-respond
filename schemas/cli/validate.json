@@ -20,7 +20,6 @@
               "wtctl",
               "git",
               "jobsctl",
-              "gatectl",
               "claude-session"
             ]
           },
@@ -74,9 +73,7 @@
               "dependencies",
               "sandbox",
               "cron_path",
-              "credentials",
-              "wtctl_protect_labels",
-              "wtctl_throwaway_max_age"
+              "credentials"
             ]
           },
           "ok": {

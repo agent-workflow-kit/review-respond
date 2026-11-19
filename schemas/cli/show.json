@@ -43,6 +43,19 @@
         "round": {
           "$ref": "../defs.json#/$defs/round"
         },
+        "finalize": {
+          "oneOf": [
+            {
+              "enum": [
+                "done",
+                "busy"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "comments": {
           "type": "array",
           "items": {
@@ -53,6 +66,7 @@
       "required": [
         "object_type",
         "round",
+        "finalize",
         "comments"
       ],
       "additionalProperties": false
@@ -70,12 +84,17 @@
           "type": "string",
           "description": "The stored diff, sanitized.",
           "x-untrusted": true
+        },
+        "non_ascii_added": {
+          "type": "integer",
+          "minimum": 0
         }
       },
       "required": [
         "object_type",
         "pending",
-        "diff"
+        "diff",
+        "non_ascii_added"
       ],
       "additionalProperties": false
     }

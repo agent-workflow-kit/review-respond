@@ -49,12 +49,23 @@
                 "type": "null"
               }
             ]
+          },
+          "threaded": {
+            "oneOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "comment_id",
           "status",
-          "status_reason"
+          "status_reason",
+          "threaded"
         ],
         "additionalProperties": false
       }

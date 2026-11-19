@@ -7,29 +7,21 @@
     "dry_run": {
       "type": "boolean"
     },
-    "round_id": {
-      "$ref": "../defs.json#/$defs/round_id"
+    "round": {
+      "$ref": "../defs.json#/$defs/round"
     },
-    "state": {
-      "$ref": "../defs.json#/$defs/round_state"
-    },
-    "noop": {
+    "changed": {
       "type": "boolean"
     },
-    "job_canceled": {
-      "type": "boolean"
-    },
-    "agent_stopped": {
+    "cancel_requested": {
       "type": "boolean"
     }
   },
   "required": [
     "dry_run",
-    "round_id",
-    "state",
-    "noop",
-    "job_canceled",
-    "agent_stopped"
+    "round",
+    "changed",
+    "cancel_requested"
   ],
   "additionalProperties": false
 }

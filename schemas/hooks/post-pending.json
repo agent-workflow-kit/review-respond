@@ -35,6 +35,26 @@
     "event": {
       "const": "recorded"
     },
+    "files_changed": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "files_deleted": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "additions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "deletions": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reply_count": {
+      "type": "integer",
+      "minimum": 0
+    },
     "summary": {
       "type": "string",
       "maxLength": 256
@@ -63,6 +83,11 @@
     "pending_id",
     "action",
     "event",
+    "files_changed",
+    "files_deleted",
+    "additions",
+    "deletions",
+    "reply_count",
     "summary",
     "expires",
     "dedupe_key",
