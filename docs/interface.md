@@ -126,7 +126,7 @@ Replaces one reply or the commit message of a `pending` record. The new text pas
 
 ### `drop-reply <id> <comment_id>`
 
-Removes one reply from the pending confirmation, only in the states the Record tables allow. Needs a human actor.
+Removes one reply from the pending confirmation, only in the states the Record tables allow. Removing the last open reply of a `pushed` record finishes it as Confirm order step 9 does, without the thread resolve, so a reply that can never post (a deleted PR, a revoked token) can always be ended. Needs a human actor.
 
 ### `stop <round id>`
 
@@ -157,7 +157,7 @@ Prints `log.jsonl` and `audit.jsonl` records as JSON lines.
 
 ### `prune [--older-than D] [--dry-run]`
 
-Takes the `pass` lease. Removes finished round and pending records (terminal states only), comment records of closed PRs and their stored files older than the retention age (default 30 days). It also deletes, at the same age, `prs` rows of closed PRs, `forks` rows in `torn_down`, delivered outbox rows, expired `access_cache` rows and lease rows whose holder is gone; it never touches `log.jsonl` or `audit.jsonl`. It prints `{already_running, dry_run, results}`. It removes throwaways labeled `app=review-respond` that are older than one day and whose `round=` or `pending=` label names no non-terminal record (found with `wtctl list --label`). It never touches a record in `pending`, `pushing` or `pushed`, or a live round.
+Takes the `pass` lease. Removes finished round and pending records (terminal states only), comment records of closed PRs and their stored files older than the retention age (default 30 days). It also deletes, at the same age, `prs` rows of closed PRs, `forks` rows in `torn_down`, delivered outbox rows, expired `access_cache` rows and lease rows whose holder is gone; it never touches `log.jsonl` or `audit.jsonl`. It prints `{already_running, dry_run, results}`. It removes throwaways labeled `app=review-respond` that are older than one day and whose `round=` and `pending=` labels name only terminal records of this state database (found with `wtctl list --label`); a throwaway naming an id this database does not know is skipped with the warning `unknown_throwaway`. It never touches a record in `pending`, `pushing` or `pushed`, or a live round.
 
 ### `validate`
 
@@ -233,7 +233,8 @@ due(pr):
   and counted(pr) < max_rounds        # else set block round_limit and fire post-attention round_limit once
   and resolve_base(pr) is an agent or a fresh-session opt-in (repos.<id>.respond_fresh)   # else set block no_agent
   and not agent_busy(pr)
-  and now - max(settle_ts(c) for c in eligible_unhandled(pr)) >= settle
+  and (now - max(settle_ts(c) for c in eligible_unhandled(pr)) >= settle
+       or now - min(settle_ts(c) for c in eligible_unhandled(pr)) >= 1h)      # the second bound is a constant: edits cannot hold a PR in settling
 ```
 
 `agent_busy(pr)`: the base agent or the PR's base fork has status `launching`, `live` or `tearing_down`, or a promotion pending.
@@ -247,7 +248,7 @@ due(pr):
 | Block reason | Set when | Cleared when |
 |---|---|---|
 | `escalated` | a round ended `escalated` (the agent asked for input, or a lower hook escalated its launch) | a human `respond` |
-| `failed` | a round ended `failed` | a human `respond` |
+| `failed` | a round ended `failed`, or the third consecutive `read_failed` cancel | a human `respond` |
 | `stopped` | a round ended `canceled` with `cancel_reason: stopped` | a human `respond` |
 | `round_limit` | a due check finds the limit reached | a human `respond --force`, or `max_rounds` raised above the count |
 | `no_agent` | the due rule finds no agent and no fresh-session opt-in | `check` finds an agent again (`resolve_base`), or a human `respond` |
@@ -266,7 +267,7 @@ elif a record is pending, pushing or pushed        -> pending
 elif block is set                                  -> waiting (waiting_reason = block.reason)
 elif no eligible unhandled comment                 -> idle
 elif agent_busy(pr)                                -> waiting (waiting_reason = agent_live)
-elif the settle time has not passed                -> settling
+elif neither settle bound has passed                  -> settling
 else                                               -> waiting (waiting_reason = capacity)
 ```
 
@@ -280,10 +281,10 @@ A round has the number `number` (1 for a PR's first round, incremented for every
 
 | From | Event | To | Same transaction |
 |---|---|---|---|
-| (none) | the due rule holds (or a human `respond`), the `pre-round` hooks continued | `queued` | round row (`number`, `base_agent_id`, `trigger`, `forced`, `include_existing`); then the job is submitted and its job id (jobsctl) or PID and start time (detached) stored |
+| (none) | the due rule holds (or a human `respond`), the `pre-round` hooks continued | `queued` | round row (`number`, `base_agent_id`, `trigger`, `forced`, `include_existing`); then the job is submitted and its job id (jobsctl) or the detached start time stored |
 | `queued` | `_job` finds `cancel_requested_at` set | `canceled` (the stored `cancel_reason`) | not counted |
 | `queued` | `_job` reads the PR closed or merged | `canceled` (`pr_closed`) | not counted |
-| `queued` | `_job`'s PR or comment read failed | `canceled` (`read_failed`) | not counted; no block, so the next due `check` starts a new round |
+| `queued` | `_job`'s PR or comment read failed | `canceled` (`read_failed`) | not counted; no block, so the next due `check` starts a new round, until the third consecutive `read_failed` of the PR sets block `failed` (`prs.read_failures` counts them; a round of the PR that reaches `running`, or a human `respond`, resets it) and queues `post-attention` `failed` once (`details.round_id` only) |
 | `queued` | `_job` selects no comment (or the PR is a fork or not yours, defensive) | `canceled` (`nothing_to_respond`) | not counted |
 | `queued` | `_job` re-read the PR and the comments and selected at least one comment | `running` | `head_sha`; each selected comment `delivered` with `delivered_sha256` and `delivered_from` |
 | `queued` | `stop` or the closed-PR sweep: the jobsctl job was canceled, or no job was submitted yet, or (detached) the job process is gone | `canceled` (`stopped` or `pr_closed`) | not counted |
@@ -301,6 +302,7 @@ Terminal states: `confirmed`, `rejected`, `expired`, `closed`, `escalated`, `fai
 
 ```text
 reconcile_queued(r):                       # r.state == queued
+  if a live process holds the round: lease: skip      # _job is running or about to run
   if no job id and no PID is stored:       # check crashed between the round row and the submission
      if now - r.created < 2 minutes: skip
      submit the job again (jobsctl: the same --unique-key makes add idempotent; detached: start it again)
@@ -309,7 +311,7 @@ reconcile_queued(r):                       # r.state == queued
      j.status in (queued, starting, running, held): nothing      # a held job keeps the round queued; stop cancels it
      j is terminal (done, failed, canceled) and r is still queued: -> failed (job_lost), or canceled when cancel_requested_at is set
   else (detached):
-     the recorded PID with the recorded start time is gone and r is still queued: -> failed (job_lost), or canceled as above
+     the start time is over 2 minutes ago, no process holds the round: lease, and r is still queued: -> failed (job_lost), or canceled as above
 ```
 
 A jobsctl job that ends without running `_job` (`missing_env`, `spawn_failed`, `lost`, a `pre-start` veto, a human `jobsctl cancel`) therefore ends the round `failed` (`job_lost`) at the next `check`, sets block `failed` and fires `post-attention` `job_lost` once. A job held by jobsctl (`manual`, or `escalated` by a jobsctl `pre-start` hook) keeps the round `queued`; `stop` or `jobsctl release` or `cancel` continues.
@@ -323,7 +325,7 @@ finalize(r):
     accept c only if (fork: c.forked_from == r.base_agent_id) or (fresh: c.run_kind == respond and c.cwd == realpath(round throwaway))
     exactly one accepted: record it as r.agent_id
     none: -> failed (job_lost)
-    several: record none, mark every accepted candidate for teardown, -> failed (job_lost)
+    several: record none, mark none for teardown (teardown acts only on the forks table), -> failed (job_lost), warning ambiguous_fork with the candidate ids
   a = agent-spawn show r.agent_id --json
   if a.status in (launching, live, tearing_down) or promotion pending: leave r running (try again next pass)
   else finish_round(r, outcome of a.runs[-1])
@@ -393,11 +395,11 @@ With no original agent, a PR in a repo opted in with `repos.<id>.respond_fresh: 
 
 ### Cleanup
 
-Throwaway removal and fork teardown marks are not listed per transition. One idempotent rule runs in the same command after the transaction of a terminal transition and again in every `check` until it succeeds. A throwaway is removed only when everything it belongs to is terminal, so a `pushing` record never loses its throwaways.
+Throwaway removal and fork teardown marks are not listed per transition. One idempotent rule runs in the same command after the transaction of a terminal transition and again in every `check` until it succeeds. A throwaway is removed only when everything it belongs to is terminal, so a `pushing` record never loses its throwaways, and only under its PR's `pr:` lease: a command that ends a record or round already holds it, and `check` takes it without waiting and skips the PR's throwaways when it is held (a running `confirm` keeps its clean checkout).
 
 ```text
 cleanup (after a terminal transition, and in every check):
-  for each throwaway labeled app=review-respond:
+  for each throwaway labeled app=review-respond (a round= id this database does not know: skip, warning unknown_throwaway):
      its round (round=) is terminal and its record (pending=), if any, is terminal -> wtctl remove (exit 20 in_use: retried next check)
      a clean checkout (role=clean) whose record is pending or pushed (not pushing) -> wtctl remove
   for each terminal round: its round fork -> teardown_pending, unless the fork is the PR's base
@@ -417,7 +419,7 @@ _job(round_id):
   if r.cancel_requested_at: -> canceled (r.cancel_reason); exit 0
   pr = forgectl show <pr>; failed: -> canceled (read_failed); exit 0
   if pr closed or merged: -> canceled (pr_closed); exit 0
-  if pr is a fork or not yours: -> canceled (nothing_to_respond); exit 0        # defensive
+  if pr is a fork or not yours, or its head ref fails git check-ref-format --branch: -> canceled (nothing_to_respond); exit 0        # defensive
   read_comments(pr) (Detection; under pr:); failed: -> canceled (read_failed); exit 0
   comments = select(eligible and unhandled, or seen when r.include_existing; prompt budget)
   if comments empty: -> canceled (nothing_to_respond); exit 0
@@ -448,9 +450,9 @@ The job records the agent id before it waits, and every fork carries a `round=` 
 
 With jobsctl: `check` submits `_job` to the queue `respond` (config `jobs.queue`) with `--unique-key respond:<PR digest>:<number>` (a PR reference can be long), `--max-retries 0`, `--timeout none` (the agent is bounded by `agent.timeout` and the kind's own timeout), an explicit `--cwd` (the state directory), `--kill-grace` (`jobs.kill_grace`, default 125 seconds), `--label` correlation labels, `--env XDG_CONFIG_HOME=...` and `--env XDG_STATE_HOME=...` when set, and `--pass-env` for the names in `jobs.pass_env`. It reads the job by its stored id. An exit-13 job is held by jobsctl; `check` resolves the held job (`jobsctl resolve --as done`) after the round row says `escalated`.
 
-Without jobsctl: `check` starts `_job` as a detached process (double fork, stdio redirected, PID and start time recorded). It never waits. A job that dies is found by PID and start time and reconciled or finalized as above.
+Without jobsctl: `check` starts `_job` as a detached process (double fork, stdio redirected, start time recorded; the job's own PID is in its `round:` lease). It never waits. A job that dies is found by its lease and start time and reconciled or finalized as above.
 
-The job's environment is built from scratch in both placements: `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR` (each when set) and the names in `jobs.pass_env`. `REVIEW_RESPOND_*` variables are not passed to jobs (the config file is). The job creates the clean checkout for the stored diff with `--source remote`, so for a private repository `jobs.pass_env` must name the variables wtctl reads for that host (`hosts.<host>.token_env` in wtctl's config), and with jobsctl their values come from jobsctl's `env_file`.
+The job's environment is built from scratch in both placements: `PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR` (each when set) and the names in `jobs.pass_env`. `REVIEW_RESPOND_*` variables are not passed to jobs (the config file is). The job creates the clean checkout for the stored diff with `--source remote`, and it reads the PR and the comments with forgectl, so `jobs.pass_env` must name the variables forgectl reads for each host (`hosts.<host>.token_env` in forgectl's config) and, for a private repository, the ones wtctl reads (in wtctl's config); with jobsctl their values come from jobsctl's `env_file`.
 
 ### Prompt
 
@@ -475,7 +477,7 @@ fresh:  agent-spawn launch --kind respond --mode headless --worktree none --cwd 
 
 The cwd is exactly the throwaway root (a subdirectory is refused by agent-spawn). `--skill` is not carried to a fork, so it is always passed. Labels that cannot hold the PR reference or the repo id (over 256 characters) are omitted (Labels).
 
-The permission profile is generated per call: the bundled allowlist profile plus the repo's `respond.allow_commands` (argv patterns for test and build commands) and `respond.read_dirs`. The bundled profile keeps the architecture's respond-profile denies and additionally denies `memoctl add`, `memoctl delete`, `memoctl cron`, `agent-spawn`, `notice-route send`, `git push` and `gh` and `glab`, and any write under review-respond's own config and state directories. Config keys replacing these: `skill`, `permission_profile`, `sandbox` (`required` by default; `preferred` and `off` are accepted with a warning), `setting_sources`, `env_allowlist` (names passed with `--env-allowlist-only`), `model`, `agent.timeout`.
+The permission profile is generated per call: the bundled allowlist profile plus the repo's `respond.allow_commands` (argv patterns for test and build commands) and `respond.read_dirs`. The bundled profile keeps the architecture's respond-profile denies and additionally denies `memoctl add`, `memoctl delete`, `memoctl cron`, `agent-spawn`, `notice-route send`, `git push` and `gh` and `glab`, and any read or write under review-respond's own config and state directories. Config keys replacing these: `skill`, `permission_profile`, `sandbox` (`required` by default; `preferred` and `off` are accepted with a warning), `setting_sources`, `env_allowlist` (names passed with `--env-allowlist-only`), `model`, `agent.timeout`.
 
 ### Artifact
 
@@ -516,7 +518,7 @@ States: `pending`, `pushing`, `pushed`, `done`, `rejected`, `expired`, `closed`.
 |---|---|---|---|---|---|---|---|
 | `pending` | full order | `end_record(rejected)` | `end_record(rejected)`, then redo | yes (human) | yes (human) | `end_record(expired)` (`check`, or `confirm` step 1) | `end_record(closed)` (`check`, or `confirm` step 2) |
 | `pushing` | `resume_pushing` (Push) | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | never; `post-attention` `confirm_incomplete` once | never; `resume_pushing` decides |
-| `pushed` | resume at Replies | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | yes (human), for replies with status `pending`, `failed` or `unknown` | as `pushing` | never; replies are allowed on closed PRs |
+| `pushed` | resume at Replies | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | yes (human), for replies with status `pending`, `failed` or `unknown`; the last one finishes the record | as `pushing` | never; replies are allowed on closed PRs |
 | `done` | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | 20 `not_pending` | | |
 | `rejected` | 20 `not_pending` | 0 (no-op) | redo once; again 0 (no-op) | 20 `not_pending` | 20 `not_pending` | | |
 | `expired` | 20 `expired` | 0 (no-op) | redo once; again 0 (no-op) | 20 `expired` | 20 `expired` | | |
@@ -527,15 +529,16 @@ Transitions:
 | From | Trigger | To | Same transaction |
 |---|---|---|---|
 | (none) | the round's validated artifact and stored diff were recorded | `pending` | round `pending`; delivered comments `handled`; `post-pending` queued |
-| `pending` | `confirm` step 7 starts, the record has a diff | `pushing` | the new commit sha appended to `commit_shas`; `clean_throwaway_id`; `push_started_at` |
+| `pending` | `confirm` step 7 starts, the record has a diff | `pushing` | the new commit sha appended to `commit_shas`; `push_started_at` |
 | `pending` | `confirm` step 8 starts, the record has no diff | `pushed` | |
 | `pushing` | the push landed (Push) | `pushed` | `commit_sha` (the landed one); lineage switch (Fork lineage) |
+| `pending` | `confirm` step 2 finds a head that satisfies `landed` for a sha in `commit_shas` | `pushed` | `commit_sha` (the matching one); lineage switch (Fork lineage) |
 | `pushing` | refused, the ref is missing, the remote moved, or nothing landed and the clean checkout is gone (Push) | `pending` | |
-| `pushed` | every reply is `posted`, `skipped` or `dropped` | `done` | round `confirmed`; lineage switch for a record without a diff; `post-confirm` queued |
+| `pushed` | every reply is `posted`, `skipped` or `dropped` (`confirm` step 9, or `drop-reply` of the last open reply) | `done` | round `confirmed`; lineage switch for a record without a diff; `post-confirm` queued |
 | `pending` | `end_record(to)`, `to` in `rejected`, `expired`, `closed` | `to` | round `to`; `post-attention` `pending_expired` (expired) or `pr_closed` (closed) queued |
 | `rejected`, `expired` | `reject --redo` | (unchanged) | the round's comments that are still `handled` by this round and not `handled_reason: resolved` become `unhandled`; `redone_at` set (a second `--redo` is a no-op) |
 
-`end_record` and the round's terminal transition run in one transaction; throwaways and forks are then handled by Cleanup. A resume (`pushing`, `pushed`) needs a human actor like a fresh confirm; it re-runs no `pre-push` hook, no expiry check, no open-PR check and no head check (`--expect` still applies).
+`end_record` and the round's terminal transition run in one transaction; throwaways and forks are then handled by Cleanup. A resume (`pushing`, `pushed`) needs a human actor like a fresh confirm; it re-runs no `pre-push` hook and no expiry check, and only the arm of `resume_pushing` that pushes repeats the live reads of Confirm order step 2 (`--expect` still applies).
 
 ### Stored diff
 
@@ -544,7 +547,7 @@ When the job ends, review-respond builds the stored diff in a clean checkout, th
 ```text
 clean = wtctl create --throwaway --source remote --repo <id> --ref <head_sha>
           --label app=review-respond --label role=clean --label round=<round id> [--label pending=<pending id>] --json
-record clean.id immediately (record time: on the round; confirm time: clean_throwaway_id on the record)
+record clean.id immediately, in its own transaction (record time: on the round; confirm time: clean_throwaway_id on the record)
 confirm time: a live fork (agent-spawn show <fork id> status in launching, live, tearing_down) -> exit 20 live
 path-state checks of the artifact lists in the round throwaway (Artifact)
 wtctl extract <round throwaway id> --files-from F --delete-from F --dest <clean.path from the record>    # F are files review-respond wrote
@@ -562,14 +565,14 @@ stored_diff(clean):
   diff_sha256 = sha256(text); diff_stats from numstat
 ```
 
-`flags` is a list of `{where, cause, line}`. Causes: `off_limits` (a touched path matches `off_limits`), `binary` (numstat `-` counts), `oversized` (the stored diff is over `limits.diff_bytes`, default 262144; `where` null), `long_line` (an added line over 2000 bytes, a constant) and `secret_pattern` (an added line, a commit message line or a reply line matching a closed list: `-----BEGIN` followed by a space, `ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`, `glpat-`, `AKIA` followed by 16 of `[0-9A-Z]`, `xox[abp]-`). `where` is the path, `commit_message` or the reply's comment id. The tripwire is not a guarantee. `confirm` refuses with `sensitive_paths` (`details.causes` lists the causes) when `flags` is not empty, unless a human passes `--allow-sensitive`. `show` prints the flags, the diff through the one sanitizer, and the count of non-ASCII characters in added lines, in the message and in each reply. The sha256 of every stored text file is kept in the record and re-checked by `show` and `confirm`; a differing file exits 12 `state_unsafe`. If extraction or the diff fails, the round is `failed` with `diff_failed` and nothing is recorded. The round throwaway stays, untouched by any trusted process, until its round and record are terminal (Cleanup). It carries the labels `app=review-respond`, `role=round`, `round=<id>` and `pending=<id>`. The README setup lists the wtctl settings that keep it (`prune.protect_labels` includes `app`).
+`flags` is a list of `{where, cause, line}` of at most 100 entries, followed by one `{where: null, cause: truncated}` entry when more were found (the refusal rule stays: the list is not empty). Causes: `off_limits` (a touched path matches `off_limits`), `binary` (numstat `-` counts), `oversized` (the stored diff is over `limits.diff_bytes`, default 262144; `where` null), `long_line` (an added line over 2000 bytes, a constant) and `secret_pattern` (an added line, a commit message line or a reply line matching a closed list: `-----BEGIN` followed by a space, `ghp_`, `gho_`, `ghs_`, `ghu_`, `github_pat_`, `glpat-`, `AKIA` followed by 16 of `[0-9A-Z]`, `xox[abp]-`) and `truncated`. `where` is the path, `commit_message` or the reply's comment id. The tripwire is not a guarantee. `confirm` refuses with `sensitive_paths` (`details.causes` lists the causes) when `flags` is not empty, unless a human passes `--allow-sensitive`. `show` prints the flags, the diff through the one sanitizer, and the count of non-ASCII characters in added lines, in the message and in each reply. The sha256 of every stored text file is kept in the record and re-checked by `show` and `confirm`; a differing file exits 12 `state_unsafe`. If extraction or the diff fails, the round is `failed` with `diff_failed` and nothing is recorded. The round throwaway stays, untouched by any trusted process, until its round and record are terminal (Cleanup). It carries the labels `app=review-respond`, `role=round`, `round=<id>` and `pending=<id>`. The README setup lists the wtctl settings that keep it (`prune.protect_labels` includes `app`).
 
 ## Confirm order
 
 `confirm <id>` runs these steps. Each step that acts first writes its intent to the record, and each is idempotent. Steps 4 to 7 are skipped when the record has no diff (`diff_sha256` null); steps 1 to 3 and 8 to 9 always run.
 
 1. **Preconditions.** State `pending` (other states: the Record tables). Not expired (else `end_record(expired)` and the command exits 20 `expired`). A human actor (a TTY, or `--yes --actor human:<user>`), else exit 13 `confirmation_required`. `--expect`, when given, equals `content_sha256` (else 20 `diff_changed`, `details.cause: expect_mismatch`). Each stored file's sha256 equals the record's (else 12 `state_unsafe`). Lease `pr:` taken. On a TTY without `--yes`, `confirm` prints, from the files whose hashes it just checked, the stored diff through the one sanitizer, the cleaned commit message, every reply (marked agent-written), the flags, the comments that got no reply and `content_sha256`, then asks once; any answer other than `y` or `yes` exits 13 `confirmation_required` and changes nothing.
-2. **Live reads.** `forgectl show <pr>`: closed or merged makes the record `closed` (`end_record(closed)`) and exits 20 `pr_closed`; a fork PR (or a head repo other than the base repo) exits 20 `ineligible` (`details.reason: fork_pr`); for a record with a diff, the default branch is read from `ls-remote --symref <url> HEAD` (the line `ref: refs/heads/<name>` then a tab and `HEAD`): a head ref equal to it, or no such line, exits 20 `ineligible` (`details.reason: default_branch`), a failed `ls-remote` exits 12 `push_failed` with the record unchanged, and a head sha other than `head_sha` exits 20 `remote_moved` (the record stays `pending`; `post-attention` `remote_moved` fires when the observed head differs from `moved_head`, which it then stores). `forgectl comments <pr>` is read once for Replies. A failed `forgectl show` or `forgectl comments` exits 12 `lower_failed` with the record unchanged.
+2. **Live reads.** `forgectl show <pr>`: closed or merged makes the record `closed` (`end_record(closed)`) and exits 20 `pr_closed`; a fork PR (or a head repo other than the base repo) exits 20 `ineligible` (`details.reason: fork_pr`); for a record with a diff, the default branch is read from `ls-remote --symref <url> HEAD` (the line `ref: refs/heads/<name>` then a tab and `HEAD`): a head ref equal to it (compared with case folded), or no such line, exits 20 `ineligible` (`details.reason: default_branch`), a failed `ls-remote` exits 12 `push_failed` with the record unchanged, and a head ref other than the record's `head_ref` exits 20 `remote_moved`, and a head sha other than `head_sha` first checks a late push: when `commit_shas` is not empty and `landed(record, head)` (Push) holds, the record becomes `pushed` (`commit_sha` the matching sha, lineage switch) and `confirm` continues at Replies, otherwise it exits 20 `remote_moved` (the record stays `pending`; `post-attention` `remote_moved` fires when the observed head differs from `moved_head`, which it then stores). `forgectl comments <pr>` is read once for Replies (not when no reply is open). A failed `forgectl show` or `forgectl comments` exits 12 `lower_failed` with the record unchanged.
 3. **Hooks.** `pre-push` hooks run (for every record: `files_changed: 0` and `diff_sha256: null` for a record without a diff): a veto exits 11; an escalation exits 13 (the record stays `pending`) unless `--override-escalation` was given.
 4. **Clean checkout.** First remove a clean checkout already named by `clean_throwaway_id` on a `pending` record (a crash leak), then run the recipe in Stored diff. The round throwaway is looked up with `wtctl show`; a missing one exits 12 `throwaway_missing` and the record stays `pending` (`reject --redo` starts again). This is the only place `throwaway_missing` is produced.
 5. **Diff check.** Compute the stored diff again. A different sha256 refuses with `diff_changed` (`details.cause: recomputed`). Any `flags` refuse with `sensitive_paths` unless a human passed `--allow-sensitive`.
@@ -613,7 +616,7 @@ landed(record, remote):
   remote in record.commit_shas, or
   forgectl compare <pr> --no-diff --from <s> --to <remote> is ahead or identical for some s in commit_shas
 push(record):            # step 6 made a new commit in the clean checkout
-  CAS pending -> pushing (append commit sha to commit_shas, clean_throwaway_id, push_started_at)
+  CAS pending -> pushing (append commit sha to commit_shas, push_started_at)
   remote = remote_head(url, head_ref)
   if remote is absent or remote != head_sha: -> pending, exit 20 remote_moved (details.ref_missing when absent)
   out = push --porcelain --no-verify <url> HEAD:refs/heads/<head_ref>
@@ -627,7 +630,10 @@ resume_pushing(record):
   remote = remote_head(url, head_ref)
   landed(record, remote): -> pushed, continue at Replies
   remote == head_sha:     # nothing landed yet
-     the clean checkout exists and its HEAD (rev-parse) is the newest of commit_shas: push it (as push, without the CAS)
+     the clean checkout exists and its HEAD (rev-parse) is the newest of commit_shas:
+        first the live reads of Confirm order step 2 (closed or merged: pr_closed; a fork or the default branch: ineligible; another head ref: remote_moved):
+        a refusal -> pending (the next check closes a closed PR), a failed read: exit 12, record stays pushing
+        then push it (as push, without the CAS)
      else: -> pending, exit 20 remote_moved (details.cause: retry)   # the next confirm runs the full order
   remote is absent: -> pending, exit 20 remote_moved (details.ref_missing)
   else: -> pending, exit 20 remote_moved
@@ -637,7 +643,7 @@ resume_pushing(record):
 
 ### Replies
 
-Each reply is posted with `pr-comment reply <pr> --to <target> --body-file F --dedupe-key respond:<pending id>:<first 20 hex of sha256(comment id)> --yes --actor <actor> [--decision-id D]...`; the footer and the marker come from pr-comment. The key hashes the comment id because comment ids can hold characters or lengths the forge key grammar (`^[A-Za-z0-9._:-]{1,128}$`) refuses. No `--expected-head` is passed, because the push moves the head. `confirm` reads `forgectl comments` once per call and applies the skip rule, in this order (a resolved thread first, then absence, then the hash):
+Each reply is posted with `pr-comment reply <pr> --to <target> --body-file F --dedupe-key respond:<pending id>:<first 20 hex of sha256(comment id)> --yes --actor <actor> [--decision-id D]...`; the footer and the marker come from pr-comment. The key hashes the comment id because comment ids can hold characters or lengths the forge key grammar (`^[A-Za-z0-9._:-]{1,128}$`) refuses. No `--expected-head` is passed, because the push moves the head. `confirm` reads `forgectl comments` once per call, only when at least one reply has status `pending`, `failed` or `unknown`, and applies the skip rule, in this order (a resolved thread first, then absence, then the hash):
 
 ```text
 read = forgectl comments <pr>            # once per confirm call; failed: exit 12 lower_failed, statuses unchanged
@@ -671,7 +677,7 @@ Re-running `confirm` resumes per the Record tables; a push is never repeated whi
 
 ## Reject, expiry and closed PRs
 
-`reject`, expiry and a closed or merged PR end a `pending` record through one function (`end_record`, Record), whether `check` or `confirm` finds the cause; queued and running rounds of a closed PR get the `stop` order with `cancel_reason: pr_closed`, and `post-attention` `pr_closed` fires once per ended record or round. Without `--redo` the comments stay handled. Expiry (`pending_ttl`) is `reject` without `--redo` with `post-attention` reason `pending_expired`. Records in `pushing` and `pushed` never expire and are never closed: `confirm` resumes them (a missing ref returns a `pushing` record to `pending`, which the next `check` closes); `post-attention` `confirm_incomplete` fires once when such a record is older than `pending_ttl`. Throwaways and forks: Cleanup (`teardown_refused` is a `post-attention` reason when agent-spawn keeps refusing; the next `check` retries).
+`reject`, expiry and a closed or merged PR end a `pending` record through one function (`end_record`, Record), whether `check` or `confirm` finds the cause; queued and running rounds of a closed PR get the `stop` order with `cancel_reason: pr_closed`, and `post-attention` `pr_closed` fires once per ended record or round. Without `--redo` the comments stay handled. Expiry (`pending_ttl`) is `reject` without `--redo` with `post-attention` reason `pending_expired`. Records in `pushing` and `pushed` never expire and are never closed: `confirm` resumes them (a missing ref returns a `pushing` record to `pending`, which the next `check` closes), and `drop-reply` ends the open replies of a `pushed` record that cannot post; `post-attention` `confirm_incomplete` fires once when such a record is older than `pending_ttl`. Throwaways and forks: Cleanup (`teardown_refused` is a `post-attention` reason when agent-spawn keeps refusing; the next `check` retries).
 
 ## Off-limits paths
 
@@ -747,7 +753,7 @@ A label value is at most 256 characters; a PR reference or repo id longer than t
 
 ## Files and state
 
-State under `~/.local/state/review-respond/` (`XDG_STATE_HOME` respected): `state.db` (private SQLite, WAL, versioned additive migrations), `log.jsonl` (public, hash-only, no comment text), `audit.jsonl` (public), and directories for prompt files, generated profiles, stored artifacts, stored diffs and reply drafts, each deleted when its record ends or by `prune`. The state directory and its subdirectories are created 0700 and every file 0600 (explicit modes, not the umask). Every command refuses to run (exit 12 `state_unsafe`) when the state directory is not owned by you or is accessible to group or others. Stored text files are named by the sha256 of their content. The managed crontab block written by `cron install` has the first line `# review-respond managed v1 every=5m`, a `PATH=` line, then `XDG_CONFIG_HOME=` and `XDG_STATE_HOME=` lines when those variables are set at install (the same refusal rules as `PATH`, as review-watch's block), then the line `*/5 * * * * . '<env_file>' && '<absolute review-respond>' check --quiet` (the env-file prefix only with `cron.env_file`) and the last line `# review-respond managed end`.
+State under `~/.local/state/review-respond/` (`XDG_STATE_HOME` respected): `state.db` (private SQLite, WAL, versioned additive migrations), `log.jsonl` (public, hash-only, no comment text), `audit.jsonl` (public), and directories for prompt files, generated profiles, stored artifacts, stored diffs and reply drafts, each deleted when its record ends or by `prune`. The state directory and its subdirectories are created 0700 and every file 0600 (explicit modes, not the umask). Every command refuses to run (exit 12 `state_unsafe`) when the state directory is not owned by you or is accessible to group or others. Stored text files (prompts, profiles, artifact copies, stored diffs and reply drafts) live in a directory named by the id of the one round or pending record that owns them and are named by the sha256 of their content, so no file is shared between records, and a file is deleted only with its owner. The managed crontab block written by `cron install` has the first line `# review-respond managed v1 every=5m`, a `PATH=` line, then `XDG_CONFIG_HOME=` and `XDG_STATE_HOME=` lines when those variables are set at install (the same refusal rules as `PATH`, as review-watch's block), then the line `*/5 * * * * . '<env_file>' && '<absolute review-respond>' check --quiet` (the env-file prefix only with `cron.env_file`) and the last line `# review-respond managed end`.
 
 ## Concurrency
 
@@ -770,7 +776,7 @@ The closed-PR sweep calls the `stop` function inside the `pr:` lease `check` alr
 
 ## Hardened git
 
-review-respond runs git itself, only in the clean throwaway that no agent wrote, and always through one module that implements architecture section 13.2 rule 10: an environment built from scratch, the full override list, the injected flags and rejected options, a fixed allowlist of subcommands (`rev-parse`, `config`, `ls-remote`, `add`, `diff`, `commit`, `push`), filter-driver and extra-header blanking from `config --list -z`, explicit `--git-dir` and `--work-tree`. Deviations from the recipe's literal text, all found against real git and recorded in `docs/design.md`:
+review-respond runs git itself, only in the clean throwaway that no agent wrote, and always through one module that implements architecture section 13.2 rule 10: an environment built from scratch, the full override list, the injected flags and rejected options, a fixed allowlist of subcommands (`rev-parse`, `config`, `ls-remote`, `add`, `diff`, `commit`, `push`, and `check-ref-format`, which reads no repository), filter-driver and extra-header blanking from `config --list -z`, explicit `--git-dir` and `--work-tree`. Deviations from the recipe's literal text, all found against real git and recorded in `docs/design.md`:
 
 1. `GIT_ALLOW_PROTOCOL` is `none` for every command except `push` and `ls-remote`, which get the scheme of the URL in use (`file` for a plain path); a push over `none` fails.
 2. `GIT_SHALLOW_FILE` is the clean throwaway's own shallow file, not `/dev/null` (which breaks a push from a shallow clone).
@@ -824,6 +830,6 @@ This subsection states what the schemas use so that they follow the interface.
 - **PR digest**: the first 20 hex characters of the sha256 of the PR reference; used in the job's unique key, the `pr:` lease key and hook dedupe keys.
 - **Ids**: a round is `rd-` plus 8 characters of `[a-z2-7]`, a pending record `rp-` plus 8, a hook event `ev-` plus 16. A unique prefix of at least 4 characters after the prefix is accepted (several matches exit 21). Agent, job and throwaway ids are the siblings' own; comment and thread ids are forgectl's and opaque. `show` dispatches by prefix: `rp-` is a pending record, `rd-` a round, anything else a PR reference.
 - **`pending` rows**: `id`, `tool` (`review-respond`), `action` (`push_and_reply`, `reply`), `target` and `pr` (the PR reference), `created`, `summary`, `expires`, `state`, `diff_sha256`, `content_sha256`, `files_changed`, `reply_count`.
-- **Output envelopes**: `list` prints `{prs: [...]}`, `pending` prints `{pending: [...]}`, `respond` prints `{dry_run, round, comment_ids}`, `show` adds `object_type` (`pr`, `round`, `pending`), `check` prints `{already_running, dry_run, hosts: [{host, ok, code, warnings}], prs: [{pr, state, started_round, lease_held, errors}]}` (`errors` is a list of `error.code` values; an optional `error` member holds the envelope's object on exit 12), `stop` prints `{round, changed, cancel_requested}` and `prune` prints `{already_running, dry_run, older_than, results: [{object_type, id, result}], warnings}` with `object_type` one of `round`, `pending`, `comments`, `throwaway` and `result` one of `deleted`, `would_delete`, `skipped`.
-- **Stored text files** are named by the sha256 of their content.
+- **Output envelopes**: `list` prints `{prs: [...]}`, `pending` prints `{pending: [...]}`, `respond` prints `{dry_run, round, comment_ids}`, `show` adds `object_type` (`pr`, `round`, `pending`), `check` prints `{already_running, dry_run, hosts: [{host, ok, code, warnings}], prs: [{pr, state, started_round, lease_held, errors}]}` (`errors` is a list of `error.code` values; an optional `error` member holds the envelope's object on exit 12), `stop` prints `{dry_run, round, changed, cancel_requested}` and `prune` prints `{already_running, dry_run, older_than, results: [{object_type, id, result}], warnings}` with `object_type` one of `round`, `pending`, `comments`, `throwaway` and `result` one of `deleted`, `would_delete`, `skipped`.
+- **Stored text files** live in a directory named by their owning record's id and are named by the sha256 of their content (Files and state).
 - **Config defaults** the schemas rely on: `me.accounts` maps host to id (default none), `agent.timeout` is null (the kind's own timeout applies), `permission_profile` is null (the bundled profile), `model` is null, `skill` is `respond-to-review`, `setting_sources` is empty.
