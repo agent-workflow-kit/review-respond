@@ -1,8 +1,8 @@
 {
   "prog": "agent-spawn",
   "version": "0.34.0",
-  "source": "agent-spawn docs/interface.md at v0.34.0: Commands (launch, resume, wait, list, show, stop, teardown), Launch flags, Global flags, Exit codes; claude-session v0.45.2 Launch flags for the pass-throughs. Only the commands in review-respond's Dependencies table. Global flags after the command only (conservative: the pinned doc does not say they may precede it).",
-  "globals_before_command": false,
+  "source": "agent-spawn docs/interface.md at v0.34.0: Commands (launch, resume, wait, list, show, stop, teardown), Launch flags, Global flags, Exit codes; claude-session v0.45.2 Launch flags for the pass-throughs. Only the commands in review-respond's Dependencies table. Global flags may precede or follow the command.",
+  "globals_before_command": true,
   "duplicate_globals": "error",
   "patterns": {
     "agent_id": "^ag-[a-z2-7]{8}$",
@@ -12,9 +12,9 @@
     "label": "^(?!(?:agent|kind)=)[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
     "actor": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$",
     "decision_id": "^[A-Za-z0-9._:@/-]{1,128}$",
-    "duration": "^[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)?$",
-    "duration_or_none": "^(?:none|[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)?)$",
-    "posint": "^[1-9][0-9]{0,15}$",
+    "duration": "^(?=.{1,32}$)(?=[0-9.]*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)?$",
+    "duration_or_none": "^(?:none|(?=.{1,32}$)(?=[0-9.]*[1-9])[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)?)$",
+    "posint": "^0*[1-9][0-9]{0,15}$",
     "model": "^[^-].*$",
     "setting_sources": "^(?:|(?:user|project|local)(?:,(?:user|project|local))*)$",
     "envname": "^[A-Za-z_][A-Za-z0-9_]*$",
@@ -22,542 +22,211 @@
     "worktree": "^(?:new|none|/.+)$",
     "hook": "^[a-z-]+=.+$",
     "merged_head": "^[0-9a-f]{40}$",
-    "status": "^[a-z_-]+$"
+    "status": "^[a-z_-]+$",
+    "nonempty": "^.+$",
+    "skill": "^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$",
+    "select": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+    "hook_launch": "^(?:pre-launch|post-launch)=.+$",
+    "hook_resume": "^post-launch=.+$",
+    "hook_teardown": "^(?:pre-teardown|post-teardown)=.+$"
   },
   "global_flags": {
     "--json": {},
-    "--config": {
-      "arity": 1
-    },
+    "--config": {"arity": 1, "pattern": "nonempty"},
     "--verbose": {},
     "--quiet": {},
     "--yes": {},
-    "--actor": {
-      "arity": 1,
-      "pattern": "actor"
-    },
-    "--decision-id": {
-      "arity": 1,
-      "repeat": true,
-      "pattern": "decision_id",
-      "max_count": 32
-    },
-    "--dry-run": {
-      "only": [
-        "launch",
-        "resume",
-        "stop",
-        "teardown"
-      ]
-    }
+    "--actor": {"arity": 1, "pattern": "actor"},
+    "--decision-id": {"arity": 1, "repeat": true, "pattern": "decision_id", "max_count": 32},
+    "--dry-run": {"only": ["launch", "resume", "stop", "teardown"]}
   },
-  "rules": [
-    {
-      "exclusive": [
-        "--verbose",
-        "--quiet"
-      ]
-    }
-  ],
+  "rules": [{"exclusive": ["--verbose", "--quiet"]}],
   "commands": {
     "launch": {
       "flags": {
-        "--kind": {
-          "arity": 1,
-          "pattern": "kind"
-        },
-        "--mode": {
-          "arity": 1,
-          "choices": [
-            "interactive",
-            "headless"
-          ]
-        },
-        "--skill": {
-          "arity": 1,
-          "pattern": "kind"
-        },
-        "--plugin-dir": {
-          "arity": 1,
-          "repeat": true
-        },
-        "--model": {
-          "arity": 1,
-          "pattern": "model"
-        },
-        "--timeout": {
-          "arity": 1,
-          "pattern": "duration_or_none"
-        },
-        "--max-turns": {
-          "arity": 1,
-          "pattern": "posint"
-        },
-        "--permission-profile": {
-          "arity": 1
-        },
-        "--sandbox": {
-          "arity": 1,
-          "choices": [
-            "required",
-            "preferred",
-            "off"
-          ]
-        },
-        "--setting-sources": {
-          "arity": 1,
-          "pattern": "setting_sources"
-        },
+        "--kind": {"arity": 1, "pattern": "kind"},
+        "--mode": {"arity": 1, "choices": ["interactive", "headless"]},
+        "--skill": {"arity": 1, "pattern": "skill"},
+        "--plugin-dir": {"arity": 1, "repeat": true, "pattern": "nonempty"},
+        "--model": {"arity": 1, "pattern": "model"},
+        "--timeout": {"arity": 1, "pattern": "duration_or_none", "max_seconds": 3153600000},
+        "--max-turns": {"arity": 1, "pattern": "posint"},
+        "--permission-profile": {"arity": 1, "pattern": "nonempty"},
+        "--sandbox": {"arity": 1, "choices": ["required", "preferred", "off"]},
+        "--setting-sources": {"arity": 1, "pattern": "setting_sources"},
         "--reads-third-party": {},
-        "--env-allow": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "envname"
-        },
-        "--env-allowlist-only": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "envname_or_empty"
-        },
+        "--env-allow": {"arity": 1, "repeat": true, "pattern": "envname"},
+        "--env-allowlist-only": {"arity": 1, "repeat": true, "pattern": "envname_or_empty"},
         "--auto-exit": {},
         "--no-auto-exit": {},
         "--implicit-done": {},
         "--no-implicit-done": {},
-        "--cwd": {
-          "arity": 1
-        },
-        "--prompt": {
-          "arity": 1
-        },
-        "--prompt-file": {
-          "arity": 1
-        },
-        "--input-file": {
-          "arity": 1,
-          "repeat": true
-        },
-        "--placement": {
-          "arity": 1,
-          "choices": [
-            "window",
-            "here"
-          ]
-        },
-        "--term-placement": {
-          "arity": 1
-        },
-        "--name": {
-          "arity": 1
-        },
-        "--label": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "label",
-          "max_count": 64
-        },
+        "--cwd": {"arity": 1, "pattern": "nonempty"},
+        "--prompt": {"arity": 1},
+        "--prompt-file": {"arity": 1, "pattern": "nonempty"},
+        "--input-file": {"arity": 1, "repeat": true, "pattern": "nonempty"},
+        "--placement": {"arity": 1, "choices": ["window", "here"]},
+        "--term-placement": {"arity": 1},
+        "--name": {"arity": 1},
+        "--label": {"arity": 1, "repeat": true, "pattern": "label", "max_count": 64},
         "--promote": {},
         "--no-promote": {},
         "--wait": {},
-        "--wait-timeout": {
-          "arity": 1,
-          "pattern": "duration"
-        },
-        "--result-file": {
-          "arity": 1
-        },
-        "--hook": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "hook"
-        },
-        "--override-escalation": {
-          "human_only": true
-        },
-        "--repo": {
-          "arity": 1,
-          "pattern": "repo"
-        },
-        "--worktree": {
-          "arity": 1,
-          "pattern": "worktree"
-        },
-        "--branch": {
-          "arity": 1
-        },
-        "--base": {
-          "arity": 1
-        },
-        "--ref": {
-          "arity": 1,
-          "pattern": "sha"
-        },
+        "--wait-timeout": {"arity": 1, "pattern": "duration", "max_seconds": 3153600000},
+        "--result-file": {"arity": 1, "pattern": "nonempty"},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_launch"},
+        "--override-escalation": {"human_only": true},
+        "--repo": {"arity": 1, "pattern": "repo"},
+        "--worktree": {"arity": 1, "pattern": "worktree"},
+        "--branch": {"arity": 1},
+        "--base": {"arity": 1},
+        "--ref": {"arity": 1, "pattern": "sha"},
         "--detach": {},
-        "--worktree-name": {
-          "arity": 1
-        },
+        "--worktree-name": {"arity": 1},
         "--no-bootstrap": {},
         "--copy-env": {},
         "--ephemeral": {}
       },
       "rules": [
+        {"exclusive": ["--auto-exit", "--no-auto-exit"]},
+        {"exclusive": ["--implicit-done", "--no-implicit-done"]},
+        {"exclusive": ["--promote", "--no-promote"]},
         {
-          "exclusive": [
-            "--auto-exit",
-            "--no-auto-exit"
-          ]
+          "when_eq": {"--worktree": "new"},
+          "requires": ["--repo"]
         },
         {
-          "exclusive": [
-            "--implicit-done",
-            "--no-implicit-done"
-          ]
+          "when_ne": {"--worktree": "new"},
+          "forbids": ["--branch", "--base", "--ref", "--detach", "--worktree-name", "--no-bootstrap", "--copy-env"]
+        },
+        {"exclusive": ["--prompt", "--prompt-file"]},
+        {
+          "when_eq": {"--mode": "headless"},
+          "requires_any": ["--skill", "--prompt", "--prompt-file"]
         },
         {
-          "exclusive": [
-            "--promote",
-            "--no-promote"
-          ]
+          "when_eq": {"--worktree": "new"},
+          "forbids_value": {"--cwd": "^/"}
         },
         {
-          "when": [
-            "--wait-timeout"
-          ],
-          "requires": [
-            "--wait"
-          ]
+          "when_pattern": {"--worktree": "^(?:new|/.+)$"},
+          "forbids_value": {"--cwd": "^session-dir$"}
         },
         {
-          "when_eq": {
-            "--worktree": "new"
-          },
-          "requires": [
-            "--repo"
-          ]
-        },
-        {
-          "when_ne": {
-            "--worktree": "new"
-          },
-          "forbids": [
-            "--branch",
-            "--base",
-            "--ref",
-            "--detach",
-            "--worktree-name",
-            "--no-bootstrap",
-            "--copy-env"
-          ]
-        },
-        {
-          "exclusive": [
-            "--prompt",
-            "--prompt-file"
-          ]
+          "when_pattern": {"--worktree": "^/.+"},
+          "cwd_within": {"flag": "--cwd", "base": "--worktree"}
         }
       ]
     },
     "resume": {
-      "positionals": [
-        {
-          "name": "agent_id",
-          "pattern": "agent_id",
-          "optional": true
-        }
-      ],
+      "positionals": [{"name": "agent_id", "pattern": "agent_id", "optional": true}],
       "flags": {
-        "--kind": {
-          "arity": 1,
-          "pattern": "kind"
-        },
-        "--mode": {
-          "arity": 1,
-          "choices": [
-            "interactive",
-            "headless"
-          ]
-        },
-        "--skill": {
-          "arity": 1,
-          "pattern": "kind"
-        },
-        "--plugin-dir": {
-          "arity": 1,
-          "repeat": true
-        },
-        "--model": {
-          "arity": 1,
-          "pattern": "model"
-        },
-        "--timeout": {
-          "arity": 1,
-          "pattern": "duration_or_none"
-        },
-        "--max-turns": {
-          "arity": 1,
-          "pattern": "posint"
-        },
-        "--permission-profile": {
-          "arity": 1
-        },
-        "--sandbox": {
-          "arity": 1,
-          "choices": [
-            "required",
-            "preferred",
-            "off"
-          ]
-        },
-        "--setting-sources": {
-          "arity": 1,
-          "pattern": "setting_sources"
-        },
+        "--kind": {"arity": 1, "pattern": "kind"},
+        "--mode": {"arity": 1, "choices": ["interactive", "headless"]},
+        "--skill": {"arity": 1, "pattern": "skill"},
+        "--plugin-dir": {"arity": 1, "repeat": true, "pattern": "nonempty"},
+        "--model": {"arity": 1, "pattern": "model"},
+        "--timeout": {"arity": 1, "pattern": "duration_or_none", "max_seconds": 3153600000},
+        "--max-turns": {"arity": 1, "pattern": "posint"},
+        "--permission-profile": {"arity": 1, "pattern": "nonempty"},
+        "--sandbox": {"arity": 1, "choices": ["required", "preferred", "off"]},
+        "--setting-sources": {"arity": 1, "pattern": "setting_sources"},
         "--reads-third-party": {},
-        "--env-allow": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "envname"
-        },
-        "--env-allowlist-only": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "envname_or_empty"
-        },
+        "--env-allow": {"arity": 1, "repeat": true, "pattern": "envname"},
+        "--env-allowlist-only": {"arity": 1, "repeat": true, "pattern": "envname_or_empty"},
         "--auto-exit": {},
         "--no-auto-exit": {},
         "--implicit-done": {},
         "--no-implicit-done": {},
-        "--cwd": {
-          "arity": 1
-        },
-        "--prompt": {
-          "arity": 1
-        },
-        "--prompt-file": {
-          "arity": 1
-        },
-        "--input-file": {
-          "arity": 1,
-          "repeat": true
-        },
-        "--placement": {
-          "arity": 1,
-          "choices": [
-            "window",
-            "here"
-          ]
-        },
-        "--term-placement": {
-          "arity": 1
-        },
-        "--name": {
-          "arity": 1
-        },
-        "--label": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "label",
-          "max_count": 64
-        },
+        "--cwd": {"arity": 1, "pattern": "nonempty"},
+        "--prompt": {"arity": 1},
+        "--prompt-file": {"arity": 1, "pattern": "nonempty"},
+        "--input-file": {"arity": 1, "repeat": true, "pattern": "nonempty"},
+        "--placement": {"arity": 1, "choices": ["window", "here"]},
+        "--term-placement": {"arity": 1},
+        "--name": {"arity": 1},
+        "--label": {"arity": 1, "repeat": true, "pattern": "label", "max_count": 64},
         "--promote": {},
         "--no-promote": {},
         "--wait": {},
-        "--wait-timeout": {
-          "arity": 1,
-          "pattern": "duration"
-        },
-        "--result-file": {
-          "arity": 1
-        },
-        "--hook": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "hook"
-        },
-        "--override-escalation": {
-          "human_only": true
-        },
-        "--select": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "label"
-        },
+        "--wait-timeout": {"arity": 1, "pattern": "duration", "max_seconds": 3153600000},
+        "--result-file": {"arity": 1, "pattern": "nonempty"},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_resume"},
+        "--override-escalation": {"human_only": true},
+        "--select": {"arity": 1, "repeat": true, "pattern": "select"},
         "--fork": {},
         "--reset": {
           "arity": 1,
           "repeat": true,
-          "choices": [
-            "model",
-            "plugin-dir",
-            "env-allow",
-            "env-allowlist-only",
-            "setting-sources",
-            "sandbox",
-            "timeout",
-            "max-turns",
-            "permission-profile",
-            "auto-exit",
-            "implicit-done",
-            "tools"
-          ]
+          "choices": ["model", "plugin-dir", "env-allow", "env-allowlist-only", "setting-sources", "sandbox", "timeout", "max-turns", "permission-profile", "auto-exit", "implicit-done", "tools"]
         },
-        "--allow-tainted": {
-          "human_only": true
-        }
+        "--allow-tainted": {"human_only": true}
       },
       "rules": [
+        {"exclusive": ["--auto-exit", "--no-auto-exit"]},
+        {"exclusive": ["--implicit-done", "--no-implicit-done"]},
+        {"exclusive": ["--promote", "--no-promote"]},
+        {"exclusive": ["--prompt", "--prompt-file"]},
         {
-          "exclusive": [
-            "--auto-exit",
-            "--no-auto-exit"
-          ]
+          "positional_xor_flag": {"positional": "agent_id", "flag": "--select"}
         },
         {
-          "exclusive": [
-            "--implicit-done",
-            "--no-implicit-done"
-          ]
+          "requires": ["--fork"],
+          "note": "stricter than the real tool: review-respond only forks (resume <id> --fork)"
         },
         {
-          "exclusive": [
-            "--promote",
-            "--no-promote"
-          ]
-        },
-        {
-          "when": [
-            "--wait-timeout"
-          ],
-          "requires": [
-            "--wait"
-          ]
-        },
-        {
-          "exclusive": [
-            "--prompt",
-            "--prompt-file"
-          ]
-        },
-        {
-          "positional_xor_flag": {
-            "positional": "agent_id",
-            "flag": "--select"
-          }
-        },
-        {
-          "when": [
-            "--override-escalation"
-          ],
-          "forbids": [
-            "--fork"
-          ]
+          "forbids": ["--wait"],
+          "note": "stricter than the real tool: review-respond never waits on the call; it starts the run and polls"
         }
       ]
     },
     "wait": {
-      "positionals": [
-        {
-          "name": "agent_id",
-          "pattern": "agent_id"
-        }
-      ],
+      "positionals": [{"name": "agent_id", "pattern": "agent_id"}],
       "flags": {
-        "--timeout": {
-          "arity": 1,
-          "pattern": "duration"
-        },
-        "--result-file": {
-          "arity": 1
-        }
+        "--timeout": {"arity": 1, "pattern": "duration", "max_seconds": 3153600000},
+        "--result-file": {"arity": 1, "pattern": "nonempty"}
       }
     },
     "list": {
       "flags": {
-        "--label": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "label"
-        },
+        "--label": {"arity": 1, "repeat": true, "pattern": "label"},
         "--needs-attention": {},
-        "--status": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "status"
-        },
-        "--session-state": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "status"
-        },
-        "--kind": {
-          "arity": 1,
-          "pattern": "kind"
-        },
-        "--repo": {
-          "arity": 1,
-          "pattern": "repo"
-        },
-        "--mode": {
-          "arity": 1,
-          "choices": [
-            "interactive",
-            "headless"
-          ]
-        },
-        "--forked-from": {
-          "arity": 1,
-          "pattern": "agent_id"
-        },
-        "--since": {
-          "arity": 1
-        }
+        "--status": {"arity": 1, "repeat": true, "pattern": "status"},
+        "--session-state": {"arity": 1, "repeat": true, "pattern": "status"},
+        "--kind": {"arity": 1, "pattern": "kind"},
+        "--repo": {"arity": 1, "pattern": "repo"},
+        "--mode": {"arity": 1, "choices": ["interactive", "headless"]},
+        "--forked-from": {"arity": 1, "pattern": "agent_id"},
+        "--since": {"arity": 1}
       }
     },
-    "show": {
-      "positionals": [
-        {
-          "name": "agent_id",
-          "pattern": "agent_id"
-        }
-      ]
-    },
+    "show": {"positionals": [{"name": "agent_id", "pattern": "agent_id"}]},
     "stop": {
-      "positionals": [
-        {
-          "name": "agent_id",
-          "pattern": "agent_id"
-        }
-      ],
+      "positionals": [{"name": "agent_id", "pattern": "agent_id"}],
       "flags": {
-        "--grace": {
-          "arity": 1,
-          "pattern": "duration"
-        }
+        "--grace": {"arity": 1, "pattern": "duration"}
       }
     },
     "teardown": {
-      "positionals": [
-        {
-          "name": "agent_id",
-          "pattern": "agent_id"
-        }
-      ],
+      "positionals": [{"name": "agent_id", "pattern": "agent_id"}],
       "flags": {
-        "--merged-head": {
-          "arity": 1,
-          "pattern": "merged_head"
-        },
-        "--force": {
-          "human_only": true
-        },
-        "--override-escalation": {
-          "human_only": true
-        },
-        "--hook": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "hook"
-        }
+        "--merged-head": {"arity": 1, "pattern": "merged_head"},
+        "--force": {"human_only": true},
+        "--override-escalation": {"human_only": true},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_teardown"}
       }
     }
+  },
+  "error_fields": {
+    "reason": null,
+    "agent_id": null,
+    "tool": "agent-spawn",
+    "lower_code": null,
+    "lower_error": null,
+    "details": null,
+    "candidates": [],
+    "hook": null,
+    "hook_stderr": null,
+    "decision_ids": []
   }
 }

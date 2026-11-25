@@ -5,7 +5,7 @@
   "globals_before_command": true,
   "duplicate_globals": "last_wins",
   "patterns": {
-    "selector": "^(?:(?:wt-)?[a-z2-7]{4,8}|/.+)$",
+    "selector": "^(?:(?:wt-)?[A-Za-z0-9]{4,}|/.+)$",
     "repo": "^[a-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._-]+)+$",
     "sha": "^[0-9a-f]{40}$",
     "label": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
@@ -16,11 +16,14 @@
     "duration": "^[1-9][0-9]*[smhdw]$",
     "hook": "^[a-z-]+=.+$",
     "uint": "^[0-9]+$",
-    "state": "^[a-z_]+$"
+    "state": "^[a-z_]+$",
+    "nonempty": "^.+$",
+    "hook_create": "^(?:pre-create|post-create)=.+$",
+    "hook_remove": "^(?:pre-remove|post-remove)=.+$"
   },
   "global_flags": {
     "--json": {},
-    "--config": {"arity": 1},
+    "--config": {"arity": 1, "pattern": "nonempty"},
     "--verbose": {},
     "--quiet": {},
     "--dry-run": {"only": ["create", "extract", "label add", "remove"]},
@@ -28,9 +31,7 @@
     "--actor": {"arity": 1, "pattern": "actor"},
     "--decision-id": {"arity": 1, "repeat": true, "pattern": "decision_id", "max_count": 32}
   },
-  "rules": [
-    {"exclusive": ["--verbose", "--quiet"]}
-  ],
+  "rules": [{"exclusive": ["--verbose", "--quiet"]}],
   "commands": {
     "create": {
       "flags": {
@@ -46,14 +47,17 @@
         "--no-bootstrap": {},
         "--copy-env": {},
         "--sparse": {"arity": 1, "repeat": true},
-        "--hook": {"arity": 1, "repeat": true, "pattern": "hook"},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_create"},
         "--source": {"arity": 1, "choices": ["auto", "local", "remote"]},
         "--depth": {"arity": 1, "pattern": "uint"},
         "--override-escalation": {"human_only": true}
       },
       "rules": [
         {"when": ["--throwaway"], "requires": ["--ref"]},
-        {"when": ["--throwaway"], "forbids": ["--branch", "--detach", "--base", "--name", "--holder", "--copy-env", "--no-bootstrap", "--sparse"]},
+        {
+          "when": ["--throwaway"],
+          "forbids": ["--branch", "--detach", "--base", "--name", "--holder", "--copy-env", "--no-bootstrap", "--sparse"]
+        },
         {"when_absent": ["--throwaway"], "forbids": ["--source", "--depth"]},
         {"exclusive": ["--branch", "--detach"]},
         {"exclusive": ["--copy-env", "--no-bootstrap"]}
@@ -66,7 +70,11 @@
         "--throwaways": {},
         "--worktrees": {},
         "--older-than": {"arity": 1, "pattern": "duration"},
-        "--state": {"arity": 1, "repeat": true, "pattern": "state"},
+        "--state": {
+          "arity": 1,
+          "repeat": true,
+          "choices": ["creating", "active", "unlinked", "missing", "clone_missing", "partial", "gone", "removed", "forgotten"]
+        },
         "--all": {}
       },
       "rules": [{"exclusive": ["--throwaways", "--worktrees"]}]
@@ -79,16 +87,23 @@
         "--keep-branch": {},
         "--holder": {"arity": 1, "pattern": "holder"},
         "--force": {"human_only": true},
-        "--hook": {"arity": 1, "repeat": true, "pattern": "hook"},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_remove"},
         "--override-escalation": {"human_only": true}
-      }
+      },
+      "rules": [
+        {
+          "requires_any": ["--yes", "--dry-run"],
+          "confirmation": true,
+          "note": "stricter than the real tool: a throwaway needs no confirmation, but review-respond always passes --yes; otherwise exit 13 confirmation_required"
+        }
+      ]
     },
     "extract": {
       "positionals": [{"name": "selector", "pattern": "selector"}],
       "flags": {
-        "--files-from": {"arity": 1, "dash_ok": true},
-        "--delete-from": {"arity": 1, "dash_ok": true},
-        "--dest": {"arity": 1, "required": true},
+        "--files-from": {"arity": 1, "pattern": "nonempty"},
+        "--delete-from": {"arity": 1, "pattern": "nonempty"},
+        "--dest": {"arity": 1, "required": true, "pattern": "nonempty"},
         "--max-size": {"arity": 1, "pattern": "uint"}
       },
       "rules": [

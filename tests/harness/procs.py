@@ -23,6 +23,25 @@ def start_time(pid: int) -> str | None:
     return text.rsplit(")", 1)[1].split()[19]
 
 
+def group_members(pgid: int) -> list[int]:
+    """Pids whose process group and session are both ``pgid`` (read-only scan of ``/proc``).
+
+    A group the registry created with ``start_new_session`` has pgid == sid == pid of its leader,
+    so a process elsewhere cannot match by accident.
+    """
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except OSError:
+            continue
+        if fields[0] != "Z" and int(fields[2]) == pgid and int(fields[3]) == pgid:
+            found.append(int(entry.name))
+    return found
+
+
 @dataclass(frozen=True)
 class Launched:
     pid: int
@@ -54,11 +73,22 @@ class ProcRegistry:
         ]
 
     def cleanup(self) -> list[Launched]:
-        """Kill exactly the recorded groups whose leader is still the process recorded at launch."""
+        """Kill exactly the recorded groups, never one that is the runner's own.
+
+        A group is killed when its leader is still the process recorded at launch, or when the
+        leader is gone but members of the group the registry created remain (a grandchild that
+        outlived its parent). A pid that now belongs to another process is never signalled.
+        """
         killed = []
         own = os.getpgrp()
-        for item in self.alive():
+        for item in self.launched:
             if item.pgid == own:
+                continue
+            now = start_time(item.pid)
+            leader_alive = item.started is not None and now == item.started
+            if now is not None and not leader_alive:
+                continue  # the pid was reused: not ours any more
+            if not leader_alive and (item.pgid != item.pid or not group_members(item.pgid)):
                 continue
             try:
                 os.killpg(item.pgid, signal.SIGKILL)

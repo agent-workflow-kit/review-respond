@@ -273,7 +273,7 @@ def test_stdin_is_closed_when_none_is_given(gateway: Gateway, fakes: Fakes) -> N
 
 
 def test_output_is_decoded_as_utf8_with_surrogateescape(gateway: Gateway, fakes: Fakes) -> None:
-    fakes.script("forgectl", "show", stdout="café bad\udcff end\n")
+    fakes.script("forgectl", "show", stdout="café bad\udcff end\n", schema=False)
     result = gateway.forgectl.show(PR)
     assert result.stdout == "café bad\udcff end\n"
     assert result.json is None and result.json_error is not None
@@ -281,7 +281,7 @@ def test_output_is_decoded_as_utf8_with_surrogateescape(gateway: Gateway, fakes:
 
 def test_json_output_is_parsed_and_bad_json_is_reported(gateway: Gateway, fakes: Fakes) -> None:
     accept(fakes, "forgectl", "show")
-    fakes.script("forgectl", "comments", stdout="not json")
+    fakes.script("forgectl", "comments", stdout="not json", schema=False)
     assert gateway.forgectl.show(PR).json == {}
     bad = gateway.forgectl.comments(PR)
     assert bad.json is None and bad.json_error and bad.ok

@@ -13,122 +13,58 @@
     "decision_id": "^[A-Za-z0-9._:@/-]{1,128}$",
     "sha256": "^[0-9a-f]{64}$",
     "scope": "^(?:pr-comment|forgectl)$",
-    "hook": "^[a-z0-9-]+=.+$",
-    "dedupe_key": "^[A-Za-z0-9._:@/=+-]{1,200}$",
-    "mention": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}$"
+    "hook": "^(?:pre-post|post-post)=.+$",
+    "dedupe_key": "^[A-Za-z0-9._:-]{1,128}$",
+    "mention": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}$",
+    "nonempty": "^.+$"
   },
   "global_flags": {
     "--json": {},
-    "--config": {
-      "arity": 1
-    },
+    "--config": {"arity": 1, "pattern": "nonempty"},
     "--dry-run": {},
     "--yes": {},
-    "--expect-plan": {
-      "arity": 1,
-      "pattern": "sha256",
-      "only": [
-        "reply"
-      ]
-    },
-    "--override-escalation": {
-      "arity": 1,
-      "repeat": true,
-      "pattern": "scope",
-      "human_only": true
-    },
-    "--actor": {
-      "arity": 1,
-      "pattern": "actor"
-    },
-    "--decision-id": {
-      "arity": 1,
-      "repeat": true,
-      "pattern": "decision_id",
-      "max_count": 32
-    },
-    "--hook": {
-      "arity": 1,
-      "repeat": true,
-      "pattern": "hook"
-    },
+    "--expect-plan": {"arity": 1, "pattern": "sha256", "only": ["reply"]},
+    "--override-escalation": {"arity": 1, "repeat": true, "pattern": "scope", "human_only": true},
+    "--actor": {"arity": 1, "pattern": "actor"},
+    "--decision-id": {"arity": 1, "repeat": true, "pattern": "decision_id", "max_count": 32},
+    "--hook": {"arity": 1, "repeat": true, "pattern": "hook"},
     "--verbose": {},
     "--quiet": {}
   },
-  "rules": [
-    {
-      "exclusive": [
-        "--verbose",
-        "--quiet"
-      ]
-    }
-  ],
+  "rules": [{"exclusive": ["--verbose", "--quiet"]}],
   "commands": {
     "reply": {
-      "positionals": [
-        {
-          "name": "pr",
-          "pattern": "pr"
-        }
-      ],
+      "positionals": [{"name": "pr", "pattern": "pr"}],
       "flags": {
-        "--to": {
-          "arity": 1,
-          "pattern": "comment_id",
-          "required": true
-        },
-        "--body-file": {
-          "arity": 1,
-          "required": true,
-          "dash_ok": true
-        },
-        "--expected-head": {
-          "arity": 1,
-          "pattern": "sha"
-        },
-        "--dedupe-key": {
-          "arity": 1,
-          "pattern": "dedupe_key"
-        },
+        "--to": {"arity": 1, "pattern": "comment_id", "required": true},
+        "--body-file": {"arity": 1, "required": true, "pattern": "nonempty"},
+        "--expected-head": {"arity": 1, "pattern": "sha"},
+        "--dedupe-key": {"arity": 1, "pattern": "dedupe_key"},
         "--allow-mention": {
           "arity": 1,
           "repeat": true,
-          "pattern": "mention"
+          "pattern": "mention",
+          "refuse": "human-only and interactive-only: review-respond runs without a terminal and never sends it"
         }
       },
       "rules": [
         {
-          "requires_any": [
-            "--yes",
-            "--dry-run"
-          ],
-          "note": "no TTY: the confirmation dialog would exit 13"
+          "requires_any": ["--yes", "--dry-run"],
+          "note": "no TTY: without --yes or --dry-run the real tool exits 13 confirmation_required",
+          "confirmation": true
         }
       ]
     },
     "resolve": {
-      "positionals": [
-        {
-          "name": "pr",
-          "pattern": "pr"
-        }
-      ],
+      "positionals": [{"name": "pr", "pattern": "pr"}],
       "flags": {
-        "--thread": {
-          "arity": 1,
-          "repeat": true,
-          "pattern": "thread_id",
-          "required": true,
-          "max_count": 100
-        }
+        "--thread": {"arity": 1, "repeat": true, "pattern": "thread_id", "required": true, "max_count": 100}
       },
       "rules": [
         {
-          "requires_any": [
-            "--yes",
-            "--dry-run"
-          ],
-          "note": "no TTY: the confirmation dialog would exit 13"
+          "requires_any": ["--yes", "--dry-run"],
+          "note": "no TTY: without --yes or --dry-run the real tool exits 13 confirmation_required",
+          "confirmation": true
         }
       ]
     }

@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 FAKEBIN = ROOT / "tests" / "fakebin"
 PINNED = ROOT / "tests" / "pinned"
 TOOLS = schemas.TOOLS
+MATCH_KEYS = frozenset({"positionals", "flags", "tail"})
 
 
 @dataclass(frozen=True)
@@ -82,9 +83,18 @@ class Fakes:
         ``schema`` defaults to ``<tool>/cli/<command>.json`` for exit 0 and
         ``<tool>/cli/error.json`` otherwise; pass a schema id for commands whose non-zero exit
         prints a result (agent-spawn ``wait``, pr-comment ``resolve``), or ``False`` to skip
-        validation explicitly.
+        validation explicitly. Text given as ``stdout=`` is not JSON the schema could check, so it
+        needs an explicit ``schema=`` (a schema id the text must parse to, or ``False``).
+
+        The command and the ``match`` keys are checked against the pinned grammar here, so a typo
+        fails at script time, not as an unscripted call later.
         """
         assert tool in TOOLS, tool
+        if stdout and json is None and schema is None:
+            raise ValueError(
+                "script(stdout=...) skips validation: pass schema=<id> or schema=False"
+            )
+        self._check_target(tool, command, match or {})
         result: dict[str, Any] = {"exit": exit, "stderr": stderr, "sleep": sleep}
         if json is not None:
             if schema is not False:
@@ -107,6 +117,25 @@ class Fakes:
         doc["entries"].append(entry)
         self._save(doc)
         return int(entry["id"])
+
+    @staticmethod
+    def _check_target(tool: str, command: str, match: dict[str, Any]) -> None:
+        grammar = _grammar(tool)
+        commands = grammar["commands"]
+        if command not in commands:
+            raise ValueError(f"{tool} has no command {command!r} in its pinned grammar")
+        unknown = set(match) - MATCH_KEYS
+        if unknown:
+            raise ValueError(f"unknown match keys {sorted(unknown)} (known: {sorted(MATCH_KEYS)})")
+        cmd = commands[command]
+        known_positionals = {p["name"] for p in cmd.get("positionals", [])}
+        known_flags = set(cmd.get("flags", {})) | set(grammar.get("global_flags", {}))
+        for name in match.get("positionals", {}):
+            if name not in known_positionals:
+                raise ValueError(f"{tool} {command} has no positional {name!r}")
+        for name in match.get("flags", {}):
+            if name not in known_flags:
+                raise ValueError(f"{tool} {command} has no flag {name!r}")
 
     @staticmethod
     def _default_schema(tool: str, command: str, exit: int) -> str:
@@ -172,6 +201,10 @@ class Fakes:
             raise AssertionError(
                 "a fake refused a call the real sibling would refuse:\n" + "\n".join(lines)
             )
+
+
+def _grammar(tool: str) -> dict[str, Any]:
+    return json.loads((PINNED / tool / "grammar.json").read_text())  # type: ignore[no-any-return]
 
 
 def assert_untrusted_only_in_files_or_stdin(calls: list[Call], texts: list[str]) -> None:

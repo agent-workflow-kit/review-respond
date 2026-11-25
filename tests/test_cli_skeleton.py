@@ -38,6 +38,8 @@ from review_respond.output import (
     write_atomic,
 )
 
+from .harness import schemas
+
 ROOT = Path(__file__).resolve().parent.parent
 DEFS = json.loads((ROOT / "schemas" / "defs.json").read_text())["$defs"]
 ERROR_SCHEMA = json.loads((ROOT / "schemas" / "cli" / "error.json").read_text())
@@ -80,21 +82,8 @@ def argv_for(command: str, *extra: str) -> list[str]:
 
 
 def validate_envelope(document: dict[str, Any]) -> None:
-    """Check an error document against schemas/cli/error.json and defs.json (no jsonschema)."""
-    assert set(document) == set(ERROR_SCHEMA["required"]) == {"error"}
-    body = document["error"]
-    props = DEFS["error_body"]["properties"]
-    assert set(body) <= set(props)
-    assert {"code", "message"} <= set(body)
-    assert body["code"] in DEFS["error_code"]["enum"]
-    assert isinstance(body["message"], str) and len(body["message"]) <= 4096
-    if "reason" in body:
-        assert body["reason"] in DEFS["error_reason"]["enum"]
-    if "details" in body:
-        assert isinstance(body["details"], dict)
-    if "lower_error" in body:
-        assert set(body["lower_error"]) <= set(DEFS["lower_error"]["properties"])
-        assert re.fullmatch(r"[a-z][a-z0-9_]{0,63}", body["lower_error"]["code"])
+    """Check an error document against schemas/cli/error.json (and the defs it references)."""
+    schemas.validate(ERROR_SCHEMA["$id"], document)
 
 
 @pytest.fixture

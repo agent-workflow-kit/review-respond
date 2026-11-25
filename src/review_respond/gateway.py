@@ -1,4 +1,5 @@
-"""Gateway for review-respond: the single boundary for subprocess, network and clock access.
+"""Gateway for review-respond: the single boundary for subprocess and network access
+and the clock of its process handling.
 
 Every call to an external program (the sibling awkit tools and git) goes through this module, so
 tests can substitute fakes (``tests/fakebin/``) and a test guard can prove that nothing else
@@ -37,18 +38,22 @@ from typing import Any, Literal, Protocol
 PathLike = str | os.PathLike[str]
 Timeout = float | None | Literal["default"]  # None: no limit; "default": the gateway default
 
-# The environment names git is allowed to inherit; every other GIT_* variable is dropped.
-_GIT_KEEP = frozenset({"GIT_CONFIG_COUNT"})
 _VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
-_TERM_GRACE = 2.0
+_TERM_GRACE = 2.0  # how long a group gets to exit after SIGTERM
+_KILL_WAIT = 2.0  # how long to wait for the pipes after SIGKILL (a member may have escaped)
 
 
 class GatewayError(Exception):
     """A call was refused before anything started (a malformed or unsafe argument)."""
 
 
+class SpawnError(GatewayError):
+    """The operating system refused to start the program (missing binary, too many arguments)."""
+
+
 class Clock(Protocol):
-    """The time source. Tests substitute a manual clock; nothing else reads the system clock."""
+    """The time source of the gateway's process handling (waits and timeouts) and of callers that
+    take a ``now`` (duration parsing). Tests substitute a manual clock."""
 
     def now(self) -> datetime: ...
 
@@ -93,14 +98,38 @@ def parse_version(text: str) -> tuple[int, int, int] | None:
     return int(match.group(1)), int(match.group(2)), int(match.group(3))
 
 
-def _arg(value: PathLike | int, what: str = "argument") -> str:
-    """One argv token that is data for the program, never an option."""
-    text = os.fspath(value) if isinstance(value, os.PathLike) else str(value)
-    if "\x00" in text:
+def _check_text(text: str, what: str, *, stdin: bool = False) -> None:
+    """Refuse a NUL byte or a lone surrogate (it cannot be encoded).
+
+    Stdin is text read back from files: it may carry surrogateescape characters (undecodable
+    bytes, U+DC80..U+DCFF) and may hold NUL; any other lone surrogate is refused.
+    """
+    if "\x00" in text and not stdin:
         raise GatewayError(f"{what} holds a NUL byte")
+    try:
+        text.encode("utf-8", "surrogateescape" if stdin else "strict")
+    except UnicodeEncodeError:
+        raise GatewayError(f"{what} is not valid text (a lone surrogate)") from None
+
+
+def _arg(value: PathLike | int, what: str = "argument") -> str:
+    """One argv token that is data for the program, never an option.
+
+    The empty string is allowed here (``--env-allowlist-only ''`` is a documented form); the
+    grammars of the callers refuse it where a sibling does.
+    """
+    text = os.fspath(value) if isinstance(value, os.PathLike) else str(value)
+    _check_text(text, what)
     if text.startswith("-") and text != "-":
         raise GatewayError(f"{what} starts with '-': refusing to pass it as an option")
     return text
+
+
+def _signal_group(pgid: int, sig: signal.Signals) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass
 
 
 def _decode(raw: bytes) -> str:
@@ -155,49 +184,116 @@ class Gateway:
         timeout: Timeout = "default",
         env: Mapping[str, str] | None = None,
     ) -> Result:
-        """Run ``argv`` without a shell. ``stdin`` is closed (not inherited) when None."""
-        if not argv:
-            raise GatewayError("empty argv")
-        tokens = tuple(argv)
-        if any("\x00" in t for t in tokens):
-            raise GatewayError("a NUL byte in argv")
-        limit = self.default_timeout if timeout == "default" else timeout
-        proc = subprocess.Popen(
-            tokens,
-            stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=os.fspath(cwd) if cwd is not None else None,
-            env=dict(self.env if env is None else env),
-            start_new_session=True,
-        )
-        # start_new_session makes the child its own group leader: pgid == pid.
-        pid = proc.pid
-        if self._on_spawn is not None:
-            self._on_spawn(pid)
+        """Run ``argv`` without a shell. ``stdin`` is closed (not inherited) when None.
+
+        Everything is validated before a process starts (``GatewayError``); a refusal by the
+        operating system is a ``SpawnError``. Once started, the whole process group is stopped
+        and reaped on every way out of this method (a timeout, ``KeyboardInterrupt``, an error
+        in ``on_spawn``).
+        """
+        tokens = self._validate(argv, stdin, cwd, env)
+        limit = self._timeout(timeout)
+        child_env = dict(self.env if env is None else env)
         data = stdin.encode("utf-8", "surrogateescape") if stdin is not None else None
+        try:
+            proc = subprocess.Popen(
+                tokens,
+                stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=os.fspath(cwd) if cwd is not None else None,
+                env=child_env,
+                start_new_session=True,
+            )
+        except (OSError, ValueError) as exc:
+            raise SpawnError(f"cannot start {tokens[0]!r}: {exc}") from exc
+        # start_new_session makes the child its own group leader: pgid == pid.
         timed_out = False
         try:
-            out, err = proc.communicate(data, timeout=limit)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            out, err = self._stop_group(proc)
+            if self._on_spawn is not None:
+                self._on_spawn(proc.pid)
+            try:
+                out, err = proc.communicate(data, timeout=limit)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                out, err = self._stop_group(proc)
+        except BaseException:
+            self._stop_group(proc)
+            raise
         return self._result(tokens, proc.returncode, out, err, timed_out)
+
+    def _timeout(self, timeout: Timeout) -> float | None:
+        limit = self.default_timeout if timeout == "default" else timeout
+        if limit is None:
+            return None
+        if isinstance(limit, bool) or not isinstance(limit, int | float):
+            raise GatewayError(f"timeout must be a number or None, not {limit!r}")
+        if not 0 < limit < float("inf"):
+            raise GatewayError(f"timeout must be positive, not {limit!r}")
+        return float(limit)
+
+    @staticmethod
+    def _validate(
+        argv: Sequence[str],
+        stdin: str | None,
+        cwd: PathLike | None,
+        env: Mapping[str, str] | None,
+    ) -> tuple[str, ...]:
+        if not argv or isinstance(argv, str):
+            raise GatewayError("argv must be a non-empty list of strings")
+        tokens = tuple(argv)
+        for token in tokens:
+            if not isinstance(token, str):
+                raise GatewayError(f"argv holds a non-string: {token!r}")
+            _check_text(token, "argv")
+        if not tokens[0]:
+            raise GatewayError("the program name is empty")
+        if stdin is not None:
+            if not isinstance(stdin, str):
+                raise GatewayError("stdin must be text")
+            _check_text(stdin, "stdin", stdin=True)
+        if cwd is not None and not os.path.isdir(cwd):
+            raise GatewayError(f"cwd is not a directory: {os.fspath(cwd)!r}")
+        for key, value in (env or {}).items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise GatewayError("environment names and values must be strings")
+            if not key or "=" in key:
+                raise GatewayError(f"bad environment name {key!r}")
+            _check_text(key, "environment name")
+            _check_text(value, f"environment value of {key}")
+        return tokens
 
     @staticmethod
     def _stop_group(proc: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
-        """Signal the process group this module created for ``proc`` and reap it."""
+        """Signal the process group this module created for ``proc``, reap it, return its output.
+
+        SIGTERM first, SIGKILL after the grace period. Members that ignore SIGTERM or detached their
+        output (so the pipes closed when the leader exited) are killed by a last SIGKILL to the
+        group. A member that left the group (setsid) may still hold a pipe: the wait for the pipes
+        is bounded, and what was read so far is returned.
+        """
         pid = proc.pid
-        for sig, wait in ((signal.SIGTERM, _TERM_GRACE), (signal.SIGKILL, None)):
-            try:
-                os.killpg(pid, sig)
-            except ProcessLookupError:
-                pass
-            try:
-                return proc.communicate(timeout=wait)
-            except subprocess.TimeoutExpired:
-                continue
-        return proc.communicate()
+        out: bytes | None = None
+        err: bytes | None = None
+        _signal_group(pid, signal.SIGTERM)
+        try:
+            out, err = proc.communicate(timeout=_TERM_GRACE)
+        except subprocess.TimeoutExpired as exc:
+            out, err = exc.stdout, exc.stderr
+        # The leader is gone or stuck; either way nothing in the group may outlive the call.
+        _signal_group(pid, signal.SIGKILL)
+        try:
+            out, err = proc.communicate(timeout=_KILL_WAIT)
+        except subprocess.TimeoutExpired as exc:
+            out, err = exc.stdout or out, exc.stderr or err
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+        try:
+            proc.wait(timeout=_KILL_WAIT)
+        except subprocess.TimeoutExpired:
+            pass
+        return out or b"", err or b""
 
     @staticmethod
     def _result(
@@ -536,7 +632,13 @@ class Jobsctl(_Tool):
         pass_env: Sequence[str] = (),
         actor: str | None = None,
     ) -> Result:
-        """Queue a job. ``job_argv`` is review-respond's own command line, never untrusted text."""
+        """Queue a job. ``job_argv`` is review-respond's own command line, never untrusted text.
+
+        ``env`` values travel on argv (``--env NAME=value``), visible to every local user in the
+        process list and stored in the job record: they must be non-secret (docs/interface.md
+        limits them to ``XDG_*`` paths). A secret goes through ``pass_env``, which names a
+        variable jobsctl copies from the environment it runs in.
+        """
         if not job_argv:
             raise GatewayError("a job needs an argv")
         args = [
@@ -577,17 +679,21 @@ class ClaudeSession(_Tool):
 class Git(_Tool):
     """git with global and system configuration ignored and no prompts.
 
-    TODO(#27): the hardened recipe (``-c`` overrides, hook and fsmonitor neutralization, the clean
-    throwaway only) lives in ``hgit.py`` and builds on ``run``; this wrapper only fixes the
-    environment so no call can read the user's git configuration.
+    ``run`` is for plain subcommands (``git <subcommand> ...``); its first argument must not look
+    like an option, which also keeps ``-c``, ``-C`` and ``--exec-path`` out.
+
+    TODO(#27): the hardened recipe (``-c`` overrides, ``-C``, hook and fsmonitor neutralization,
+    the clean throwaway only) lives in ``hgit.py``, which builds its own argv and its own
+    environment (including any ``GIT_CONFIG_COUNT``/``KEY_n``/``VALUE_n`` set) and calls
+    ``Gateway.run`` directly. This wrapper only fixes the environment so no plain call can read
+    the user's git configuration.
     """
 
     prog = "git"
 
     def environment(self) -> dict[str, str]:
-        env = {
-            k: v for k, v in self.gateway.env.items() if not k.startswith("GIT_") or k in _GIT_KEEP
-        }
+        """The gateway environment without any ``GIT_*`` name, plus the fixed safe settings."""
+        env = {k: v for k, v in self.gateway.env.items() if not k.startswith("GIT_")}
         env.update(
             GIT_CONFIG_GLOBAL=os.devnull,
             GIT_CONFIG_NOSYSTEM="1",

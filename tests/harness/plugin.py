@@ -53,7 +53,9 @@ class World:
 
 @pytest.fixture(autouse=True)
 def world(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[World]:
     """Isolate every test: private HOME and XDG, fakes first on PATH, the exec guard active."""
     for name in list(os.environ):
@@ -66,13 +68,22 @@ def world(
     w = World(root, fakes, procs)
     for key, value in w.env.items():
         monkeypatch.setenv(key, value)
-    guard.activate([fakes.bin_dir], root)
+    state = guard.activate([fakes.bin_dir], root)
     try:
         yield w
     finally:
         guard.deactivate()
         procs.cleanup()
     fakes.assert_clean()
+    if request.node.get_closest_marker("fakes_may_remain") is None:
+        left = fakes.remaining()
+        assert not left, (
+            f"scripted answers nobody asked for: {[(e['tool'], e['command']) for e in left]}"
+        )
+    # A test that provokes the guard on purpose says so; every other violation fails the test,
+    # even when the code under test swallowed the exception.
+    if request.node.get_closest_marker("provokes_guard") is None:
+        guard.assert_no_violations(state)
 
 
 @pytest.fixture

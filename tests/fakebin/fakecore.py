@@ -9,9 +9,17 @@ exits 2 with the sibling's usage envelope AND is appended to ``violations.jsonl`
 fails the test at teardown when that file is not empty. A well-formed call nobody scripted is a
 violation too, so a fake never invents an answer.
 
-The fake never reads the environment for its configuration: the directory it runs from holds
+The fake records the environment it started with in ``calls.jsonl`` (tests assert on what the
+gateway passed) but never uses it to decide an answer: the directory it runs from holds
 ``fakebin.state`` (the private state directory of the test) and a copy of the grammar. That keeps it
 working when review-respond builds a child environment from scratch.
+
+The grammars are deliberately STRICTER than the real tools in two ways: a flag given twice is
+refused unless the grammar says the tool accepts it (``duplicate_globals``: pr-comment accepts the
+same value twice, wtctl takes the last), because review-respond's wrapper never emits a duplicate;
+and a few forms the real tool accepts are refused because review-respond never sends them
+(``resume`` without ``--fork``, ``resume --fork --wait``, a ``--hook`` the tool does not need). Each
+such rule carries a ``note`` in the grammar.
 
 This module is standard library only and is copied per repository, never shared.
 """
@@ -22,6 +30,7 @@ import fcntl
 import json
 import os
 import re
+import select
 import sys
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -32,15 +41,19 @@ from typing import Any
 
 NEGATIVE_NUMBER = re.compile(r"^-[0-9]+(?:\.[0-9]+)?$")
 USAGE_EXIT = 2
+CONFIRMATION_EXIT = 13
+DURATION = re.compile(r"([0-9]+(?:\.[0-9]+)?)(ms|s|m|h|d)?")
+UNIT_SECONDS = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0, None: 1.0}
 
 
 class Usage(Exception):
-    """The real sibling would refuse this command line with a usage error."""
+    """The real sibling would refuse this command line (usage, or confirmation_required)."""
 
-    def __init__(self, message: str, exit_code: int = USAGE_EXIT) -> None:
+    def __init__(self, message: str, exit_code: int = USAGE_EXIT, code: str = "usage") -> None:
         super().__init__(message)
         self.message = message
         self.exit_code = exit_code
+        self.code = code
 
 
 @dataclass
@@ -63,7 +76,10 @@ class Grammar:
         self.patterns: dict[str, str] = dict(doc.get("patterns", {}))
         self.globals: dict[str, dict[str, Any]] = dict(doc.get("global_flags", {}))
         self.commands: dict[str, dict[str, Any]] = dict(doc["commands"])
-        self.before = bool(doc.get("globals_before_command", False))
+        # True: every global flag may precede the command; a list: only those flags may.
+        before = doc.get("globals_before_command", False)
+        self.before: bool | list[str] = before if isinstance(before, list) else bool(before)
+        self.error_fields: dict[str, Any] = dict(doc.get("error_fields", {}))
         self.dup_policy: str = doc.get("duplicate_globals", "error")
         self.human_only_exit: int = int(doc.get("human_only_exit", USAGE_EXIT))
 
@@ -82,6 +98,18 @@ class Grammar:
         pattern = self._pattern(spec)
         if pattern is not None and pattern.fullmatch(value) is None:
             raise Usage(f"argument {flag}: invalid value (does not match the documented grammar)")
+        bounds = spec.get("range")
+        if bounds is not None:
+            try:
+                number = int(value)
+            except ValueError:
+                raise Usage(f"argument {flag}: not a whole number") from None
+            if not bounds[0] <= number <= bounds[1]:
+                raise Usage(f"argument {flag}: out of range {bounds[0]}..{bounds[1]}")
+        cap = spec.get("max_seconds")
+        if cap is not None and (match := DURATION.fullmatch(value)):
+            if float(match[1]) * UNIT_SECONDS[match[2]] > cap:
+                raise Usage(f"argument {flag}: duration over the maximum")
 
     def allowed_globals(self, command: str) -> dict[str, dict[str, Any]]:
         out = {}
@@ -135,8 +163,9 @@ class Grammar:
             if i + 1 >= len(tokens):
                 raise Usage(f"argument {name}: expected one argument")
             raw = tokens[i + 1]
+            # argparse: a lone "-" (stdin) is a value, other dash-leading text is an option.
             looks_flag = raw.startswith("-") and raw != "-" and not NEGATIVE_NUMBER.match(raw)
-            if looks_flag and not spec.get("dash_ok"):
+            if looks_flag:
                 raise Usage(f"argument {name}: expected one argument")
             value = raw
             i += 2
@@ -166,13 +195,18 @@ class Grammar:
             if _has_surrogate(token):
                 raise Usage(f"argument {index} is not valid UTF-8")
         if tokens and tokens[0] == "--version":
+            if len(tokens) != 1:
+                raise Usage("--version takes no other argument")
             return Parsed(command="--version")
         flags: dict[str, Any] = {}
         i = 0
         while i < len(tokens) and tokens[i].startswith("-"):
             if tokens[i] == "--":
                 raise Usage("'--' before the command is not accepted")
-            if not self.before:
+            allowed_first = self.before is True or (
+                isinstance(self.before, list) and tokens[i].split("=")[0] in self.before
+            )
+            if not allowed_first:
                 raise Usage("global flags must follow the command")
             i = self._take(tokens, i, self.globals, flags, is_global=True)
         command, i = self.resolve_command(tokens, i)
@@ -256,6 +290,9 @@ class Grammar:
             if limit is not None and isinstance(values, list) and len(values) > limit:
                 raise Usage(f"argument {name}: at most {limit} values")
         for name in flags:
+            if specs[name].get("refuse"):
+                raise Usage(f"{name}: {specs[name]['refuse']}")
+        for name in flags:
             if specs[name].get("human_only"):
                 actor = flags.get("--actor")
                 if not (isinstance(actor, str) and actor.startswith("human:")):
@@ -277,13 +314,41 @@ class Grammar:
             return
         if "when_eq" in rule and not all(flags.get(k) == v for k, v in rule["when_eq"].items()):
             return
+        if "when_pattern" in rule and not all(
+            k in flags and re.fullmatch(v, str(flags[k])) for k, v in rule["when_pattern"].items()
+        ):
+            return
         if "when_ne" in rule and not all(flags.get(k) != v for k, v in rule["when_ne"].items()):
             return
         for name in rule.get("requires", []):
             if not has(name):
                 raise Usage(f"{name} is required here")
         if "requires_any" in rule and not any(has(n) for n in rule["requires_any"]):
+            if rule.get("confirmation"):
+                raise Usage(
+                    f"confirmation required: pass one of {', '.join(rule['requires_any'])} "
+                    "(no terminal to ask on)",
+                    CONFIRMATION_EXIT,
+                    "confirmation_required",
+                )
             raise Usage(f"one of {', '.join(rule['requires_any'])} is required here")
+        for name, pattern in rule.get("forbids_value", {}).items():
+            if has(name) and re.search(pattern, str(flags[name])):
+                raise Usage(f"{name}: this value is not accepted here")
+        if "cwd_within" in rule:
+            flag, base = rule["cwd_within"]["flag"], rule["cwd_within"]["base"]
+            if has(flag) and has(base):
+                root = os.path.normpath(str(flags[base]))
+                target = os.path.normpath(os.path.join(root, str(flags[flag])))
+                if target != root and not target.startswith(root.rstrip("/") + "/"):
+                    raise Usage(f"{flag} lies outside the worktree")
+        if "distinct_names" in rule:
+            first, second = rule["distinct_names"]
+            seen = [v.split("=", 1)[0] for v in flags.get(first, [])]
+            if len(seen) != len(set(seen)):
+                raise Usage(f"{first}: a name given twice")
+            if set(seen) & set(flags.get(second, [])):
+                raise Usage(f"a name given with both {first} and {second}")
         for name in rule.get("forbids", []):
             if has(name):
                 raise Usage(f"{name} is not accepted here")
@@ -408,12 +473,45 @@ def _enc(text: str) -> bytes:
     return text.encode("utf-8", "surrogateescape")
 
 
+def _envelope(grammar: Grammar, code: str, message: str) -> dict[str, Any]:
+    """The sibling's error envelope with every key its pinned error schema requires."""
+    return {"error": {"code": code, "message": message, **grammar.error_fields}}
+
+
+def _words_before_tail(tokens: Sequence[str]) -> list[str]:
+    """Tokens before the ``--`` that starts a command tail (a leading ``--`` is not a tail)."""
+    cut = tokens.index("--") if "--" in tokens else 0
+    return list(tokens[:cut]) if cut else list(tokens)
+
+
+def _consumes_stdin(parsed: Parsed) -> bool:
+    """True when the grammar reads stdin: a lone ``-`` as a flag value or a positional."""
+    values: list[Any] = list(parsed.positionals.values())
+    values += list(parsed.flags.values())
+    for value in values:
+        if value == "-" or (isinstance(value, list) and "-" in value):
+            return True
+    return False
+
+
+def _pending_stdin() -> bytes:
+    """Whatever the caller already piped (one bounded read; never waits for an open pipe)."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return b""
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.5)
+        return os.read(sys.stdin.fileno(), 65536) if ready else b""
+    except (OSError, ValueError):
+        return b""
+
+
 def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None) -> int:
     here = base if base is not None else Path(__file__).resolve().parent
     grammar = _load_grammar(here, prog)
     state = _state_dir(here)
     tokens = list(sys.argv[1:] if argv is None else argv)
-    wants_json = "--json" in tokens
+    # A guess for the usage envelope only: a call that parsed is judged on its parsed flags.
+    json_guess = "--json" in _words_before_tail(tokens)
     record: dict[str, Any] = {
         "tool": prog,
         "argv": tokens,
@@ -424,7 +522,7 @@ def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None)
     }
     try:
         parsed = grammar.parse(tokens)
-        if parsed.command != "--version" and not wants_json:
+        if parsed.command != "--version" and "--json" not in parsed.flags:
             raise Usage("review-respond always calls this program with --json")
     except Usage as exc:
         record.update(outcome="usage_error", message=exc.message, exit=exc.exit_code, parsed=None)
@@ -433,8 +531,8 @@ def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None)
             state.record_violation(
                 {"tool": prog, "kind": "usage", "argv": tokens, "message": exc.message}
             )
-        envelope = {"error": {"code": "usage", "message": exc.message}}
-        out = _enc(json.dumps(envelope) + "\n") if wants_json else b""
+        envelope = _envelope(grammar, exc.code, exc.message)
+        out = _enc(json.dumps(envelope) + "\n") if json_guess else b""
         _emit(out, _enc(f"{prog}: error: {exc.message}\n"))
         return exc.exit_code
     record["parsed"] = {
@@ -449,8 +547,22 @@ def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None)
             state.record_call(record)
         _emit(_enc(f"{prog} {grammar.version}\n"), b"")
         return 0
-    if "-" in tokens and sys.stdin is not None:
-        record["stdin"] = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+    if _consumes_stdin(parsed):
+        if sys.stdin is not None:
+            record["stdin"] = sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
+    else:
+        stray = _pending_stdin()
+        if stray:
+            record["stdin"] = stray.decode("utf-8", "surrogateescape")
+            with state.locked():
+                state.record_violation(
+                    {
+                        "tool": prog,
+                        "kind": "stdin",
+                        "argv": tokens,
+                        "message": "stdin was piped but no argument reads it",
+                    }
+                )
     with state.locked():
         entry = state.take_response(prog, parsed)
         if entry is None:
@@ -464,7 +576,7 @@ def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None)
             state.record_call(record)
     if entry is None:
         message = f"{prog}: no response scripted for this call"
-        out = _enc(json.dumps({"error": {"code": "internal", "message": message}}) + "\n")
+        out = _enc(json.dumps(_envelope(grammar, "internal", message)) + "\n")
         _emit(out, _enc(message + "\n"))
         return 99
     result = entry["result"]

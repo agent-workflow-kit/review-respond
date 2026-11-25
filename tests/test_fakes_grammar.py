@@ -15,173 +15,335 @@ AG = "ag-aaaaaaaa"
 JB = "jb-aaaaaaaa"
 WT = "wt-aaaaaaaa"
 
-# (tool, argv, why). Exit 2 unless the case is a jobsctl human-only refusal (13).
+# (tool, argv, expected). ``expected`` is a substring of the fake's reason: a case passes only
+# when the rule under test fired, not because some other rule (such as the missing --json) did.
+# Every case carries --json except the one that tests its absence.
+YES = ["--yes"]
+CREATE = ["create", "--throwaway", "--repo", REPO]
+REPLY = ["reply", PR, "--to", "gh:ic:x", "--body-file", "-", "--yes", "--json"]
+JOB_ADD = ["add", "--queue", "respond"]
 REFUSED: list[tuple[str, list[str], str]] = [
-    ("forgectl", ["prs", "--author", "me", "--bogus", "--json"], "unknown flag"),
-    ("forgectl", ["prs", "--json"], "no --repo, --author or --review-requested-from"),
+    ("forgectl", ["prs", "--author", "me", "--bogus", "--json"], "unrecognized argument"),
+    ("forgectl", ["prs", "--json"], "one of --author, --review-requested-from"),
+    ("forgectl", ["prs", "--repo", REPO, "--host", "git.example.test", "--json"], "mutually"),
+    ("forgectl", ["prs", "--author", "me", "--limit", "1001", "--json"], "out of range"),
+    ("forgectl", ["prs", "--author", "me", "--limit", "0", "--json"], "out of range"),
+    ("forgectl", ["prs", "--author", "me", "--state", "bogus", "--json"], "invalid choice"),
+    ("forgectl", ["prs", "--author", "-x", "--json"], "expected one argument"),
+    ("forgectl", ["prs", "--author", "trailing.", "--json"], "invalid value"),
+    ("forgectl", ["prs", "--repo", "git.example.test/../x", "--json"], "invalid value"),
+    ("forgectl", ["prs", "--repo", "git.example.test/-owner/x", "--json"], "invalid value"),
+    ("forgectl", ["prs", "--repo", "git.example.test:0/o/r", "--json"], "invalid value"),
     (
         "forgectl",
-        ["prs", "--repo", REPO, "--host", "git.example.test", "--json"],
-        "--repo + --host",
+        ["prs", "--host", "git.example.test:65536", "--author", "me", "--json"],
+        "invalid",
     ),
-    ("forgectl", ["prs", "--author", "me", "--limit", "1001", "--json"], "limit over 1000"),
-    ("forgectl", ["prs", "--author", "me", "--state", "bogus", "--json"], "bad choice"),
-    ("forgectl", ["prs", "--author", "-x", "--json"], "value that looks like an option"),
-    ("forgectl", ["show", REPO, "--json"], "PR reference without #N"),
-    ("forgectl", ["show", "--json"], "missing PR"),
-    ("forgectl", ["comments", f"{REPO}#07", "--json"], "leading zero in the number"),
-    ("forgectl", ["compare", PR, "--from", SHA, "--json"], "missing --to"),
-    ("forgectl", ["compare", PR, "--from", "abc", "--to", SHA, "--json"], "short sha"),
-    ("forgectl", ["access", REPO, "--json"], "missing user"),
-    ("forgectl", ["reviews", PR, "--json"], "command review-respond does not use"),
-    ("forgectl", ["show", PR, "--yes", "--json"], "write-only flag on a read"),
-    ("forgectl", ["show", PR, "--json", "--json"], "flag given twice"),
-    ("forgectl", ["show", PR], "no --json"),
-    ("forgectl", ["--verbose", "show", PR, "--quiet", "--json"], "--verbose with --quiet"),
-    ("forgectl", ["show", PR, "--js", "--json"], "abbreviated flag"),
-    ("agent-spawn", ["resume", AG, "--fork", "--bogus", "--json"], "unknown flag"),
-    ("agent-spawn", ["resume", "--fork", "--json"], "no agent id and no --select"),
-    ("agent-spawn", ["resume", AG, "--select", "a=b", "--json"], "id and --select"),
-    ("agent-spawn", ["resume", "ag-AAAAAAAA", "--json"], "bad agent id"),
-    ("agent-spawn", ["resume", AG, "--prompt", "x", "--prompt-file", "/p", "--json"], "exclusive"),
-    ("agent-spawn", ["resume", AG, "--env-allowlist-only", "A", "B", "--json"], "nargs form"),
-    ("agent-spawn", ["resume", AG, "--env-allowlist-only", "A-B", "--json"], "bad env name"),
-    ("agent-spawn", ["resume", AG, "--label", "agent=x", "--json"], "reserved label key"),
-    ("agent-spawn", ["resume", AG, "--label", "owner", "--json"], "label without ="),
-    ("agent-spawn", ["resume", AG, "--sandbox", "none", "--json"], "bad choice"),
-    ("agent-spawn", ["resume", AG, "--no-promote", "--promote", "--json"], "exclusive"),
-    ("agent-spawn", ["resume", AG, "--auto-exit", "--no-auto-exit", "--json"], "exclusive"),
-    ("agent-spawn", ["resume", AG, "--allow-tainted", "--actor", "auto:x", "--json"], "human-only"),
-    ("agent-spawn", ["launch", "--worktree", "new", "--json"], "--worktree new needs --repo"),
-    ("agent-spawn", ["launch", "--branch", "b", "--json"], "--branch without --worktree new"),
-    ("agent-spawn", ["launch", "--implicit-done", "--no-implicit-done", "--json"], "exclusive"),
-    ("agent-spawn", ["wait", "--json"], "missing agent id"),
-    ("agent-spawn", ["wait", AG, "--wait-timeout", "5s", "--json"], "launch flag on wait"),
-    ("agent-spawn", ["stop", AG, "--force", "--json"], "teardown flag on stop"),
-    ("agent-spawn", ["teardown", AG, "--force", "--actor", "auto:x", "--json"], "human-only"),
-    ("agent-spawn", ["--json", "show", AG], "global flag before the command"),
-    ("agent-spawn", ["prune", "--json"], "command review-respond does not use"),
-    ("agent-spawn", ["show", AG, "--dry-run", "--json"], "--dry-run on a read"),
-    ("pr-comment", ["reply", PR, "--to", "gh:ic:x", "--body-file", "-", "--json"], "no --yes"),
-    ("pr-comment", ["reply", PR, "--body-file", "-", "--yes", "--json"], "missing --to"),
-    ("pr-comment", ["reply", PR, "--to", "bad", "--body-file", "-", "--yes", "--json"], "bad id"),
-    ("pr-comment", ["reply", PR, "--to", "gh:ic:x", "--yes", "--json"], "missing --body-file"),
+    ("forgectl", ["prs", "--author", "me", "--updated-since", "0", "--json"], "invalid value"),
+    ("forgectl", ["prs", "--author", "me", "--updated-since", "-5m", "--json"], "expected one"),
+    ("forgectl", ["--timeout", "0", "prs", "--author", "me", "--json"], "invalid value"),
+    ("forgectl", ["--config", "", "show", PR, "--json"], "invalid value"),
+    ("forgectl", ["show", REPO, "--json"], "invalid value"),
+    ("forgectl", ["show", "https://git.example.test/org/repo/issues/7", "--json"], "invalid value"),
+    ("forgectl", ["show", "--json"], "required: pr"),
+    ("forgectl", ["comments", f"{REPO}#07", "--json"], "invalid value"),
+    ("forgectl", ["compare", PR, "--from", SHA, "--json"], "required: --to"),
+    ("forgectl", ["compare", PR, "--from", "abc", "--to", SHA, "--json"], "invalid value"),
+    ("forgectl", ["access", REPO, "--json"], "required: user"),
+    ("forgectl", ["reviews", PR, "--json"], "invalid command"),
+    ("forgectl", ["show", PR, "--yes", "--json"], "unrecognized argument"),
+    ("forgectl", ["show", PR, "--json", "--json"], "more than once"),
+    ("forgectl", ["show", PR], "always calls this program with --json"),
+    ("forgectl", ["--verbose", "show", PR, "--quiet", "--json"], "mutually"),
+    ("forgectl", ["show", PR, "--js", "--json"], "unrecognized argument"),
+    ("forgectl", ["--version", "--bogus"], "--version takes no other argument"),
+    ("forgectl", ["--version", "show"], "--version takes no other argument"),
+    ("agent-spawn", ["resume", AG, "--fork", "--bogus", "--json"], "unrecognized argument"),
+    ("agent-spawn", ["resume", "--fork", "--json"], "exactly one of"),
+    ("agent-spawn", ["resume", AG, "--fork", "--select", "a=b", "--json"], "exactly one of"),
+    ("agent-spawn", ["resume", "ag-AAAAAAAA", "--fork", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--json"], "--fork is required"),
+    ("agent-spawn", ["resume", AG, "--fork", "--wait", "--json"], "--wait is not accepted"),
     (
-        "pr-comment",
-        ["reply", PR, "--to", "gh:ic:x", "--body-file", "-", "--yes", "--bogus"],
-        "flag",
-    ),
-    ("pr-comment", ["resolve", PR, "--yes", "--json"], "missing --thread"),
-    ("pr-comment", ["resolve", PR, "--thread", "gh:ic:x", "--yes", "--json"], "not a thread id"),
-    (
-        "pr-comment",
-        ["resolve", PR, "--thread", "gh:rt:x", "--yes", "--body-file", "-"],
-        "reply flag",
-    ),
-    ("pr-comment", ["resolve", PR, "--thread", "gh:rt:x", "--expect-plan", "0" * 64, "--yes"], "x"),
-    ("pr-comment", ["approve", PR, "--yes", "--json"], "command review-respond does not use"),
-    ("pr-comment", ["--", "reply", PR], "-- before the command"),
-    (
-        "pr-comment",
-        ["reply", PR, "--to", "gh:ic:x", "--body-file", "-", "--yes", "--actor", "x"],
-        "actor",
+        "agent-spawn",
+        ["resume", AG, "--fork", "--prompt", "x", "--prompt-file", "/p", "--json"],
+        "mutually",
     ),
     (
-        "pr-comment",
-        [
-            "reply",
-            PR,
-            "--to",
-            "gh:ic:x",
-            "--body-file",
-            "-",
-            "--yes",
-            "--override-escalation=forgectl",
-            "--actor",
-            "auto:x",
-            "--json",
-        ],
+        "agent-spawn",
+        ["resume", AG, "--fork", "--env-allowlist-only", "A", "B", "--json"],
+        "unrecognized argument",
+    ),
+    (
+        "agent-spawn",
+        ["resume", AG, "--fork", "--env-allowlist-only", "A-B", "--json"],
+        "invalid value",
+    ),
+    ("agent-spawn", ["resume", AG, "--fork", "--label", "agent=x", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--label", "owner", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--sandbox", "none", "--json"], "invalid choice"),
+    ("agent-spawn", ["resume", AG, "--fork", "--no-promote", "--promote", "--json"], "mutually"),
+    (
+        "agent-spawn",
+        ["resume", AG, "--fork", "--auto-exit", "--no-auto-exit", "--json"],
+        "mutually",
+    ),
+    (
+        "agent-spawn",
+        ["resume", AG, "--fork", "--allow-tainted", "--actor", "auto:x", "--json"],
         "human-only",
-    ),  # fmt: skip
-    ("wtctl", ["create", "--throwaway", "--repo", REPO, "--json"], "throwaway without --ref"),
+    ),
+    ("agent-spawn", ["resume", AG, "--fork", "--skill", ".x", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--skill", "-x", "--json"], "expected one argument"),
+    ("agent-spawn", ["resume", AG, "--fork", "--timeout", "0", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--timeout", "0s", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--timeout", "40000d", "--json"], "over the maximum"),
+    ("agent-spawn", ["resume", AG, "--fork", "--timeout", "1" * 33, "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--cwd", "", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--prompt-file", "", "--json"], "invalid value"),
     (
-        "wtctl",
-        ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--branch", "b", "--json"],
-        "x",
+        "agent-spawn",
+        ["resume", AG, "--fork", "--permission-profile", "", "--json"],
+        "invalid value",
+    ),
+    ("agent-spawn", ["resume", AG, "--fork", "--plugin-dir", "", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--input-file", "", "--json"], "invalid value"),
+    ("agent-spawn", ["resume", AG, "--fork", "--hook", "pre-launch=x", "--json"], "invalid value"),
+    ("agent-spawn", ["launch", "--hook", "bogus=x", "--json"], "invalid value"),
+    ("agent-spawn", ["launch", "--worktree", "new", "--json"], "--repo is required"),
+    ("agent-spawn", ["launch", "--branch", "b", "--json"], "--branch is not accepted"),
+    ("agent-spawn", ["launch", "--implicit-done", "--no-implicit-done", "--json"], "mutually"),
+    (
+        "agent-spawn",
+        ["launch", "--worktree", "none", "--mode", "headless", "--json"],
+        "one of --skill, --prompt",
     ),
     (
-        "wtctl",
-        ["create", "--repo", REPO, "--source", "remote", "--json"],
-        "--source without --throwaway",
+        "agent-spawn",
+        ["launch", "--worktree", "new", "--repo", REPO, "--cwd", "/abs", "--json"],
+        "not accepted here",
     ),
-    ("wtctl", ["create", "--throwaway", "--repo", REPO, "--ref", "abc", "--json"], "short sha"),
-    ("wtctl", ["create", "--throwaway", "--ref", SHA, "--json"], "missing --repo"),
+    (
+        "agent-spawn",
+        ["launch", "--worktree", "/work", "--cwd", "session-dir", "--json"],
+        "not accepted here",
+    ),
+    (
+        "agent-spawn",
+        ["launch", "--worktree", "/work", "--cwd", "../other", "--json"],
+        "outside the worktree",
+    ),
+    (
+        "agent-spawn",
+        ["launch", "--worktree", "/work", "--cwd", "/elsewhere", "--json"],
+        "outside the worktree",
+    ),
+    ("agent-spawn", ["wait", "--json"], "required: agent_id"),
+    ("agent-spawn", ["wait", AG, "--wait-timeout", "5s", "--json"], "unrecognized argument"),
+    ("agent-spawn", ["stop", AG, "--force", "--json"], "unrecognized argument"),
+    ("agent-spawn", ["teardown", AG, "--force", "--actor", "auto:x", "--json"], "human-only"),
+    ("agent-spawn", ["teardown", AG, "--hook", "post-launch=x", "--json"], "invalid value"),
+    ("agent-spawn", ["prune", "--json"], "invalid command"),
+    ("agent-spawn", ["show", AG, "--dry-run", "--json"], "unrecognized argument"),
+    (
+        "pr-comment",
+        ["reply", PR, "--to", "gh:ic:x", "--body-file", "-", "--json"],
+        "confirmation required",
+    ),
+    ("pr-comment", ["resolve", PR, "--thread", "gh:rt:x", "--json"], "confirmation required"),
+    ("pr-comment", ["reply", PR, "--body-file", "-", "--yes", "--json"], "required: --to"),
+    (
+        "pr-comment",
+        ["reply", PR, "--to", "bad", "--body-file", "-", "--yes", "--json"],
+        "invalid value",
+    ),
+    ("pr-comment", ["reply", PR, "--to", "gh:ic:x", "--yes", "--json"], "required: --body-file"),
+    (
+        "pr-comment",
+        ["reply", PR, "--to", "gh:ic:x", "--body-file", "-", "--yes", "--bogus", "--json"],
+        "unrecognized argument",
+    ),
+    (
+        "pr-comment",
+        ["reply", PR, "--to", "gh:ic:x", "--body-file", "-x", "--yes", "--json"],
+        "expected one argument",
+    ),
+    (
+        "pr-comment",
+        ["reply", PR, "--to", "gh:ic:x", "--body-file", "", "--yes", "--json"],
+        "invalid value",
+    ),
+    ("pr-comment", [*REPLY, "--dedupe-key", "a/b"], "invalid value"),
+    ("pr-comment", [*REPLY, "--dedupe-key", "k" * 129], "invalid value"),
+    ("pr-comment", [*REPLY, "--hook", "bogus=x"], "invalid value"),
+    (
+        "pr-comment",
+        [*REPLY, "--allow-mention", "someone", "--actor", "human:me"],
+        "interactive-only",
+    ),
+    ("pr-comment", ["resolve", PR, "--yes", "--json"], "required: --thread"),
+    ("pr-comment", ["resolve", PR, "--thread", "gh:ic:x", "--yes", "--json"], "invalid value"),
+    (
+        "pr-comment",
+        ["resolve", PR, "--thread", "gh:rt:x", "--yes", "--body-file", "-", "--json"],
+        "unrecognized argument",
+    ),
+    (
+        "pr-comment",
+        ["resolve", PR, "--thread", "gh:rt:x", "--expect-plan", "0" * 64, "--yes", "--json"],
+        "unrecognized argument",
+    ),
+    ("pr-comment", ["approve", PR, "--yes", "--json"], "invalid command"),
+    ("pr-comment", ["--", "reply", PR, "--json"], "'--' before the command"),
+    ("pr-comment", [*REPLY, "--actor", "x"], "invalid value"),
+    ("pr-comment", [*REPLY, "--override-escalation=forgectl", "--actor", "auto:x"], "human-only"),
+    ("wtctl", [*CREATE, "--json"], "--ref is required"),
+    ("wtctl", [*CREATE, "--ref", SHA, "--branch", "b", "--json"], "--branch is not accepted"),
     (
         "wtctl",
-        ["create", "--throwaway", "--repo", REPO, "--ref", SHA, "--label", "A=b", "--json"],
-        "x",
+        ["create", "--repo", REPO, "--source", "remote", "--ref", SHA, "--json"],
+        "--source is not accepted",
     ),
-    ("wtctl", ["extract", WT, "--dest", "/d", "--json"], "no list"),
+    ("wtctl", [*CREATE, "--ref", "abc", "--json"], "invalid value"),
+    ("wtctl", ["create", "--throwaway", "--ref", SHA, "--json"], "required: --repo"),
+    ("wtctl", [*CREATE, "--ref", SHA, "--label", "A=b", "--json"], "invalid value"),
+    ("wtctl", [*CREATE, "--ref", SHA, "--hook", "pre-remove=x", "--json"], "invalid value"),
+    ("wtctl", ["extract", WT, "--dest", "/d", "--json"], "one of --files-from, --delete-from"),
     (
         "wtctl",
-        ["extract", WT, "--files-from", "-", "--delete-from", "-", "--dest", "/d"],
-        "stdin twice",
+        ["extract", WT, "--files-from", "-", "--delete-from", "-", "--dest", "/d", "--json"],
+        "cannot both read",
     ),
-    ("wtctl", ["extract", WT, "--files-from", "/f", "--json"], "missing --dest"),
+    ("wtctl", ["extract", WT, "--files-from", "/f", "--json"], "required: --dest"),
+    (
+        "wtctl",
+        ["extract", WT, "--files-from", "-x", "--dest", "/d", "--json"],
+        "expected one argument",
+    ),
+    ("wtctl", ["extract", WT, "--files-from", "", "--dest", "/d", "--json"], "invalid value"),
     (
         "wtctl",
         ["extract", "rel/path", "--files-from", "/f", "--dest", "/d", "--json"],
-        "relative path",
+        "invalid value",
     ),
-    ("wtctl", ["remove", WT, "--force", "--json"], "human-only"),
-    ("wtctl", ["remove", WT, "--dry-run", "--bogus", "--json"], "unknown flag"),
-    ("wtctl", ["show", "foo/bar", "--json"], "relative path selector"),
-    ("wtctl", ["label", "add", WT, "--json"], "no labels"),
-    ("wtctl", ["label", "add", WT, "Bad Key=v", "--json"], "bad label"),
-    ("wtctl", ["label", "--json"], "no subcommand"),
-    ("wtctl", ["list", "--throwaways", "--worktrees", "--json"], "exclusive"),
-    ("wtctl", ["locate", "not a repo", "--json"], "bad repo id"),
-    ("wtctl", ["status", WT, "--json"], "command review-respond does not use"),
-    ("wtctl", ["list", "--dry-run", "--json"], "--dry-run on a command without it"),
-    ("jobsctl", ["add", "--queue", "respond", "--json"], "no -- argv"),
-    ("jobsctl", ["add", "--json", "--"], "empty argv"),
-    ("jobsctl", ["add", "--queue", "Bad Q", "--json", "--", "x"], "bad queue"),
-    ("jobsctl", ["add", "--dry-run", "--wait", "--json", "--", "x"], "exclusive"),
-    ("jobsctl", ["add", "--wait-timeout", "5s", "--json", "--", "x"], "needs --wait"),
-    ("jobsctl", ["add", "--max-retries", "101", "--json", "--", "x"], "over 100"),
-    ("jobsctl", ["add", "--cwd", "rel", "--json", "--", "x"], "relative cwd"),
-    ("jobsctl", ["add", "--env", "NOEQ", "--json", "--", "x"], "bad env"),
-    ("jobsctl", ["show", "--json"], "no id"),
-    ("jobsctl", ["show", JB, "--unique-key", "k", "--json"], "id and --unique-key"),
-    ("jobsctl", ["cancel", JB, "--force", "--json"], "human-only"),
-    ("jobsctl", ["cancel", "--all", "--json"], "--all without a selector"),
-    ("jobsctl", ["cancel", JB, "--all", "--queue", "q", "--json"], "id with selectors"),
-    ("jobsctl", ["resolve", JB, "--as", "bogus", "--json"], "bad choice"),
-    ("jobsctl", ["release", JB, "--json"], "command review-respond does not use"),
-    ("jobsctl", ["--json", "show", JB], "global flag before the command"),
-    ("jobsctl", ["show", JB, "--dry-run", "--json"], "--dry-run on a read"),
-    ("claude-session", ["kinds", "--bogus", "--json"], "unknown flag"),
-    ("claude-session", ["--json", "kinds"], "global flag before the command"),
-    ("claude-session", ["kinds", "--repo", "bad repo", "--json"], "bad repo id"),
-    ("claude-session", ["status", "--json"], "command review-respond does not use"),
-    ("claude-session", ["kinds", "--kind", "Bad Kind", "--json"], "bad kind"),
+    ("wtctl", ["extract", "ab", "--files-from", "/f", "--dest", "/d", "--json"], "invalid value"),
+    ("wtctl", ["remove", WT, "--json"], "confirmation required"),
+    ("wtctl", ["remove", WT, "--force", "--yes", "--json"], "human-only"),
+    ("wtctl", ["remove", WT, "--dry-run", "--bogus", "--json"], "unrecognized argument"),
+    ("wtctl", ["remove", WT, "--yes", "--hook", "pre-create=x", "--json"], "invalid value"),
+    ("wtctl", ["show", "foo/bar", "--json"], "invalid value"),
+    ("wtctl", ["label", "add", WT, "--json"], "required: label"),
+    ("wtctl", ["label", "add", WT, "Bad Key=v", "--json"], "invalid value"),
+    ("wtctl", ["label", "--json"], "a subcommand is required"),
+    ("wtctl", ["list", "--throwaways", "--worktrees", "--json"], "mutually"),
+    ("wtctl", ["list", "--state", "bogus", "--json"], "invalid choice"),
+    ("wtctl", ["locate", "not a repo", "--json"], "invalid value"),
+    ("wtctl", ["status", WT, "--json"], "invalid command"),
+    ("wtctl", ["list", "--dry-run", "--json"], "unrecognized argument"),
+    ("jobsctl", [*JOB_ADD, "--json"], "after '--' is required"),
+    ("jobsctl", ["add", "--json", "--"], "after '--' is required"),
+    ("jobsctl", ["add", "--queue", "Bad Q", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--dry-run", "--wait", "--json", "--", "x"], "mutually"),
+    ("jobsctl", ["add", "--max-retries", "101", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--cwd", "rel", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--env", "NOEQ", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--env", "A=1", "--env", "A=2", "--json", "--", "x"], "a name given twice"),
+    (
+        "jobsctl",
+        ["add", "--env", "A=1", "--pass-env", "A", "--json", "--", "x"],
+        "both --env and --pass-env",
+    ),
+    ("jobsctl", ["add", "--priority", "1001", "--json", "--", "x"], "out of range"),
+    ("jobsctl", ["add", "--priority", "-1001", "--json", "--", "x"], "out of range"),
+    ("jobsctl", ["add", "--timeout", "0", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--timeout", "0s", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--timeout", "40000d", "--json", "--", "x"], "over the maximum"),
+    ("jobsctl", ["add", "--unique-key", "", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--unique-key", "a b", "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["add", "--unique-key", "k" * 257, "--json", "--", "x"], "invalid value"),
+    ("jobsctl", ["--actor", "auto:x", "add", "--json", "--", "x"], "must follow the command"),
+    ("jobsctl", ["show", "--json"], "exactly one of"),
+    ("jobsctl", ["show", JB, "--unique-key", "k", "--json"], "exactly one of"),
+    ("jobsctl", ["cancel", "--all", "--json"], "one of --queue, --label, --unique-key"),
+    ("jobsctl", ["cancel", JB, "--all", "--queue", "q", "--json"], "cannot be combined"),
+    ("jobsctl", ["resolve", JB, "--as", "bogus", "--json"], "invalid choice"),
+    ("jobsctl", ["release", JB, "--json"], "invalid command"),
+    ("jobsctl", ["show", JB, "--dry-run", "--json"], "unrecognized argument"),
+    ("claude-session", ["kinds", "--bogus", "--json"], "unrecognized argument"),
+    ("claude-session", ["--json", "kinds"], "must follow the command"),
+    ("claude-session", ["kinds", "--repo", "bad repo", "--json"], "invalid value"),
+    ("claude-session", ["status", "--json"], "invalid command"),
+    ("claude-session", ["kinds", "--kind", "Bad Kind", "--json"], "invalid value"),
+]
+
+# What the real tools accept and the fakes must not refuse (the call then parses and, as nobody
+# scripted it, is an "unscripted" violation: that proves the grammar let it through).
+ACCEPTED: list[tuple[str, list[str], str]] = [
+    ("forgectl", ["prs", "--author", "me", "--limit", "05", "--json"], "leading zero in --limit"),
+    ("forgectl", ["prs", "--author", "ME", "--json"], "an upper-case login"),
+    ("forgectl", ["--json", "show", PR], "global flags before the command"),
+    ("forgectl", ["show", "https://git.example.test/org/repo/pull/7", "--json"], "a PR URL"),
+    ("agent-spawn", ["--json", "show", AG], "a global flag before the command"),
+    ("agent-spawn", ["--actor", "auto:x", "resume", AG, "--fork", "--json"], "--actor before"),
+    (
+        "agent-spawn",
+        ["resume", AG, "--fork", "--wait-timeout", "5s", "--json"],
+        "--wait-timeout alone",
+    ),
+    ("agent-spawn", ["resume", "--fork", "--select", "kind=x", "--json"], "--select kind=x"),
+    ("agent-spawn", ["resume", AG, "--fork", "--max-turns", "05", "--json"], "--max-turns 05"),
+    (
+        "agent-spawn",
+        ["resume", AG, "--fork", "--override-escalation", "--actor", "human:me", "--json"],
+        "override with a human actor",
+    ),
+    (
+        "agent-spawn",
+        ["launch", "--worktree", "/work", "--cwd", "sub/dir", "--json"],
+        "cwd inside the worktree",
+    ),
+    ("jobsctl", ["--json", "show", JB], "--json before the command"),
+    ("jobsctl", ["add", "--wait-timeout", "5s", "--json", "--", "x"], "--wait-timeout alone"),
+    ("jobsctl", ["cancel", JB, "--force", "--json"], "--force without a human actor"),
+    ("wtctl", ["show", "wt-ABCDEFGHIJ", "--json"], "an upper-case selector"),
+    ("wtctl", ["list", "--state", "partial", "--state", "gone", "--json"], "enumerated states"),
+    (
+        "pr-comment",
+        [*REPLY, "--hook", "post-post=true", "--dedupe-key", "respond:p-1:k"],
+        "post-post hook",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    ("tool", "argv", "why"), REFUSED, ids=[f"{t}:{w}:{i}" for i, (t, _, w) in enumerate(REFUSED)]
+    ("tool", "argv", "expected"),
+    REFUSED,
+    ids=[f"{t}:{e}:{i}" for i, (t, _, e) in enumerate(REFUSED)],
 )
 def test_fake_refuses_what_the_real_sibling_refuses(
-    gateway: Gateway, fakes: Fakes, tool: str, argv: list[str], why: str
+    gateway: Gateway, fakes: Fakes, tool: str, argv: list[str], expected: str
 ) -> None:
     result = gateway.run([tool, *argv], timeout=20)
     assert result.returncode in (2, 13), result.stderr
     violations = fakes.take_violations()
     assert [v["kind"] for v in violations] == ["usage"], violations
     assert violations[0]["argv"] == argv
-    # With --json the refusal is the sibling's usage envelope.
-    if "--json" in argv:
-        assert result.json["error"]["code"] == "usage"
+    assert expected in violations[0]["message"], violations[0]["message"]
+    # With --json the refusal is the sibling's envelope: usage, or confirmation_required (13).
+    if "--json" in argv and argv.count("--json") == 1:
+        code = "confirmation_required" if expected.startswith("confirmation") else "usage"
+        assert result.json["error"]["code"] == code
+        assert result.returncode == (13 if code == "confirmation_required" else 2)
+
+
+@pytest.mark.parametrize(
+    ("tool", "argv", "why"), ACCEPTED, ids=[f"{t}:{w}:{i}" for i, (t, _, w) in enumerate(ACCEPTED)]
+)
+def test_fake_accepts_what_the_real_sibling_accepts(
+    gateway: Gateway, fakes: Fakes, tool: str, argv: list[str], why: str
+) -> None:
+    gateway.run([tool, *argv], timeout=20)
+    assert [v["kind"] for v in fakes.take_violations()] == ["unscripted"], why
 
 
 def test_every_tool_has_refusal_cases() -> None:
@@ -258,3 +420,71 @@ def test_version_is_answered_without_a_script(gateway: Gateway, fakes: Fakes) ->
     assert gateway.version("jobsctl") == (0, 32, 1)
     assert gateway.version("claude-session") == (0, 45, 2)
     assert fakes.violations() == []
+
+
+def test_a_json_lookalike_in_a_flag_value_is_not_the_json_flag(
+    gateway: Gateway, fakes: Fakes
+) -> None:
+    result = gateway.run(
+        ["wtctl", "extract", WT, "--files-from=--json", "--dest", "/d"], timeout=20
+    )
+    assert result.returncode == 2
+    (violation,) = fakes.take_violations()
+    assert "always calls this program with --json" in violation["message"]
+
+
+def test_a_json_lookalike_in_the_job_tail_is_not_the_json_flag(
+    gateway: Gateway, fakes: Fakes
+) -> None:
+    gateway.run(
+        ["jobsctl", "add", "--queue", "respond", "--", "review-respond", "--json"], timeout=20
+    )
+    (violation,) = fakes.take_violations()
+    assert "always calls this program with --json" in violation["message"]
+
+
+def test_stdin_is_read_for_a_flag_value_of_dash_in_either_spelling(
+    gateway: Gateway, fakes: Fakes
+) -> None:
+    fakes.script("wtctl", "extract", json={}, schema=False, times=2)
+    for form in (["--files-from", "-"], ["--files-from=-"]):
+        gateway.run(
+            ["wtctl", "extract", WT, *form, "--dest", "/d", "--json"], stdin="a.txt\n", timeout=20
+        )
+    assert [c.stdin for c in fakes.calls("wtctl")] == ["a.txt\n", "a.txt\n"]
+    assert fakes.violations() == []
+
+
+def test_stdin_the_grammar_never_reads_is_a_violation(gateway: Gateway, fakes: Fakes) -> None:
+    fakes.script("wtctl", "show", json={}, schema=False)
+    gateway.run(["wtctl", "show", WT, "--json"], stdin="surprise", timeout=20)
+    (violation,) = fakes.take_violations()
+    assert violation["kind"] == "stdin"
+    assert fakes.calls("wtctl")[0].stdin == "surprise"
+
+
+SCHEMA_CALLS = {
+    "forgectl": ["show", PR, "--json"],
+    "agent-spawn": ["show", AG, "--json"],
+    "pr-comment": ["resolve", PR, "--thread", "gh:rt:x", "--yes", "--json"],
+    "wtctl": ["show", WT, "--json"],
+    "jobsctl": ["show", JB, "--json"],
+    "claude-session": ["kinds", "--json"],
+}
+
+
+@pytest.mark.parametrize("tool", sorted(SCHEMA_CALLS))
+def test_the_fakes_error_envelopes_match_the_pinned_error_schema(
+    gateway: Gateway, fakes: Fakes, tool: str
+) -> None:
+    from .harness import schemas
+
+    usage = gateway.run([tool, "--definitely-not-a-flag", "--json"], timeout=20)
+    assert usage.returncode == 2
+    schemas.validate(f"{tool}/cli/error.json", usage.json)
+    assert usage.json["error"]["code"] == "usage"
+    internal = gateway.run([tool, *SCHEMA_CALLS[tool]], timeout=20)
+    assert internal.returncode == 99
+    schemas.validate(f"{tool}/cli/error.json", internal.json)
+    assert internal.json["error"]["code"] == "internal"
+    assert {v["kind"] for v in fakes.take_violations()} == {"usage", "unscripted"}

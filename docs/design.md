@@ -90,7 +90,7 @@ Every verified item becomes a `live` or process regression test (Test strategy);
 | `output.py` | the per-run `Context`, `Outcome`, result printing and the atomic `--result-file` |
 | `textin.py` | free text read only from a file or stdin |
 | `config.py` | config load and validation, per-repo overrides |
-| `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, git) |
+| `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, git); the `Clock` of its process waits and timeouts (duration parsing takes an injectable `now=` instead) |
 | `store.py` | SQLite access, migrations, compare-and-set, the three lease kinds (no separate module) |
 | `detect.py` | listing, comment reads, the eligibility rules, the handled set |
 | `rounds.py` | round states, due checks, lineage, job submission, the queued reconcile, finalizing and cleanup |
