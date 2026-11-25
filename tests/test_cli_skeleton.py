@@ -737,3 +737,37 @@ def test_subprocess_result_file_and_unimplemented(tmp_path: Path) -> None:
     assert proc.returncode == 1
     assert result.read_text() == proc.stdout
     assert os.environ.get("HOME") != str(tmp_path / "home")
+
+
+# ---- every error code has a producer here or a tracked owner ---------------------------------
+
+PRODUCED_HERE = {"internal", "usage", "human_only"}
+# error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
+OWNER_ISSUE = {
+    "lease_lost": 10,
+    "lease_timeout": 10,
+    "config_invalid": 7,
+    "not_found": 17,
+    "vetoed": 25,
+    "tool_missing": 12,
+    "tool_too_old": 12,
+    "lower_failed": 13,
+    "all_hosts_failed": 17,
+    "push_failed": 34,
+    "reply_failed": 35,
+    "outcome_unknown": 34,
+    "identity_missing": 33,
+    "throwaway_missing": 32,
+    "state_unsafe": 9,
+    "version_skew": 9,
+    "confirmation_required": 32,
+    "escalated": 37,
+    "refused": 25,
+    "ambiguous": 17,
+    "nothing_to_respond": 25,
+}
+
+
+def test_every_error_code_is_produced_here_or_owned_by_an_issue() -> None:
+    assert PRODUCED_HERE | set(OWNER_ISSUE) == set(CODE_EXIT)
+    assert not PRODUCED_HERE & set(OWNER_ISSUE)
