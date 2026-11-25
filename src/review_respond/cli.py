@@ -1,11 +1,21 @@
-"""Command-line entry point for review-respond."""
+"""Command-line entry point for review-respond: parser, global flags, dispatch, exit codes."""
 
 from __future__ import annotations
 
 import argparse
+import re
 import sys
+import traceback
+from collections.abc import Callable, Sequence
+from datetime import timedelta
+from pathlib import Path
+from typing import Any, NoReturn
 
 from . import __version__
+from .actor import check_decision_ids, check_human_only, default_actor, parse_actor
+from .durations import parse_duration, parse_since
+from .errors import CliError, error_envelope
+from .output import Context, Outcome, emit, sanitize_line
 
 PROG = "review-respond"
 DESCRIPTION = (
@@ -13,23 +23,233 @@ DESCRIPTION = (
 )
 USAGE_ERROR = 2
 
+Handler = Callable[[Context, argparse.Namespace], Outcome]
+
+# Commands implemented so far, by canonical name. Each later issue registers its handler here
+# (one line each); a command with no handler exits 1 `internal` with a clear message.
+HANDLERS: dict[str, Handler] = {}
+
+PR_STATES = ("idle", "settling", "queued", "running", "pending", "waiting", "closed")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# Flags only some commands accept (interface: Global flags).
+_DRY_RUN_COMMANDS = frozenset(
+    {"check", "respond", "confirm", "reject", "edit", "drop-reply", "stop", "prune", "cron"}
+)
+_OVERRIDE_COMMANDS = frozenset({"respond", "confirm"})
+_ALIASES = {"approve": "confirm"}
+
+
+class _Parser(argparse.ArgumentParser):
+    """Usage errors raise ``CliError`` (exit 2, envelope) instead of exiting from argparse."""
+
+    def error(self, message: str) -> NoReturn:
+        raise CliError("usage", message)
+
+
+def _sha256_arg(text: str) -> str:
+    if not _SHA256_RE.fullmatch(text):
+        raise CliError("usage", "--expect must be a 64-character lowercase hex sha256")
+    return text
+
+
+def _duration_arg(flag: str) -> Callable[[str], timedelta]:
+    return lambda text: parse_duration(text, flag=flag)
+
+
+def _global_flags(command: str) -> _Parser:
+    flags = _Parser(add_help=False, allow_abbrev=False)
+    flags.add_argument("--json", action="store_true", help="emit machine-readable JSON output")
+    flags.add_argument("--config", metavar="PATH", help="config file")
+    if command in _DRY_RUN_COMMANDS:
+        flags.add_argument(
+            "--dry-run", action="store_true", help="show what would happen and change nothing"
+        )
+    flags.add_argument("--yes", action="store_true", help="skip a confirmation (human actor only)")
+    flags.add_argument("--actor", metavar="A", help="human:<user> or auto:<name>")
+    if command in _OVERRIDE_COMMANDS:
+        flags.add_argument(
+            "--override-escalation",
+            action="store_true",
+            help="count every escalating hook as continuing (human actor only)",
+        )
+    flags.add_argument(
+        "--decision-id", action="append", metavar="ID", help="audit decision id (repeatable)"
+    )
+    flags.add_argument(
+        "--result-file", metavar="PATH", help="write the JSON output there atomically"
+    )
+    noise = flags.add_mutually_exclusive_group()
+    noise.add_argument("--verbose", action="store_true", help="more diagnostics on stderr")
+    noise.add_argument("--quiet", action="store_true", help="no output on success")
+    flags.add_argument("--version", action="version", version=f"{PROG} {__version__}")
+    return flags
+
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog=PROG,
-        description=DESCRIPTION,
-    )
+    parser = _Parser(prog=PROG, description=DESCRIPTION, allow_abbrev=False)
     parser.add_argument("--version", action="version", version=f"{PROG} {__version__}")
-    parser.add_argument("--json", action="store_true", help="emit machine-readable JSON output")
-    parser.add_subparsers(dest="command", metavar="<command>")
+    # Only the hidden `_job` argv puts --config before the subcommand (interface: Job).
+    parser.add_argument("--config", dest="config_top", metavar="PATH", help=argparse.SUPPRESS)
+    sub = parser.add_subparsers(dest="command", metavar="<command>", parser_class=_Parser)
+
+    def add(
+        name: str, help_text: str | None, *, aliases: Sequence[str] = ()
+    ) -> argparse.ArgumentParser:
+        # No `help` keyword for the hidden command keeps it out of the command list.
+        extra: dict[str, Any] = {} if help_text is None else {"help": help_text}
+        return sub.add_parser(
+            name,
+            aliases=list(aliases),
+            description=help_text,
+            parents=[_global_flags(name)],
+            allow_abbrev=False,
+            **extra,
+        )
+
+    p = add("check", "run the periodic pass: detect, read comments, start due rounds")
+    p.add_argument("--pr", metavar="PR", help="limit the pass to one pull request")
+
+    p = add("respond", "start a round for one pull request now")
+    p.add_argument("pr", metavar="PR")
+    p.add_argument("--force", action="store_true", help="ignore the round limit (human actor only)")
+    p.add_argument("--include-existing", action="store_true")
+    p.add_argument("--note-file", metavar="F", help="your note for the agent (file or -)")
+    p.add_argument("--skill", metavar="S")
+    p.add_argument("--mode", choices=("headless", "interactive"))
+
+    p = add("list", "list pull requests and their state")
+    p.add_argument("--state", choices=PR_STATES)
+    p.add_argument("--repo", metavar="ID")
+    p.add_argument("--waiting", action="store_true", help="same as --state waiting")
+
+    p = add("show", "show one pull request, round or pending confirmation")
+    p.add_argument("ref", metavar="<pr | round id | pending id>")
+
+    add("pending", "list pending confirmations")
+
+    p = add("confirm", "perform a pending confirmation", aliases=["approve"])
+    p.add_argument("id", metavar="ID")
+    p.add_argument("--allow-sensitive", action="store_true", help="human actor only")
+    p.add_argument("--expect", metavar="SHA", type=_sha256_arg, help="content_sha256 you saw")
+
+    p = add("reject", "end a pending confirmation")
+    p.add_argument("id", metavar="ID")
+    p.add_argument("--redo", action="store_true")
+
+    p = add("edit", "edit a reply or the commit message of a pending confirmation")
+    p.add_argument("id", metavar="ID")
+    p.add_argument("--reply", metavar="COMMENT_ID")
+    p.add_argument("--body-file", metavar="F", help="new reply text (file or -)")
+    p.add_argument("--message-file", metavar="F", help="new commit message (file or -)")
+
+    p = add("drop-reply", "remove one reply from a pending confirmation")
+    p.add_argument("id", metavar="ID")
+    p.add_argument("comment_id", metavar="COMMENT_ID")
+
+    p = add("stop", "stop a queued or running round")
+    p.add_argument("round_id", metavar="ROUND_ID")
+
+    p = add("cron", "install or remove the managed crontab block")
+    p.add_argument("action", choices=("install", "uninstall"))
+
+    p = add("export", "print log and audit records as JSON lines")
+    p.add_argument("--since", metavar="T", type=lambda t: parse_since(t, flag="--since"))
+
+    p = add("prune", "remove finished records and old files")
+    p.add_argument("--older-than", metavar="D", type=_duration_arg("--older-than"))
+
+    add("validate", "offline checks of config, dependencies and credentials")
+
+    p = add("_job", None)  # hidden: not part of the interface
+    p.add_argument("round_id", metavar="ROUND_ID")
     return parser
 
 
+def _prescan(argv: Sequence[str]) -> tuple[bool, Path | None]:
+    """Find ``--json`` and ``--result-file`` even when the full parse fails."""
+    scan = _Parser(add_help=False, allow_abbrev=False)
+    scan.add_argument("--json", action="store_true")
+    scan.add_argument("--result-file")
+    try:
+        found, _ = scan.parse_known_args(list(argv))
+    except CliError:
+        return "--json" in argv, None
+    path = Path(found.result_file) if found.result_file else None
+    return bool(found.json), path
+
+
+def _build_context(args: argparse.Namespace) -> Context:
+    actor = parse_actor(args.actor) if args.actor is not None else default_actor()
+    check_human_only(
+        actor,
+        {
+            "yes": args.yes,
+            "force": getattr(args, "force", False),
+            "allow_sensitive": getattr(args, "allow_sensitive", False),
+            "override_escalation": getattr(args, "override_escalation", False),
+        },
+    )
+    config: str | None = args.config
+    if args.command == "_job" and config is None:
+        config = args.config_top
+    elif args.config_top is not None:
+        raise CliError("usage", "--config goes after the subcommand")
+    if config == "":
+        raise CliError("usage", "--config needs a path")
+    if args.result_file == "":
+        raise CliError("usage", "--result-file needs a path")
+    return Context(
+        json=args.json,
+        config=Path(config) if config is not None else None,
+        dry_run=getattr(args, "dry_run", False),
+        yes=args.yes,
+        actor=actor,
+        override_escalation=getattr(args, "override_escalation", False),
+        decision_ids=tuple(check_decision_ids(args.decision_id or ())),
+        result_file=Path(args.result_file) if args.result_file is not None else None,
+        verbose=args.verbose,
+        quiet=args.quiet,
+    )
+
+
+def _not_implemented(command: str) -> Handler:
+    def handler(_ctx: Context, _args: argparse.Namespace) -> Outcome:
+        raise CliError("internal", f"{command} is not implemented yet")
+
+    return handler
+
+
+def _report(error: CliError, ctx: Context) -> int:
+    label = f"{error.code} ({error.reason})" if error.reason else error.code
+    sys.stderr.write(f"{PROG}: error: {label}: {sanitize_line(error.message)}\n")
+    return emit(error_envelope(error), "", error.exit_code, ctx)
+
+
 def main(argv: list[str] | None = None) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    pre_json, pre_result = _prescan(args_list)
+    fallback = Context(json=pre_json, result_file=pre_result)
     parser = build_parser()
-    args = parser.parse_args(argv)
-    command: str | None = args.command
-    if command is None:
-        parser.print_help(sys.stderr)
-        return USAGE_ERROR
-    return 0
+    ctx = fallback
+    try:
+        args = parser.parse_args(args_list)
+        if args.command is None:
+            if not pre_json:
+                parser.print_help(sys.stderr)
+            raise CliError("usage", "a command is required")
+        raw: str = args.command
+        command = _ALIASES.get(raw, raw)
+        args.command = command
+        ctx = _build_context(args)
+        handler = HANDLERS.get(command) or _not_implemented(command)
+        outcome = handler(ctx, args)
+        return emit(outcome.payload, outcome.human, outcome.exit_code, ctx)
+    except CliError as error:
+        return _report(error, ctx)
+    except KeyboardInterrupt:
+        return 130
+    except Exception as exc:
+        if ctx.verbose:
+            traceback.print_exc()
+        internal = CliError("internal", f"unexpected {type(exc).__name__}")
+        return _report(internal, ctx)
