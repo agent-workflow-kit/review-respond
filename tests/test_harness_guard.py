@@ -211,6 +211,28 @@ def test_env_cannot_launch_a_sibling_or_a_client(world: World) -> None:
         subprocess.run(["env", "FOO=1", "/usr/local/bin/wtctl"], check=False)
     with pytest.raises(GuardViolation):
         subprocess.run(["bash", "-c", "exec curl x"], check=False)
+    for argv in (
+        ["env", "-i", "forgectl", "--version"],
+        ["env", "PATH=/usr/bin", "forgectl", "--version"],
+        ["env", "-u", "PATH", "forgectl", "--version"],
+        ["nice", "forgectl", "--version"],
+        ["timeout", "5", "wtctl", "--version"],
+        ["xargs", "jobsctl"],
+    ):
+        with pytest.raises(GuardViolation):
+            subprocess.run(argv, env=world.env, check=False)
+
+
+def test_a_program_outside_the_allowlist_is_blocked(world: World, tmp_path: Path) -> None:
+    other = tmp_path / "outside"
+    other.mkdir()
+    prog = other / "ls"
+    prog.write_bytes(Path("/bin/ls").read_bytes())
+    prog.chmod(0o755)
+    with pytest.raises(GuardViolation, match="outside the directories"):
+        subprocess.run([str(prog)], check=False)
+    for path in ("/etc/hostname", "/proc/self/exe", "/dev/null"):
+        assert not any(Path(path).is_relative_to(d) for d in guard.SYSTEM_DIRS)
 
 
 def test_ctypes_cannot_reach_libc(world: World) -> None:

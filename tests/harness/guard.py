@@ -52,7 +52,19 @@ LOOPBACK = frozenset({"127.0.0.1", "::1", "localhost", ""})
 
 
 SHELLS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "fish", "csh", "tcsh", "env", "busybox"})
-SYSTEM_DIRS = ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/proc", "/dev")
+LAUNCHERS = SHELLS | frozenset(
+    {"nice", "timeout", "xargs", "nohup", "setsid", "stdbuf", "command", "exec"}
+)
+SYSTEM_DIRS = (
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/libexec",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+)
 GIT_FORBIDDEN = ("GIT_DIR", "GIT_WORK_TREE", "GIT_EXEC_PATH", "GIT_ASKPASS")
 # ctypes can reach any libc function (system, execv, ...): nothing may load a library or call one.
 CTYPES_ALLOWED_LIBRARIES: frozenset[str] = frozenset()
@@ -133,12 +145,9 @@ def _forbidden_words(state: GuardState, text: str, env: dict[str, str]) -> set[s
             if "/" in word:
                 if not _in_fakes(state, Path(os.path.abspath(word))):
                     found.add(name)
-            elif "PATH" in text:
-                found.add(name)  # the string rewrites the lookup path: cannot vouch for it
             else:
-                resolved = _resolve(name, env)
-                if resolved is None or not _in_fakes(state, resolved):
-                    found.add(name)
+                # a bare name is looked up by the launcher with a PATH we cannot vouch for
+                found.add(name)
     return found
 
 
@@ -171,7 +180,7 @@ def check_exec(executable: Any, argv: Sequence[Any] | None, env: Mapping[Any, An
         and not any(real.is_relative_to(r) for r in _allowed_roots(state))
     ):
         raise _violate(state, f"{real} is outside the directories tests may execute from")
-    if names & SHELLS:
+    if names & LAUNCHERS:
         for token in tokens[1:]:
             bad = _forbidden_words(state, token, env_map)
             if bad:
