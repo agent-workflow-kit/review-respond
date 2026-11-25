@@ -15,9 +15,8 @@ from . import __version__
 from .actor import check_decision_ids, check_human_only, default_actor, parse_actor
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
-from .output import Context, Outcome, emit, sanitize_line
+from .output import PROG, Context, Outcome, emit, sanitize_line, warn
 
-PROG = "review-respond"
 DESCRIPTION = (
     "Respond to review comments on your own pull requests, with fixes and replies you confirm."
 )
@@ -190,8 +189,9 @@ def _build_context(args: argparse.Namespace) -> Context:
         },
     )
     config: str | None = args.config
-    if args.command == "_job" and config is None:
-        config = args.config_top
+    if args.command == "_job":
+        if config is None:
+            config = args.config_top  # a --config after the subcommand wins
     elif args.config_top is not None:
         raise CliError("usage", "--config goes after the subcommand")
     if config == "":
@@ -221,8 +221,11 @@ def _not_implemented(command: str) -> Handler:
 
 def _report(error: CliError, ctx: Context) -> int:
     label = f"{error.code} ({error.reason})" if error.reason else error.code
-    sys.stderr.write(f"{PROG}: error: {label}: {sanitize_line(error.message)}\n")
-    return emit(error_envelope(error), "", error.exit_code, ctx)
+    warn(f"{PROG}: error: {label}: {sanitize_line(error.message)}\n")
+    try:
+        return emit(error_envelope(error), "", error.exit_code, ctx)
+    except Exception:  # emit does not raise; this keeps the exit code whatever happens
+        return error.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -247,9 +250,10 @@ def main(argv: list[str] | None = None) -> int:
     except CliError as error:
         return _report(error, ctx)
     except KeyboardInterrupt:
-        return 130
+        return _report(CliError("internal", "interrupted"), ctx)
     except Exception as exc:
         if ctx.verbose:
-            traceback.print_exc()
+            lines = traceback.format_exc().splitlines()
+            warn("".join(sanitize_line(line) + "\n" for line in lines))
         internal = CliError("internal", f"unexpected {type(exc).__name__}")
         return _report(internal, ctx)

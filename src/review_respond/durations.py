@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 from .errors import CliError
 
 _DURATION_RE = re.compile(r"(0|[0-9]{1,15})(ms|s|m|h|d)?")
-_UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600, "d": 86400}
+_UNIT_MS = {"ms": 1, "s": 1000, "m": 60_000, "h": 3_600_000, "d": 86_400_000}
 _RFC3339_RE = re.compile(
     r"([0-9]{4}-[0-9]{2}-[0-9]{2})[Tt]([0-9]{2}:[0-9]{2}:[0-9]{2})"
     r"(?:\.([0-9]{1,9}))?([Zz]|[+-][0-9]{2}:[0-9]{2})"
@@ -27,7 +27,7 @@ def parse_duration(text: str, *, flag: str = "duration") -> timedelta:
         raise CliError("usage", f"{flag} is not a duration (an integer and ms, s, m, h or d)")
     unit = match.group(2) or "s"
     try:
-        return timedelta(seconds=int(match.group(1)) * _UNITS[unit])
+        return timedelta(milliseconds=int(match.group(1)) * _UNIT_MS[unit])
     except OverflowError:
         raise CliError("usage", f"{flag} is out of range") from None
 
@@ -40,9 +40,14 @@ def parse_rfc3339(text: str, *, flag: str = "time") -> datetime:
     day, clock, fraction, offset = match.groups()
     micro = (fraction or "0").ljust(6, "0")[:6]
     zone = "+00:00" if offset in ("Z", "z") else offset
+    # A leap second (seconds == 60) is parsed as :59 plus one second.
+    leap = clock.endswith(":60")
+    if leap:
+        clock = clock[:-2] + "59"
     try:
-        return datetime.fromisoformat(f"{day}T{clock}.{micro}{zone}")
-    except ValueError:
+        parsed = datetime.fromisoformat(f"{day}T{clock}.{micro}{zone}").astimezone(UTC)
+        return parsed + timedelta(seconds=1) if leap else parsed
+    except (ValueError, OverflowError):
         raise CliError("usage", f"{flag} is not a valid RFC 3339 time") from None
 
 

@@ -83,6 +83,8 @@ def exit_code_for(code: str) -> int:
 
 
 def _cut(text: str) -> str:
+    """Scrub lone surrogates (invalid UTF-8 argv) so the text always encodes, then cut it."""
+    text = text.encode("utf-8", "backslashreplace").decode("utf-8")
     return text if len(text) <= MAX_MESSAGE_CHARS else text[:MAX_MESSAGE_CHARS]
 
 

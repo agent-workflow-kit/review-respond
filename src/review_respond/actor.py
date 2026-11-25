@@ -13,7 +13,7 @@ from .errors import CliError
 _NAME = r"[A-Za-z0-9._@-]{1,64}"
 _ACTOR_RE = re.compile(rf"(?:human|auto):{_NAME}")
 _DECISION_ID_RE = re.compile(r"[A-Za-z0-9._:@/-]{1,128}")
-MAX_DECISION_IDS = 32
+MAX_DECISION_IDS = 16  # keep in sync with schemas/defs.json decision_ids.maxItems
 
 # Flags only a human actor may use (interface: Global flags, `--yes`).
 HUMAN_ONLY_FLAGS = ("yes", "force", "allow_sensitive", "override_escalation")

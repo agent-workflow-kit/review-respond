@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import sys
 import tempfile
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+PROG = "review-respond"
 
 
 @dataclass(frozen=True)
@@ -58,15 +61,31 @@ def dump_json(document: dict[str, Any]) -> str:
 
 
 def write_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` through a synced temporary file in the same directory."""
-    directory = path.parent
-    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=f".{path.name}.", suffix=".tmp")
+    """Write ``text`` to ``path``.
+
+    A regular file (or a path that does not exist yet) is replaced through a synced temporary
+    file in the same directory; a symlink is kept and its target written. An existing
+    non-regular path (``/dev/null``, a fifo, ``/dev/stdout``) is written in place.
+    """
+    try:
+        regular = stat.S_ISREG(os.stat(path).st_mode)
+        exists = True
+    except OSError:
+        regular, exists = False, False
+    if exists and not regular:
+        with open(path, "w", encoding="utf-8") as plain:
+            plain.write(text)
+        return
+    target = Path(os.path.realpath(path))
+    directory = target.parent
+    # A short fixed-length temp name keeps a ~255-byte target name under NAME_MAX.
+    fd, tmp_name = tempfile.mkstemp(dir=directory, prefix=".rr-", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
+        os.replace(tmp_name, target)
     except BaseException:
         try:
             os.unlink(tmp_name)
@@ -85,29 +104,62 @@ def write_atomic(path: Path, text: str) -> None:
         os.close(dir_fd)
 
 
+def warn(message: str) -> None:
+    """Write to stderr; a closed or failing stderr never raises."""
+    try:
+        sys.stderr.write(message)
+    except (OSError, ValueError, AttributeError):
+        pass
+
+
+def _silence_stdout() -> None:
+    """Point fd 1 at /dev/null so a later flush at interpreter exit cannot fail (exit 120)."""
+    try:
+        null = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(null, 1)
+        finally:
+            os.close(null)
+    except OSError:
+        pass
+
+
 def emit(document: dict[str, Any], human: str, exit_code: int, ctx: Context) -> int:
     """Print the result and write ``--result-file``; returns the exit code to use.
 
     The JSON document is written to ``--result-file`` whatever the exit code and whether or not
     ``--json`` is set, and is byte-identical to stdout under ``--json``. Without ``--json``
-    stdout carries ``human`` (not under ``--quiet``). A failed result-file write is reported on
-    stderr and turns a successful exit into 1.
+    stdout carries ``human`` (not under ``--quiet``). A failed result-file or stdout write is
+    reported on stderr and turns a successful exit into 1; a failing exit code is kept. A closed
+    reader (broken pipe) is not an error. This function never raises.
     """
-    text = dump_json(document)
     code = exit_code
+    try:
+        text = dump_json(document)
+    except (TypeError, ValueError):
+        warn(f"{PROG}: cannot serialize the result\n")
+        return code or 1
     if ctx.result_file is not None:
         try:
             write_atomic(ctx.result_file, text)
-        except OSError as exc:
-            sys.stderr.write(f"review-respond: cannot write --result-file ({type(exc).__name__})\n")
+        except (OSError, ValueError) as exc:
+            warn(f"{PROG}: cannot write --result-file ({type(exc).__name__})\n")
             if code == 0:
                 code = 1
     try:
+        out = sys.stdout
         if ctx.json:
-            sys.stdout.write(text)
+            out.write(text)
         elif human and not ctx.quiet:
-            sys.stdout.write(human if human.endswith("\n") else human + "\n")
-        sys.stdout.flush()
+            out.write(human if human.endswith("\n") else human + "\n")
+        out.flush()
     except BrokenPipeError:
-        pass
+        _silence_stdout()
+    except (OSError, ValueError, AttributeError) as exc:
+        # ValueError covers UnicodeEncodeError and a closed file; AttributeError a None stdout.
+        if sys.stdout is not None:
+            _silence_stdout()
+        warn(f"{PROG}: cannot write to stdout ({type(exc).__name__})\n")
+        if code == 0:
+            code = 1
     return code
