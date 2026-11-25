@@ -73,7 +73,7 @@ def test_state_dir_path_falls_back_to_home(xdg: str | None) -> None:
 # ---- private directory -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("umask", [0o022, 0o000, 0o077])
+@pytest.mark.parametrize("umask", [0o022, 0o000, 0o077, 0o777])
 def test_created_with_explicit_modes_whatever_the_umask(sdir: Path, umask: int) -> None:
     old = os.umask(umask)
     try:

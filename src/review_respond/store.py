@@ -99,7 +99,12 @@ def _settle_new_dir(target: str | Path, dir_fd: int | None) -> None:
     try:
         fd = os.open(target, _DIR_FLAGS, dir_fd=dir_fd)
     except PermissionError:
-        os.chmod(target, 0o700, dir_fd=dir_fd)
+        try:
+            os.chmod(target, 0o700, dir_fd=dir_fd, follow_symlinks=False)
+        except NotImplementedError:
+            raise _unsafe(
+                f"cannot chmod {target} without following symlinks on this platform"
+            ) from None
         fd = os.open(target, _DIR_FLAGS, dir_fd=dir_fd)
     try:
         os.fchmod(fd, 0o700)
