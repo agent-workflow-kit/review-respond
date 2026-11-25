@@ -5,7 +5,7 @@ description = "Respond to review comments on your own pull requests, with fixes 
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
-dependencies = []
+dependencies = ["pydantic>=2.7", "pyyaml>=6.0.2"]
 
 [project.scripts]
 review-respond = "review_respond.cli:main"
