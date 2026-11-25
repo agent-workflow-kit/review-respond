@@ -1,0 +1,62 @@
+{
+  "prog": "forgectl",
+  "version": "0.55.2",
+  "source": "forgectl docs/interface.md at v0.55.2: Commands, Global flags, Identifiers, Exit codes. Only the commands in review-respond's Dependencies table.",
+  "globals_before_command": true,
+  "duplicate_globals": "error",
+  "patterns": {
+    "pr": "^(?:https://[A-Za-z0-9.:/_~=&?#-]+|[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9})$",
+    "repo": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._-]+)+$",
+    "host": "^[A-Za-z0-9.-]+(?::[0-9]{1,5})?$",
+    "login": "^(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\\[bot\\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254})$",
+    "sha": "^[0-9a-fA-F]{40}$",
+    "duration": "^[0-9]+(?:\\.[0-9]+)?(?:ms|s|m|h|d)?$",
+    "limit": "^(?:[1-9][0-9]{0,2}|1000)$",
+    "time": "^.+$"
+  },
+  "global_flags": {
+    "--json": {},
+    "--config": {"arity": 1},
+    "--verbose": {},
+    "--quiet": {},
+    "--timeout": {"arity": 1, "pattern": "duration"}
+  },
+  "rules": [
+    {"exclusive": ["--verbose", "--quiet"]}
+  ],
+  "commands": {
+    "prs": {
+      "flags": {
+        "--repo": {"arity": 1, "pattern": "repo"},
+        "--host": {"arity": 1, "pattern": "host"},
+        "--author": {"arity": 1, "pattern": "login"},
+        "--review-requested-from": {"arity": 1, "pattern": "login"},
+        "--state": {"arity": 1, "choices": ["open", "closed", "merged", "all"]},
+        "--draft": {},
+        "--no-draft": {},
+        "--updated-since": {"arity": 1, "pattern": "time"},
+        "--limit": {"arity": 1, "pattern": "limit"},
+        "--query": {"arity": 1},
+        "--default-query": {}
+      },
+      "rules": [
+        {"when_absent": ["--repo"], "requires_any": ["--author", "--review-requested-from"]},
+        {"exclusive": ["--repo", "--host"]},
+        {"exclusive": ["--draft", "--no-draft"]},
+        {"exclusive": ["--query", "--default-query"]}
+      ]
+    },
+    "show": {"positionals": [{"name": "pr", "pattern": "pr"}]},
+    "comments": {"positionals": [{"name": "pr", "pattern": "pr"}]},
+    "access": {"positionals": [{"name": "repo", "pattern": "repo"}, {"name": "user", "pattern": "login"}]},
+    "whoami": {"flags": {"--host": {"arity": 1, "pattern": "host"}}},
+    "compare": {
+      "positionals": [{"name": "pr", "pattern": "pr"}],
+      "flags": {
+        "--from": {"arity": 1, "pattern": "sha", "required": true},
+        "--to": {"arity": 1, "pattern": "sha", "required": true},
+        "--no-diff": {}
+      }
+    }
+  }
+}

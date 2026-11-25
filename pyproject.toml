@@ -21,7 +21,13 @@ packages = ["src/review_respond"]
 "plugin" = "review_respond/plugin"
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6", "pyright>=1.1.380", "pymarkdownlnt>=0.9.41"]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+    "pyright>=1.1.380",
+    "pymarkdownlnt>=0.9.41",
+    "jsonschema>=4.26.0",
+]
 
 [tool.ruff]
 line-length = 100
@@ -29,6 +35,9 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/harness/adversarial.py" = ["E501"]  # hostile strings are data
 
 [tool.pyright]
 include = ["src", "tests"]

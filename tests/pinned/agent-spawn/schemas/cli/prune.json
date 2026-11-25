@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agent-spawn/cli/prune.json",
+  "title": "agent-spawn prune --json",
+  "description": "Exit 0 whatever the per-agent results.",
+  "type": "object",
+  "properties": {
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "agent_id": {
+            "$ref": "../defs.json#/$defs/agent_id"
+          },
+          "result": {
+            "enum": [
+              "torn_down",
+              "refused",
+              "skipped",
+              "failed"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why refused, skipped or failed; null for torn_down. prune's own skip reasons: protected, needs_attention, not_parked, too_new, tearing_down, worktree_partial, gone, changed, lease_held; failed: internal. Engine and lower-tool refusals pass their own reason through (e.g. live, dirty, vetoed and escalated for a pre-teardown hook). See docs/interface.md, prune."
+          },
+          "tool": {
+            "oneOf": [
+              {
+                "$ref": "../defs.json#/$defs/tool"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "details": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "For a refusal by a lower tool (tool wtctl, termctl or claude-session): that tool's details, verbatim (untrusted). For a vetoed or escalated pre-teardown hook (tool agent-spawn): agent-spawn's own {\"hook\": \"pre-teardown\"}.",
+            "x-untrusted": true
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "agent_id",
+          "result",
+          "reason",
+          "tool",
+          "details"
+        ]
+      }
+    },
+    "warnings": {
+      "$ref": "../defs.json#/$defs/warnings"
+    },
+    "dry_run": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "results",
+    "warnings",
+    "dry_run"
+  ]
+}
