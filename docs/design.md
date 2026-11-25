@@ -84,6 +84,11 @@ Every verified item becomes a `live` or process regression test (Test strategy);
 | Module | Responsibility |
 |---|---|
 | `cli.py` | argparse, global flags, exit codes, the error envelope |
+| `errors.py` | exit codes, error codes, `CliError` and the error envelope |
+| `actor.py` | actor default and grammar, decision ids, the `human_only` rule |
+| `durations.py` | the duration grammar and RFC 3339 times for flag values |
+| `output.py` | the per-run `Context`, `Outcome`, result printing and the atomic `--result-file` |
+| `textin.py` | free text read only from a file or stdin |
 | `config.py` | config load and validation, per-repo overrides |
 | `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, git) |
 | `store.py` | SQLite access, migrations, compare-and-set, the three lease kinds (no separate module) |
