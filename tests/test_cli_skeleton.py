@@ -20,6 +20,7 @@ import pytest
 from review_respond import actor as actor_mod
 from review_respond import cli, output
 from review_respond.cli import main
+from review_respond.config import Config
 from review_respond.errors import (
     CODE_EXIT,
     EXIT_CODES,
@@ -217,6 +218,7 @@ def test_usage_error_without_json_prints_only_stderr(capsys: pytest.CaptureFixtu
 def test_job_accepts_config_before_the_subcommand(
     handler: Callable[[str, Callable[..., Outcome]], None],
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     captured: list[Context] = []
 
@@ -224,9 +226,12 @@ def test_job_accepts_config_before_the_subcommand(
         captured.append(ctx)
         return Outcome()
 
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("")
+    cfg.chmod(0o600)
     handler("_job", job)
-    assert run(capsys, "--config", "/abs/c.yaml", "_job", "rd-aaaaaaaa")[0] == 0
-    assert captured[0].config == Path("/abs/c.yaml")
+    assert run(capsys, "--config", str(cfg), "_job", "rd-aaaaaaaa")[0] == 0
+    assert captured[0].config == cfg
 
 
 def test_stderr_message_is_sanitized(capsys: pytest.CaptureFixture[str]) -> None:
@@ -252,12 +257,14 @@ def test_global_flags_reach_handler(
 
     handler("prune", prune)
     result = tmp_path / "r.json"
+    (tmp_path / "c.yaml").write_text("")
+    (tmp_path / "c.yaml").chmod(0o600)
     code, _, _ = run(
         capsys,
         "prune",
         "--json",
         "--config",
-        "c.yaml",
+        str(tmp_path / "c.yaml"),
         "--dry-run",
         "--yes",
         "--actor",
@@ -276,7 +283,8 @@ def test_global_flags_reach_handler(
     ctx = captured[0]
     assert ctx == Context(
         json=True,
-        config=Path("c.yaml"),
+        config=tmp_path / "c.yaml",
+        settings=Config(),
         dry_run=True,
         yes=True,
         actor="human:alice",
@@ -744,12 +752,11 @@ def test_subprocess_result_file_and_unimplemented(tmp_path: Path) -> None:
 
 # ---- every error code has a producer here or a tracked owner ---------------------------------
 
-PRODUCED_HERE = {"internal", "usage", "human_only"}
+PRODUCED_HERE = {"internal", "usage", "human_only", "config_invalid"}  # config: test_config.py
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
     "lease_lost": 10,
     "lease_timeout": 10,
-    "config_invalid": 7,
     "not_found": 17,
     "vetoed": 37,
     "tool_missing": 12,
@@ -1192,6 +1199,7 @@ def test_os_user_name_is_cut_to_64(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_job_config_after_the_subcommand_wins(
     handler: Callable[[str, Callable[..., Outcome]], None],
     capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
 ) -> None:
     captured: list[Context] = []
 
@@ -1199,6 +1207,10 @@ def test_job_config_after_the_subcommand_wins(
         captured.append(ctx)
         return Outcome()
 
+    second = tmp_path / "b.yaml"
+    second.write_text("")
+    second.chmod(0o600)
     handler("_job", job)
-    assert run(capsys, "--config", "/a.yaml", "_job", "rd-aaaaaaaa", "--config", "/b.yaml")[0] == 0
-    assert captured[0].config == Path("/b.yaml")
+    code = run(capsys, "--config", "/a.yaml", "_job", "rd-aaaaaaaa", "--config", str(second))[0]
+    assert code == 0
+    assert captured[0].config == second

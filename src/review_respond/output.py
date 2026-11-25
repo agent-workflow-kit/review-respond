@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .config import Config
+
 PROG = "review-respond"
 
 
@@ -29,6 +31,9 @@ class Context:
     result_file: Path | None = None
     verbose: bool = False
     quiet: bool = False
+    # The loaded config; None for `validate` (it loads the config itself, TODO(#12)) and for the
+    # fallback context used before the flags are parsed.
+    settings: Config | None = None
 
 
 @dataclass(frozen=True)

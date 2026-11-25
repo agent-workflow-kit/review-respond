@@ -13,6 +13,7 @@ from typing import Any, NoReturn
 
 from . import __version__
 from .actor import check_decision_ids, check_human_only, default_actor, parse_actor
+from .config import ConfigError, LoadedConfig, load_config
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
 from .output import PROG, Context, Outcome, emit, sanitize_line, warn
@@ -178,16 +179,7 @@ def _prescan(argv: Sequence[str]) -> tuple[bool, Path | None]:
 
 
 def _build_context(args: argparse.Namespace) -> Context:
-    actor = parse_actor(args.actor) if args.actor is not None else default_actor()
-    check_human_only(
-        actor,
-        {
-            "yes": args.yes,
-            "force": getattr(args, "force", False),
-            "allow_sensitive": getattr(args, "allow_sensitive", False),
-            "override_escalation": getattr(args, "override_escalation", False),
-        },
-    )
+    explicit_actor = parse_actor(args.actor) if args.actor is not None else None
     config: str | None = args.config
     if args.command == "_job":
         if config is None:
@@ -198,9 +190,39 @@ def _build_context(args: argparse.Namespace) -> Context:
         raise CliError("usage", "--config needs a path")
     if args.result_file == "":
         raise CliError("usage", "--result-file needs a path")
+    config_path = Path(config) if config is not None else None
+    loaded: LoadedConfig | None = None
+    config_error: ConfigError | None = None
+    try:
+        loaded = load_config(config_path)
+    except ConfigError as exc:
+        config_error = exc
+    if explicit_actor is not None:
+        actor = explicit_actor
+    else:
+        actor = default_actor(user=loaded.config.me.name if loaded is not None else None)
+    check_human_only(
+        actor,
+        {
+            "yes": args.yes,
+            "force": getattr(args, "force", False),
+            "allow_sensitive": getattr(args, "allow_sensitive", False),
+            "override_escalation": getattr(args, "override_escalation", False),
+        },
+    )
+    # `validate` loads the config itself and reports a bad one as its failed `config` check.
+    if config_error is not None and args.command != "validate":
+        raise config_error.to_cli_error()
+    if loaded is not None:
+        # TODO(#9): also record these as `warning` events in log.jsonl.
+        for item in loaded.warnings:
+            # --quiet silences notices, never the weakened-sandbox warning (a safety setting).
+            if args.quiet and item.code != "sandbox_weakened":
+                continue
+            warn(f"{PROG}: warning: {item.code}: {sanitize_line(item.message)}\n")
     return Context(
         json=args.json,
-        config=Path(config) if config is not None else None,
+        config=config_path,
         dry_run=getattr(args, "dry_run", False),
         yes=args.yes,
         actor=actor,
@@ -209,6 +231,7 @@ def _build_context(args: argparse.Namespace) -> Context:
         result_file=Path(args.result_file) if args.result_file is not None else None,
         verbose=args.verbose,
         quiet=args.quiet,
+        settings=loaded.config if loaded is not None else None,
     )
 
 
