@@ -52,7 +52,11 @@ def parse_rfc3339(text: str, *, flag: str = "time") -> datetime:
 
 
 def parse_since(text: str, *, now: datetime | None = None, flag: str = "--since") -> datetime:
-    """``--since``: an RFC 3339 time with an offset, or a duration meaning that long ago."""
+    """``--since``: an RFC 3339 time with an offset, or a duration meaning that long ago.
+
+    ``now`` is the injectable current time (callers pass the gateway clock's ``now()``); the system
+    clock is only the default when none is given.
+    """
     if re.match(r"[0-9]{4}-", text):
         return parse_rfc3339(text, flag=flag)
     current = now if now is not None else datetime.now(UTC)

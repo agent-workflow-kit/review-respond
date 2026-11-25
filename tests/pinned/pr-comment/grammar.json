@@ -1,0 +1,72 @@
+{
+  "prog": "pr-comment",
+  "version": "0.33.0",
+  "source": "pr-comment docs/interface.md at v0.33.0: Commands (reply, resolve), Global flags, Dedupe keys. Only the commands in review-respond's Dependencies table.",
+  "globals_before_command": true,
+  "duplicate_globals": "same_value",
+  "patterns": {
+    "pr": "^(?:https://[A-Za-z0-9.:/_~=&?#-]+|[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._-]+)+#[1-9][0-9]{0,9})$",
+    "comment_id": "^(?:gh:(?:ic|rc|rt|r):[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40}|gl:n:[0-9]+)$",
+    "thread_id": "^(?:gh:rt:[A-Za-z0-9_=-]{1,100}|gl:d:[0-9a-f]{40})$",
+    "sha": "^[0-9a-fA-F]{40}$",
+    "actor": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$",
+    "decision_id": "^[A-Za-z0-9._:@/-]{1,128}$",
+    "sha256": "^[0-9a-f]{64}$",
+    "scope": "^(?:pr-comment|forgectl)$",
+    "hook": "^(?:pre-post|post-post)=.+$",
+    "dedupe_key": "^[A-Za-z0-9._:-]{1,128}$",
+    "mention": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}$",
+    "nonempty": "^.+$"
+  },
+  "global_flags": {
+    "--json": {},
+    "--config": {"arity": 1, "pattern": "nonempty"},
+    "--dry-run": {},
+    "--yes": {},
+    "--expect-plan": {"arity": 1, "pattern": "sha256", "only": ["reply"]},
+    "--override-escalation": {"arity": 1, "repeat": true, "pattern": "scope", "human_only": true},
+    "--actor": {"arity": 1, "pattern": "actor"},
+    "--decision-id": {"arity": 1, "repeat": true, "pattern": "decision_id", "max_count": 32},
+    "--hook": {"arity": 1, "repeat": true, "pattern": "hook"},
+    "--verbose": {},
+    "--quiet": {}
+  },
+  "rules": [{"exclusive": ["--verbose", "--quiet"]}],
+  "commands": {
+    "reply": {
+      "positionals": [{"name": "pr", "pattern": "pr"}],
+      "flags": {
+        "--to": {"arity": 1, "pattern": "comment_id", "required": true},
+        "--body-file": {"arity": 1, "required": true, "pattern": "nonempty"},
+        "--expected-head": {"arity": 1, "pattern": "sha"},
+        "--dedupe-key": {"arity": 1, "pattern": "dedupe_key"},
+        "--allow-mention": {
+          "arity": 1,
+          "repeat": true,
+          "pattern": "mention",
+          "refuse": "human-only and interactive-only: review-respond runs without a terminal and never sends it"
+        }
+      },
+      "rules": [
+        {
+          "requires_any": ["--yes", "--dry-run"],
+          "note": "no TTY: without --yes or --dry-run the real tool exits 13 confirmation_required",
+          "confirmation": true
+        }
+      ]
+    },
+    "resolve": {
+      "positionals": [{"name": "pr", "pattern": "pr"}],
+      "flags": {
+        "--thread": {"arity": 1, "repeat": true, "pattern": "thread_id", "required": true, "max_count": 100}
+      },
+      "rules": [
+        {
+          "requires_any": ["--yes", "--dry-run"],
+          "note": "no TTY: without --yes or --dry-run the real tool exits 13 confirmation_required",
+          "confirmation": true
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wtctl/cli/baseline-check.json",
+  "title": "wtctl baseline check --json",
+  "description": "The unchanged case (exit 0). A change exits 20 with error.json: reason repo_config_changed, items, details {digest, recorded_digest, changed_classes}.",
+  "type": "object",
+  "properties": {
+    "id": {
+      "$ref": "../defs.json#/$defs/id"
+    },
+    "changed": {
+      "const": false
+    },
+    "digest": {
+      "$ref": "../defs.json#/$defs/digest",
+      "description": "The recomputed digest (equal to recorded_digest)."
+    },
+    "recorded_digest": {
+      "$ref": "../defs.json#/$defs/digest"
+    },
+    "format": {
+      "enum": [
+        1,
+        2,
+        3
+      ],
+      "description": "Present only for a record whose baseline was recorded in an older format: 1 before symlink targets were covered, 2 before verified linked worktrees beneath the worktree were skipped, 3 before the admin entry's info/sparse-checkout was covered. It is compared by the collector that recorded it; baseline accept re-records it as format 4."
+    },
+    "uncovered": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "x-untrusted": true
+      },
+      "minItems": 1,
+      "uniqueItems": true,
+      "description": "Only when not empty: the paths of symlinks whose target is on another device or mount (not /dev/null). The baseline records their hop targets and the path of the first entry on the other device but reads nothing behind them, so a change of that content is not detected. Only positions nothing runs or parses can be uncovered (CLAUDE*.md, info/exclude, the core.excludesFile target, alternates); elsewhere such a link is refused. The array is complete (bounded by the shared entry budget); the stderr list and the status warning are cut with a (+N more) count. A notice, never a failure; also printed to stderr and shown by status as a warning."
+    },
+    "new_coverage": {
+      "type": "array",
+      "items": {
+        "$ref": "../defs.json#/$defs/baseline_item"
+      },
+      "description": "Only with format, and only when not empty: the items a baseline accept would add or change (symlink targets, linked-worktree items, the directory items that stop listing a linked worktree and the info/sparse-checkout item); one with a detail would block it. A notice, never a failure."
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "changed",
+    "digest",
+    "recorded_digest"
+  ]
+}

@@ -90,7 +90,7 @@ Every verified item becomes a `live` or process regression test (Test strategy);
 | `output.py` | the per-run `Context`, `Outcome`, result printing and the atomic `--result-file` |
 | `textin.py` | free text read only from a file or stdin |
 | `config.py` | config load and validation, per-repo overrides |
-| `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, git) |
+| `gateway.py` | every subprocess and HTTP call (forgectl, agent-spawn, pr-comment, wtctl, jobsctl, git); the `Clock` of its process waits and timeouts (duration parsing takes an injectable `now=` instead) |
 | `store.py` | SQLite access, migrations, compare-and-set, the three lease kinds (no separate module) |
 | `detect.py` | listing, comment reads, the eligibility rules, the handled set |
 | `rounds.py` | round states, due checks, lineage, job submission, the queued reconcile, finalizing and cleanup |
@@ -123,7 +123,7 @@ All subprocess and HTTP calls go through `gateway.py`; fake binaries for each si
 
 ## Dependencies justified
 
-`pyyaml` (config), `pydantic` (validation), and the standard library for everything else (`sqlite3`, `argparse`, `subprocess`, `json`).
+`pyyaml` (config), `pydantic` (validation), and the standard library for everything else (`sqlite3`, `argparse`, `subprocess`, `json`). Test-only: `pytest`, and `jsonschema` (with its dependency `referencing`), which validates every golden `--json` output, hook payload and scripted sibling answer against `schemas/` and the pinned sibling copies in `tests/pinned/`; the schemas use `$ref` across files and `if`/`then` conditions that a hand-written check would not cover. They are never imported by the package.
 
 ## Non-goals for 0.x
 

@@ -1,0 +1,122 @@
+{
+  "prog": "wtctl",
+  "version": "0.31.0",
+  "source": "wtctl docs/interface.md at v0.31.0: Commands (create, list, show, remove, extract, locate, label add), Identifiers, Labels, Global flags, Exit codes. Only the commands in review-respond's Dependencies table.",
+  "globals_before_command": true,
+  "duplicate_globals": "last_wins",
+  "patterns": {
+    "selector": "^(?:(?:wt-)?[A-Za-z0-9]{4,}|/.+)$",
+    "repo": "^[a-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._-]+)+$",
+    "sha": "^[0-9a-f]{40}$",
+    "label": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+    "actor": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$",
+    "decision_id": "^[A-Za-z0-9._:@/-]{1,128}$",
+    "name": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+    "holder": "^[A-Za-z0-9._:/#@+=,-]{1,64}$",
+    "duration": "^[1-9][0-9]*[smhdw]$",
+    "hook": "^[a-z-]+=.+$",
+    "uint": "^[0-9]+$",
+    "state": "^[a-z_]+$",
+    "nonempty": "^.+$",
+    "hook_create": "^(?:pre-create|post-create)=.+$",
+    "hook_remove": "^(?:pre-remove|post-remove)=.+$"
+  },
+  "global_flags": {
+    "--json": {},
+    "--config": {"arity": 1, "pattern": "nonempty"},
+    "--verbose": {},
+    "--quiet": {},
+    "--dry-run": {"only": ["create", "extract", "label add", "remove"]},
+    "--yes": {},
+    "--actor": {"arity": 1, "pattern": "actor"},
+    "--decision-id": {"arity": 1, "repeat": true, "pattern": "decision_id", "max_count": 32}
+  },
+  "rules": [{"exclusive": ["--verbose", "--quiet"]}],
+  "commands": {
+    "create": {
+      "flags": {
+        "--throwaway": {},
+        "--repo": {"arity": 1, "pattern": "repo", "required": true},
+        "--branch": {"arity": 1},
+        "--detach": {},
+        "--base": {"arity": 1},
+        "--ref": {"arity": 1, "pattern": "sha"},
+        "--name": {"arity": 1, "pattern": "name"},
+        "--holder": {"arity": 1, "pattern": "holder"},
+        "--label": {"arity": 1, "repeat": true, "pattern": "label", "max_count": 32},
+        "--no-bootstrap": {},
+        "--copy-env": {},
+        "--sparse": {"arity": 1, "repeat": true},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_create"},
+        "--source": {"arity": 1, "choices": ["auto", "local", "remote"]},
+        "--depth": {"arity": 1, "pattern": "uint"},
+        "--override-escalation": {"human_only": true}
+      },
+      "rules": [
+        {"when": ["--throwaway"], "requires": ["--ref"]},
+        {
+          "when": ["--throwaway"],
+          "forbids": ["--branch", "--detach", "--base", "--name", "--holder", "--copy-env", "--no-bootstrap", "--sparse"]
+        },
+        {"when_absent": ["--throwaway"], "forbids": ["--source", "--depth"]},
+        {"exclusive": ["--branch", "--detach"]},
+        {"exclusive": ["--copy-env", "--no-bootstrap"]}
+      ]
+    },
+    "list": {
+      "flags": {
+        "--repo": {"arity": 1, "pattern": "repo"},
+        "--label": {"arity": 1, "repeat": true, "pattern": "label"},
+        "--throwaways": {},
+        "--worktrees": {},
+        "--older-than": {"arity": 1, "pattern": "duration"},
+        "--state": {
+          "arity": 1,
+          "repeat": true,
+          "choices": ["creating", "active", "unlinked", "missing", "clone_missing", "partial", "gone", "removed", "forgotten"]
+        },
+        "--all": {}
+      },
+      "rules": [{"exclusive": ["--throwaways", "--worktrees"]}]
+    },
+    "show": {"positionals": [{"name": "selector", "pattern": "selector"}]},
+    "remove": {
+      "positionals": [{"name": "selector", "pattern": "selector"}],
+      "flags": {
+        "--merged-head": {"arity": 1, "pattern": "sha"},
+        "--keep-branch": {},
+        "--holder": {"arity": 1, "pattern": "holder"},
+        "--force": {"human_only": true},
+        "--hook": {"arity": 1, "repeat": true, "pattern": "hook_remove"},
+        "--override-escalation": {"human_only": true}
+      },
+      "rules": [
+        {
+          "requires_any": ["--yes", "--dry-run"],
+          "confirmation": true,
+          "note": "stricter than the real tool: a throwaway needs no confirmation, but review-respond always passes --yes; otherwise exit 13 confirmation_required"
+        }
+      ]
+    },
+    "extract": {
+      "positionals": [{"name": "selector", "pattern": "selector"}],
+      "flags": {
+        "--files-from": {"arity": 1, "pattern": "nonempty"},
+        "--delete-from": {"arity": 1, "pattern": "nonempty"},
+        "--dest": {"arity": 1, "required": true, "pattern": "nonempty"},
+        "--max-size": {"arity": 1, "pattern": "uint"}
+      },
+      "rules": [
+        {"requires_any": ["--files-from", "--delete-from"], "note": "at least one list is required"},
+        {"not_same_value": ["--files-from", "--delete-from"], "value": "-"}
+      ]
+    },
+    "locate": {"positionals": [{"name": "repo", "pattern": "repo"}]},
+    "label add": {
+      "positionals": [
+        {"name": "selector", "pattern": "selector"},
+        {"name": "label", "pattern": "label", "repeat": true, "min": 1}
+      ]
+    }
+  }
+}

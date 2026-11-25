@@ -1,0 +1,112 @@
+{
+  "prog": "jobsctl",
+  "version": "0.32.1",
+  "source": "jobsctl docs/interface.md at v0.32.1: Commands (add, show, cancel, resolve), Selectors, Human-only flags, Global flags. Only the commands in review-respond's Dependencies table. --json may precede the command; the other global flags may not.",
+  "globals_before_command": ["--json"],
+  "duplicate_globals": "error",
+  "patterns": {
+    "job": "^(?:jb-)?[a-z2-7]{4,8}$",
+    "queue": "^[a-z0-9][a-z0-9_-]{0,63}$",
+    "label": "^[a-z0-9][a-z0-9_.-]{0,63}=[A-Za-z0-9._:/#@+=,-]{0,256}$",
+    "actor": "^(?:human|auto):[A-Za-z0-9._@-]{1,64}$",
+    "decision_id": "^[A-Za-z0-9._:@/-]{1,128}$",
+    "duration": "^[1-9][0-9]*[smhd]$",
+    "duration_or_none": "^(?:none|[1-9][0-9]*[smhd])$",
+    "env": "^[A-Za-z_][A-Za-z0-9_]*=.*$",
+    "envname": "^[A-Za-z_][A-Za-z0-9_]*$",
+    "priority": "^-?[0-9]+$",
+    "retries": "^(?:[0-9]|[1-9][0-9]|100)$",
+    "abspath": "^/.*$",
+    "posint": "^[1-9][0-9]*$",
+    "nonempty": "^.+$",
+    "cancel_wait": "^(?:0|[1-9][0-9]*[smhd])$",
+    "unique_key": "^[A-Za-z0-9._:/#@+=,-]{1,256}$"
+  },
+  "global_flags": {
+    "--json": {},
+    "--config": {"arity": 1, "pattern": "nonempty"},
+    "--verbose": {},
+    "--quiet": {},
+    "--yes": {"only": ["add", "cancel", "resolve"]},
+    "--actor": {"arity": 1, "pattern": "actor", "only": ["add", "cancel", "resolve"]},
+    "--decision-id": {
+      "arity": 1,
+      "repeat": true,
+      "pattern": "decision_id",
+      "max_count": 32,
+      "only": ["add", "cancel", "resolve"]
+    },
+    "--dry-run": {"only": ["add", "cancel", "resolve"]}
+  },
+  "rules": [{"exclusive": ["--verbose", "--quiet"]}],
+  "commands": {
+    "add": {
+      "double_dash": true,
+      "double_dash_required": true,
+      "flags": {
+        "--queue": {"arity": 1, "pattern": "queue"},
+        "--unique-key": {"arity": 1, "pattern": "unique_key"},
+        "--priority": {"arity": 1, "pattern": "priority", "range": [-1000, 1000]},
+        "--top": {},
+        "--pin": {},
+        "--cwd": {"arity": 1, "pattern": "abspath"},
+        "--env": {"arity": 1, "repeat": true, "pattern": "env", "max_count": 256},
+        "--pass-env": {"arity": 1, "repeat": true, "pattern": "envname", "max_count": 256},
+        "--label": {"arity": 1, "repeat": true, "pattern": "label", "max_count": 32},
+        "--timeout": {"arity": 1, "pattern": "duration_or_none", "max_seconds": 3153600000},
+        "--max-retries": {"arity": 1, "pattern": "retries"},
+        "--kill-grace": {"arity": 1, "pattern": "duration", "max_seconds": 3153600000},
+        "--no-start": {},
+        "--wait": {},
+        "--wait-timeout": {"arity": 1, "pattern": "duration", "max_seconds": 3153600000}
+      },
+      "rules": [
+        {"exclusive": ["--dry-run", "--wait"]},
+        {
+          "distinct_names": ["--env", "--pass-env"],
+          "note": "a repeated --env name, or a name in both --env and --pass-env, is a usage error"
+        }
+      ]
+    },
+    "show": {
+      "positionals": [{"name": "job", "pattern": "job", "optional": true}],
+      "flags": {
+        "--unique-key": {"arity": 1, "pattern": "unique_key"},
+        "--attempt": {"arity": 1, "pattern": "posint"},
+        "--no-output": {}
+      },
+      "rules": [{"positional_xor_flag": {"positional": "job", "flag": "--unique-key"}}]
+    },
+    "cancel": {
+      "positionals": [{"name": "job", "pattern": "job", "optional": true}],
+      "flags": {
+        "--queue": {"arity": 1, "pattern": "queue"},
+        "--label": {"arity": 1, "repeat": true, "pattern": "label"},
+        "--unique-key": {"arity": 1, "pattern": "unique_key"},
+        "--all": {},
+        "--force": {
+          "note": "the real human-only gate applies only to a running job (a no-op otherwise); the fake cannot tell, so it does not gate"
+        },
+        "--wait-timeout": {"arity": 1, "pattern": "cancel_wait"}
+      },
+      "rules": [
+        {
+          "positional_or_any_flag": {"positional": "job", "flags": ["--queue", "--label", "--unique-key"]}
+        },
+        {
+          "positional_excludes_flags": {"positional": "job", "flags": ["--queue", "--label", "--unique-key", "--all"]}
+        },
+        {"when": ["--all"], "requires_any": ["--queue", "--label", "--unique-key"]},
+        {"when": ["--wait-timeout"], "requires": ["--force"]}
+      ]
+    },
+    "resolve": {
+      "positionals": [{"name": "job", "pattern": "job"}],
+      "flags": {
+        "--as": {"arity": 1, "choices": ["done", "failed", "canceled"]},
+        "--note-file": {"arity": 1, "pattern": "nonempty"}
+      }
+    }
+  },
+  "human_only_exit": 13
+}
