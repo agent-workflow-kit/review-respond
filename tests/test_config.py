@@ -194,6 +194,37 @@ def test_symlinked_config_is_followed(tmp_path: Path) -> None:
     assert load_config(link, {}).config.max_rounds == 4
 
 
+def test_symlinked_config_into_a_writable_directory_is_refused(tmp_path: Path) -> None:
+    target = write(tmp_path / "bad" / "c.yaml", "max_rounds: 4\n")
+    target.parent.chmod(0o777)
+    link = tmp_path / "good" / "config.yaml"
+    link.parent.mkdir()
+    link.parent.chmod(0o700)
+    link.symlink_to(target)
+    with pytest.raises(ConfigError, match="writable by group or others") as exc:
+        load_config(link, {})
+    assert str(target.parent) in str(exc.value)
+
+
+def test_symlinked_dropin_into_a_writable_directory_is_refused(tmp_path: Path) -> None:
+    main = conf(tmp_path, "")
+    target = write(tmp_path / "bad" / "d.yaml", "max_rounds: 4\n")
+    target.parent.chmod(0o777)
+    (dropin_dir(tmp_path) / "50-x.yaml").symlink_to(target)
+    with pytest.raises(ConfigError, match="writable by group or others") as exc:
+        load_config(main, {})
+    assert str(target.parent) in str(exc.value)
+
+
+def test_symlinked_config_into_a_safe_directory_loads(tmp_path: Path) -> None:
+    target = write(tmp_path / "safe" / "c.yaml", "max_rounds: 4\n")
+    link = tmp_path / "good" / "config.yaml"
+    link.parent.mkdir()
+    link.parent.chmod(0o700)
+    link.symlink_to(target)
+    assert load_config(link, {}).config.max_rounds == 4
+
+
 # ---- drop-ins and merge ----------------------------------------------------------------------
 
 

@@ -227,7 +227,18 @@ def _read_file(path: Path) -> bytes:
 
 def _check_parent(path: Path) -> None:
     """The directory holding the config file must not let others replace it."""
-    parent = path.parent
+    _check_dir(path.parent)
+
+
+def _check_symlink_target_dir(path: Path) -> None:
+    """When ``path`` is a symlink, the directory holding its target gets the same check, unless
+    it is the directory already checked (the one holding the link)."""
+    target_dir = Path(os.path.realpath(path)).parent
+    if target_dir != Path(os.path.realpath(path.parent)):
+        _check_dir(target_dir)
+
+
+def _check_dir(parent: Path) -> None:
     try:
         info = os.stat(parent)
     except OSError as exc:
@@ -890,6 +901,7 @@ def load_config(
         data = _read_file(file)
         if index == 0 and file == path:
             _check_parent(path)
+        _check_symlink_target_dir(file)
         total += len(data)
         if total > MAX_TOTAL_BYTES:
             raise ConfigError(
