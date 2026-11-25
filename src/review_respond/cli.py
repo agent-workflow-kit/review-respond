@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import dataclasses
+import os
 import re
 import sys
 import traceback
@@ -18,7 +18,7 @@ from .config import ConfigError, LoadedConfig, load_config
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
 from .output import PROG, Context, Outcome, emit, sanitize_line, warn
-from .store import Store, open_state_dir
+from .store import Store, open_state_dir, state_dir_path
 
 DESCRIPTION = (
     "Respond to review comments on your own pull requests, with fixes and replies you confirm."
@@ -183,8 +183,8 @@ def _prescan(argv: Sequence[str]) -> tuple[bool, Path | None]:
     return bool(found.json), path
 
 
-def _build_context(args: argparse.Namespace) -> Context:
-    explicit_actor = parse_actor(args.actor) if args.actor is not None else None
+def _check_flags(args: argparse.Namespace) -> Path | None:
+    """The usage checks on the config and result-file flags; returns the config path."""
     config: str | None = args.config
     if args.command == "_job":
         if config is None:
@@ -195,7 +195,31 @@ def _build_context(args: argparse.Namespace) -> Context:
         raise CliError("usage", "--config needs a path")
     if args.result_file == "":
         raise CliError("usage", "--result-file needs a path")
-    config_path = Path(config) if config is not None else None
+    return Path(config) if config is not None else None
+
+
+def _open_store(command: str, *, dry_run: bool) -> Store | None:
+    """The state check, made before anything else is read (interface: Files and state).
+
+    `validate` never opens the state. `--dry-run` only reads: a missing state directory is not
+    created (no store), an existing one is verified, and `state.db` is used as it is, never
+    created or migrated. Every other command creates the directory and migrates; the read-only
+    commands (`READ_ONLY_COMMANDS`) tolerate a schema newer than this binary.
+    """
+    if command == "validate":
+        return None
+    if dry_run:
+        path = state_dir_path()
+        if not os.path.lexists(path):
+            return None
+        return Store.open_read_only(open_state_dir(path, create=False), close_state=True)
+    return Store.open(open_state_dir(), write=command not in READ_ONLY_COMMANDS, close_state=True)
+
+
+def _build_context(
+    args: argparse.Namespace, config_path: Path | None, store: Store | None
+) -> Context:
+    explicit_actor = parse_actor(args.actor) if args.actor is not None else None
     loaded: LoadedConfig | None = None
     config_error: ConfigError | None = None
     try:
@@ -237,6 +261,7 @@ def _build_context(args: argparse.Namespace) -> Context:
         verbose=args.verbose,
         quiet=args.quiet,
         settings=loaded.config if loaded is not None else None,
+        store=store,
     )
 
 
@@ -272,9 +297,10 @@ def main(argv: list[str] | None = None) -> int:
         raw: str = args.command
         command = _ALIASES.get(raw, raw)
         args.command = command
-        ctx = _build_context(args)
-        opened = Store.open(open_state_dir(), write=command not in READ_ONLY_COMMANDS)
-        ctx = dataclasses.replace(ctx, store=opened)
+        config_path = _check_flags(args)
+        # The state check comes before the config is read (a refusal there must not depend on it).
+        opened = _open_store(command, dry_run=getattr(args, "dry_run", False))
+        ctx = _build_context(args, config_path, opened)
         handler = HANDLERS.get(command) or _not_implemented(command)
         outcome = handler(ctx, args)
         return emit(outcome.payload, outcome.human, outcome.exit_code, ctx)

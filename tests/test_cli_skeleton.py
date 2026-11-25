@@ -281,7 +281,7 @@ def test_global_flags_reach_handler(
     )
     assert code == 0
     ctx = captured[0]
-    assert ctx.store is not None  # the state store is opened for every command (#9)
+    assert ctx.store is None  # --dry-run on a fresh state never creates it (#9)
     assert ctx == Context(
         json=True,
         config=tmp_path / "c.yaml",

@@ -7,7 +7,10 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -441,7 +444,7 @@ def install_probe(monkeypatch: pytest.MonkeyPatch, command: str, seen: list[Cont
     monkeypatch.setitem(HANDLERS, command, handler)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("command", sorted(COMMAND_ARGV))
+@pytest.mark.parametrize("command", sorted(set(COMMAND_ARGV) - {"validate"}))
 def test_every_command_refuses_a_group_accessible_state_dir(
     command: str, world: object, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -476,7 +479,7 @@ def test_write_commands_exit_12_version_skew_on_a_newer_schema(
     assert body["error"]["code"] == "version_skew"
 
 
-@pytest.mark.parametrize("command", sorted(READS))
+@pytest.mark.parametrize("command", sorted(READS - {"validate"}))
 def test_read_commands_work_on_a_newer_schema(
     command: str, world: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -613,16 +616,15 @@ def test_hostile_owner_ids_are_rejected(sdir: Path, owner: str) -> None:
     state = open_state_dir(sdir)
     with pytest.raises(ValueError):
         state.put_file(owner, b"x")
-    with pytest.raises(ValueError):
-        state.get_file(owner, sha(b"x"))
+    unsafe(lambda: state.get_file(owner, sha(b"x")))  # from a stored record: state_unsafe
+    unsafe(lambda: state.delete_owner_files(owner))
     assert not (sdir / "files").exists() or list((sdir / "files").iterdir()) == []
 
 
 @pytest.mark.parametrize("digest", ["", "abc", "../" + "a" * 61, "A" * 64, "g" * 64, "a" * 65])
 def test_malformed_digests_are_rejected(sdir: Path, digest: str) -> None:
     state = open_state_dir(sdir)
-    with pytest.raises(ValueError):
-        state.get_file("rp-a", digest)
+    unsafe(lambda: state.get_file("rp-a", digest))
 
 
 def test_a_failed_put_leaves_no_partial_file(sdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -661,3 +663,385 @@ def test_delete_owner_files_does_not_follow_a_symlinked_directory(
     (sdir / "files" / "rp-evil").symlink_to(victim)
     unsafe(lambda: state.delete_owner_files("rp-evil"))
     assert (victim / "keep").read_text() == "keep"
+
+
+# ---- round 1 review fixes ----------------------------------------------------------------
+
+CHILD = """
+import sys, time
+from pathlib import Path
+from review_respond.store import Store, open_state_dir
+path, start, name = Path(sys.argv[1]), float(sys.argv[2]), sys.argv[3]
+while time.time() < start:
+    time.sleep(0.001)
+with Store.open(open_state_dir(path), write=True) as db:
+    with db.transaction():
+        db.conn.execute("INSERT INTO meta(key, value) VALUES (?, 'x')", (name,))
+    print(db.schema_version)
+"""
+
+
+def test_concurrent_first_opens_from_several_processes(tmp_path: Path) -> None:
+    env = {"HOME": str(tmp_path), "XDG_STATE_HOME": str(tmp_path / "xdg"), "PATH": "/usr/bin:/bin"}
+    for round_no in range(3):
+        target = tmp_path / f"round{round_no}" / "review-respond"
+        start = time.time() + 1.0
+        procs = [
+            subprocess.Popen(
+                [sys.executable, "-c", CHILD, str(target), str(start), f"k{i}"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            for i in range(6)
+        ]
+        for proc in procs:
+            out, err = proc.communicate(timeout=60)
+            assert proc.returncode == 0, err
+            assert out.strip() == str(SCHEMA_VERSION)
+        with Store.open(open_state_dir(target), write=False) as db:
+            assert db.conn.execute("SELECT count(*) FROM meta").fetchone()[0] == 6
+
+
+def test_sidecars_are_never_opened_by_path(sdir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Closing a descriptor of a SQLite file drops SQLite's locks: only lstat may touch them."""
+    state = open_state_dir(sdir)
+    Store.open(state, write=True).close()
+    opened: list[str] = []
+    real_open = os.open
+
+    def spy(path: object, *args: object, **kwargs: object) -> int:
+        opened.append(str(path))
+        return real_open(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(store_mod.os, "open", spy)
+    Store.open(state, write=True).close()
+    assert not [p for p in opened if "state.db" in p]
+
+
+def test_put_file_refuses_oversize_data_before_writing(
+    sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = open_state_dir(sdir)
+    monkeypatch.setattr(store_mod, "MAX_STORED_FILE_BYTES", 10)
+    with pytest.raises(CliError) as caught:
+        state.put_file("rp-a", b"x" * 11)
+    assert caught.value.code == "internal"
+    assert not (sdir / "files").exists()
+    assert state.get_file("rp-a", state.put_file("rp-a", b"x" * 10)) == b"x" * 10
+
+
+# -- --dry-run and validate never create or migrate state
+
+
+def probe(monkeypatch: pytest.MonkeyPatch, command: str) -> list[Context]:
+    seen: list[Context] = []
+    install_probe(monkeypatch, command, seen)
+    return seen
+
+
+def test_validate_does_not_open_or_create_the_state(
+    world: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = probe(monkeypatch, "validate")
+    assert main(["validate"]) == 0
+    assert seen[0].store is None
+    assert not state_path(world).exists()
+
+
+def test_validate_ignores_an_unsafe_state_directory(
+    world: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = state_path(world)
+    path.mkdir(parents=True)
+    path.chmod(0o755)
+    probe(monkeypatch, "validate")
+    assert main(["validate"]) == 0
+
+
+@pytest.mark.parametrize("command", ["check", "respond", "prune", "cron"])
+def test_dry_run_on_a_fresh_state_creates_nothing(
+    command: str, world: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = probe(monkeypatch, command)
+    assert main([*COMMAND_ARGV[command], "--dry-run"]) == 0
+    assert seen[0].store is None
+    assert not state_path(world).exists()
+
+
+def test_dry_run_reads_a_newer_schema(world: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    make_newer(state_path(world))
+    seen = probe(monkeypatch, "check")
+    assert main(["check", "--dry-run"]) == 0
+    assert seen[0].store is not None
+    assert seen[0].store.schema_version == SCHEMA_VERSION + 1
+
+
+def test_dry_run_does_not_migrate_an_older_database(
+    world: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = state_path(world)
+    path.mkdir(parents=True, mode=0o700)
+    path.chmod(0o700)
+    (path / "state.db").touch(mode=0o600)
+    seen = probe(monkeypatch, "check")
+    assert main(["check", "--dry-run"]) == 0
+    assert seen[0].store is not None
+    assert seen[0].store.schema_version == 0
+    assert user_version(path / "state.db") == 0
+    assert sorted(p.name for p in path.iterdir()) == ["state.db"]
+
+
+def test_dry_run_without_a_database_has_no_store_and_creates_none(
+    world: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = state_path(world)
+    path.mkdir(parents=True, mode=0o700)
+    path.chmod(0o700)
+    seen = probe(monkeypatch, "check")
+    assert main(["check", "--dry-run"]) == 0
+    assert seen[0].store is None
+    assert list(path.iterdir()) == []
+
+
+def test_dry_run_still_refuses_a_loose_state_directory(
+    world: object, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = state_path(world)
+    path.mkdir(parents=True)
+    path.chmod(0o750)
+    assert main(["check", "--dry-run", "--json"]) == 12
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "state_unsafe"
+
+
+def test_the_state_check_comes_before_the_config_is_read(
+    world: object, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = state_path(world)
+    path.mkdir(parents=True)
+    path.chmod(0o750)
+    bad = tmp_path / "bad.toml"
+    bad.write_text("this is = [not toml")
+    assert main(["list", "--config", str(bad), "--json"]) == 12
+    assert json.loads(capsys.readouterr().out)["error"]["code"] == "state_unsafe"
+
+
+# -- foreign and broken databases
+
+
+def test_migration_one_sets_the_application_id(sdir: Path) -> None:
+    Store.open(open_state_dir(sdir), write=True).close()
+    conn = sqlite3.connect(sdir / "state.db")
+    try:
+        assert conn.execute("PRAGMA application_id").fetchone()[0] == store_mod.APPLICATION_ID
+    finally:
+        conn.close()
+
+
+def make_db(path: Path, statements: list[str]) -> None:
+    conn = sqlite3.connect(path, isolation_level=None)
+    for statement in statements:
+        conn.execute(statement)
+    conn.close()
+    path.chmod(0o600)
+
+
+@pytest.mark.parametrize(
+    "statements",
+    [
+        ["CREATE TABLE stuff (x)"],  # tables, version 0
+        ["PRAGMA application_id = 1234", "PRAGMA user_version = 1"],  # another program's id
+        ["PRAGMA user_version = -1"],
+    ],
+)
+def test_foreign_databases_are_refused_and_untouched(sdir: Path, statements: list[str]) -> None:
+    state = open_state_dir(sdir)
+    make_db(sdir / "state.db", statements)
+    before = (sdir / "state.db").read_bytes()
+    unsafe(lambda: Store.open(state, write=True))
+    unsafe(lambda: Store.open(state, write=False))
+    unsafe(lambda: Store.open_read_only(state))
+    assert (sdir / "state.db").read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "content", [b"this is not a database" * 20, b"SQLite format 3\0" + b"\xff" * 300]
+)
+def test_a_corrupt_database_is_state_unsafe_not_internal(sdir: Path, content: bytes) -> None:
+    state = open_state_dir(sdir)
+    (sdir / "state.db").write_bytes(content)
+    (sdir / "state.db").chmod(0o600)
+    error = unsafe(lambda: Store.open(state, write=True))
+    assert "move" in error.message
+
+
+def test_a_transaction_rechecks_the_version_under_the_lock(sdir: Path) -> None:
+    with Store.open(open_state_dir(sdir), write=True) as db:
+        other = sqlite3.connect(sdir / "state.db", isolation_level=None)
+        other.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        other.close()
+        with pytest.raises(CliError) as caught:
+            with db.transaction():
+                db.conn.execute("INSERT INTO meta(key, value) VALUES ('a', 'b')")
+        assert caught.value.code == "version_skew"
+        assert not db.conn.in_transaction
+
+
+def test_a_read_survives_the_database_becoming_newer_during_open(
+    sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = open_state_dir(sdir)
+    Store.open(state, write=True).close()
+    real = store_mod.migrate
+
+    def racing(conn: sqlite3.Connection, *args: object, **kwargs: object) -> int:
+        real(conn, *args, **kwargs)  # type: ignore[arg-type]
+        other = sqlite3.connect(sdir / "state.db", isolation_level=None)
+        other.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+        other.close()
+        raise CliError("version_skew", "raced")
+
+    monkeypatch.setattr(store_mod, "migrate", racing)
+    with Store.open(state, write=False) as db:
+        assert db.read_only
+        assert db.schema_version == SCHEMA_VERSION + 1
+    with pytest.raises(CliError) as caught:
+        Store.open(state, write=True)
+    assert caught.value.code == "version_skew"
+
+
+def test_open_waits_at_most_the_busy_timeout_in_total(sdir: Path) -> None:
+    state = open_state_dir(sdir)
+    (sdir / "state.db").touch(mode=0o600)  # version 0, not WAL yet: the switch needs a lock
+    holder = sqlite3.connect(sdir / "state.db", isolation_level=None)
+    holder.execute("BEGIN IMMEDIATE")
+    started = time.monotonic()
+    try:
+        with pytest.raises(CliError) as caught:
+            Store.open(state, write=True, busy_timeout_ms=300)
+    finally:
+        holder.execute("ROLLBACK")
+        holder.close()
+    assert caught.value.code == "internal"
+    assert "busy" in caught.value.message
+    assert time.monotonic() - started < 2.5
+
+
+# -- explicit modes whatever the umask
+
+
+@pytest.mark.parametrize("umask", [0o277, 0o377, 0o777])
+def test_directories_and_files_are_usable_under_an_owner_hostile_umask(
+    sdir: Path, umask: int
+) -> None:
+    old = os.umask(umask)
+    try:
+        state = open_state_dir(sdir)
+        digest = state.put_file("rp-a", b"data")
+        with Store.open(state, write=True) as db:
+            with db.transaction():
+                db.conn.execute("INSERT INTO meta(key, value) VALUES ('k', 'v')")
+        assert state.get_file("rp-a", digest) == b"data"
+    finally:
+        os.umask(old)
+    for path in (sdir, sdir.parent, sdir / "files", sdir / "files" / "rp-a"):
+        assert mode(path) == 0o700
+    assert mode(sdir / "files" / "rp-a" / digest) == 0o600
+    assert mode(sdir / "state.db") == 0o600
+
+
+# -- the state directory is held by descriptor
+
+
+def test_a_state_dir_swapped_for_a_symlink_is_refused_and_nothing_is_created_there(
+    sdir: Path, tmp_path: Path
+) -> None:
+    state = open_state_dir(sdir)
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    sdir.rename(tmp_path / "moved")
+    sdir.symlink_to(target)
+    unsafe(lambda: Store.open(state, write=True))
+    assert list(target.iterdir()) == []
+    unsafe(lambda: Store.open_read_only(state))
+    assert list(target.iterdir()) == []
+
+
+def test_stored_files_follow_the_verified_descriptor_not_the_path(
+    sdir: Path, tmp_path: Path
+) -> None:
+    state = open_state_dir(sdir)
+    target = tmp_path / "target"
+    target.mkdir(mode=0o700)
+    sdir.rename(tmp_path / "moved")
+    sdir.symlink_to(target)
+    state.put_file("rp-a", b"data")
+    assert list(target.iterdir()) == []
+    assert (tmp_path / "moved" / "files" / "rp-a").is_dir()
+
+
+def test_close_releases_the_descriptor(sdir: Path) -> None:
+    state = open_state_dir(sdir)
+    fd = state.fd
+    state.close()
+    with pytest.raises(OSError):
+        os.fstat(fd)
+    state.close()  # idempotent
+
+
+def test_closing_the_store_closes_a_state_it_owns(sdir: Path) -> None:
+    state = open_state_dir(sdir)
+    Store.open(state, write=True, close_state=True).close()
+    assert state.fd == -1
+
+
+# -- delete_owner_files
+
+
+def test_delete_owner_files_removes_a_directory_that_only_fails_the_mode_check(sdir: Path) -> None:
+    state = open_state_dir(sdir)
+    state.put_file("rp-a", b"1")
+    (sdir / "files" / "rp-a").chmod(0o755)
+    state.delete_owner_files("rp-a")
+    assert not (sdir / "files" / "rp-a").exists()
+
+
+def test_delete_owner_files_checks_every_entry_before_removing_any(sdir: Path) -> None:
+    state = open_state_dir(sdir)
+    state.put_file("rp-a", b"1")
+    state.put_file("rp-a", b"2")
+    (sdir / "files" / "rp-a" / "subdir").mkdir()
+    unsafe(lambda: state.delete_owner_files("rp-a"))
+    assert len(list((sdir / "files" / "rp-a").iterdir())) == 3
+
+
+def test_delete_owner_files_refuses_a_hard_linked_entry_and_removes_nothing(
+    sdir: Path, tmp_path: Path
+) -> None:
+    state = open_state_dir(sdir)
+    digest = state.put_file("rp-a", b"1")
+    state.put_file("rp-a", b"2")
+    os.link(sdir / "files" / "rp-a" / digest, tmp_path / "alias")
+    unsafe(lambda: state.delete_owner_files("rp-a"))
+    assert len(list((sdir / "files" / "rp-a").iterdir())) == 2
+
+
+# -- durability
+
+
+def test_directories_are_fsynced_after_creation_and_rename(
+    sdir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = open_state_dir(sdir)
+    dirs: list[int] = []
+    real = os.fsync
+
+    def spy(fd: int) -> None:
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            dirs.append(fd)
+        real(fd)
+
+    monkeypatch.setattr(store_mod.os, "fsync", spy)
+    state.put_file("rp-a", b"data")
+    assert len(dirs) >= 3  # state dir (files/ created), files/ (owner created), owner (rename)
