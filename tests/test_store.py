@@ -524,9 +524,10 @@ def test_put_is_idempotent_and_files_of_owners_are_separate(sdir: Path) -> None:
     state.put_file("rp-b", b"x")
     assert (sdir / "files" / "rp-a" / sha(b"x")).exists()
     assert (sdir / "files" / "rp-b" / sha(b"x")).exists()
-    assert os.lstat(sdir / "files" / "rp-a" / sha(b"x")).st_ino != os.lstat(
-        sdir / "files" / "rp-b" / sha(b"x")
-    ).st_ino
+    assert (
+        os.lstat(sdir / "files" / "rp-a" / sha(b"x")).st_ino
+        != os.lstat(sdir / "files" / "rp-b" / sha(b"x")).st_ino
+    )
 
 
 def test_empty_and_binary_and_unicode_content(sdir: Path) -> None:

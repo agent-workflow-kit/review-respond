@@ -82,6 +82,7 @@ def _open_dir(path: Path, *, euid: int, create: bool, dir_fd: int | None = None)
     """
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     target: str | Path = path if dir_fd is None else path.name
+    fd = -1
     for attempt in (0, 1):
         try:
             fd = os.open(target, flags, dir_fd=dir_fd)
@@ -230,9 +231,10 @@ class StateDir:
     def delete_owner_files(self, owner: str) -> None:
         """Remove the owner's directory and its files (they go only with their owner)."""
         _check_owner_id(owner)
-        if not (self.path / FILES_DIR / owner).is_symlink() and not (
-            self.path / FILES_DIR / owner
-        ).exists():
+        if (
+            not (self.path / FILES_DIR / owner).is_symlink()
+            and not (self.path / FILES_DIR / owner).exists()
+        ):
             return
         dfd = self._owner_dir(owner, create=False)
         try:
@@ -314,9 +316,7 @@ def _user_version(conn: sqlite3.Connection) -> int:
     return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 
-def migrate(
-    conn: sqlite3.Connection, migrations: Sequence[Sequence[str]] | None = None
-) -> int:
+def migrate(conn: sqlite3.Connection, migrations: Sequence[Sequence[str]] | None = None) -> int:
     """Apply the missing migrations in order, each in one transaction with its version bump.
 
     ``conn`` must be in autocommit mode (``isolation_level=None``). A step that fails rolls back

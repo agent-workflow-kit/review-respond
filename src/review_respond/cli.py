@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import re
 import sys
-import dataclasses
 import traceback
 from collections.abc import Callable, Sequence
 from datetime import timedelta
