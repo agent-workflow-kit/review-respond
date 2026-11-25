@@ -230,9 +230,7 @@ def test_a_live_holder_is_never_taken_over_even_expired_and_is_logged_stalled(
     holder = spawn_acquirer(world, store, PR, go)
     assert holder.line() == "READY"
     assert holder.line() == "ACQUIRED"
-    clock = store.clock
-    assert isinstance(clock, FakeClock)
-    clock.advance(LEASE_TTL_SECONDS * 10)  # long past expires_at
+    tamper(store, PR, expires_at=1.0)  # long expired; the holder process is alive
     events: list[tuple[str, str]] = []
     before = lease_row(store, PR)
     assert store.try_acquire(PR, heartbeat=None, on_event=lambda *e: events.append(e)) is None
@@ -405,7 +403,9 @@ def test_a_wait_logs_stalled_once(store: Store) -> None:
     clock.advance(LEASE_TTL_SECONDS + 1)
     events: list[tuple[str, str]] = []
     with pytest.raises(CliError):
-        store.acquire(PR, wait=2, contended="busy", heartbeat=None, on_event=lambda *e: events.append(e))
+        store.acquire(
+            PR, wait=2, contended="busy", heartbeat=None, on_event=lambda *e: events.append(e)
+        )
     assert events == [("stalled", PR)]
 
 
@@ -487,7 +487,9 @@ def test_a_transaction_commits_while_the_lease_is_held(store: Store) -> None:
 
 
 @pytest.mark.parametrize("how", ["deleted", "released", "taken_over"])
-def test_a_write_after_a_lost_lease_is_lease_lost_and_changes_nothing(store: Store, how: str) -> None:
+def test_a_write_after_a_lost_lease_is_lease_lost_and_changes_nothing(
+    store: Store, how: str
+) -> None:
     lease = store.try_acquire(PR, heartbeat=None)
     assert lease is not None
     if how == "deleted":
@@ -665,6 +667,15 @@ def test_the_leases_table_comes_from_an_appended_migration(tmp_path: Path) -> No
     conn = sqlite3.connect(store.state_path / "state.db")
     cols = [r[1] for r in conn.execute("PRAGMA table_info(leases)")]
     conn.close()
-    for needed in ("key", "pid", "pid_start", "boot_id", "acquired_at", "renewed_at", "expires_at", "rev"):
+    for needed in (
+        "key",
+        "pid",
+        "pid_start",
+        "boot_id",
+        "acquired_at",
+        "renewed_at",
+        "expires_at",
+        "rev",
+    ):
         assert needed in cols
     store.close()
