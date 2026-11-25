@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
+import shlex
 import tomllib
 from pathlib import Path
 
@@ -39,13 +41,34 @@ def test_planned_module_imports(name: str) -> None:
     importlib.import_module(f"review_respond.{name}")
 
 
+def dependency_name(requirement: str) -> str:
+    """Normalised distribution name of a PEP 508 requirement string."""
+    match = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", requirement.strip())
+    assert match, requirement
+    return match.group(0).lower().replace("_", "-")
+
+
+@pytest.mark.parametrize(
+    ("requirement", "expected"),
+    [
+        ("pyyaml~=6", "pyyaml"),
+        ("PyYAML>=6", "pyyaml"),
+        ("pydantic; python_version>'3'", "pydantic"),
+        ("pydantic[email]>=2", "pydantic"),
+        ("pydantic!=2.0", "pydantic"),
+        ("pydantic @ https://example.invalid/p.whl", "pydantic"),
+        ("Typing_Extensions>=4", "typing-extensions"),
+    ],
+)
+def test_dependency_name_parsing(requirement: str, expected: str) -> None:
+    assert dependency_name(requirement) == expected
+
+
 def test_dependencies_are_only_pyyaml_and_pydantic() -> None:
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    names = sorted(
-        d.split(">")[0].split("=")[0].split("<")[0].split("[")[0].strip()
-        for d in project["dependencies"]
-    )
+    names = sorted(dependency_name(d) for d in project["dependencies"])
     assert names == ["pydantic", "pyyaml"]
+    assert not project.get("optional-dependencies")
 
 
 def test_fakebin_is_reserved() -> None:
@@ -55,7 +78,8 @@ def test_fakebin_is_reserved() -> None:
 def test_live_marker_is_registered_and_deselected_by_default() -> None:
     cfg = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
     assert any(m.startswith("live:") for m in cfg["markers"])
-    assert "not live" in cfg["addopts"]
+    tokens = shlex.split(cfg["addopts"])
+    assert ["-m", "not live"] in [tokens[i : i + 2] for i in range(len(tokens) - 1)]
 
 
 @pytest.mark.live
