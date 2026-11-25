@@ -36,6 +36,18 @@ def registry() -> Registry:
     )
 
 
+# Commands whose output schema has another name (jobsctl's mutating commands print change.json).
+OUTPUT_ALIASES = {("jobsctl", "resolve"): "change"}
+
+
+def output_schema_id(tool: str, command: str, exit_code: int = 0) -> str:
+    """The pinned schema of ``<tool> <command> --json`` (the error envelope if exit_code != 0)."""
+    if exit_code != 0:
+        return f"{tool}/cli/error.json"
+    name = OUTPUT_ALIASES.get((tool, command), command.replace(" ", "-"))
+    return f"{tool}/cli/{name}.json"
+
+
 def known(schema_id: str) -> bool:
     return schema_id in _documents()
 

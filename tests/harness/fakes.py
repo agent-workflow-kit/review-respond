@@ -25,6 +25,7 @@ class Call:
     cwd: str
     env: dict[str, str]
     stdin: str | None
+    stdin_tty: bool
     outcome: str
     exit: int
     command: str | None
@@ -109,9 +110,7 @@ class Fakes:
 
     @staticmethod
     def _default_schema(tool: str, command: str, exit: int) -> str:
-        if exit != 0:
-            return f"{tool}/cli/error.json"
-        return f"{tool}/cli/{command.replace(' ', '-')}.json"
+        return schemas.output_schema_id(tool, command, exit)
 
     def _load(self) -> dict[str, Any]:
         return json.loads((self.state_dir / "script.json").read_text())
@@ -140,6 +139,7 @@ class Fakes:
                 cwd=rec["cwd"],
                 env=rec["env"],
                 stdin=rec["stdin"],
+                stdin_tty=rec["stdin_tty"],
                 outcome=rec["outcome"],
                 exit=rec["exit"],
                 command=parsed.get("command"),

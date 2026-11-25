@@ -1,0 +1,17 @@
+{
+  "comment_count": 2,
+  "forced": false,
+  "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "hook": "pre-round",
+  "labels": [
+    "app=review-respond"
+  ],
+  "object_id": "git.example.test/org/repo#7",
+  "object_type": "pr",
+  "pr": "git.example.test/org/repo#7",
+  "reads_third_party": true,
+  "repo": "git.example.test/org/repo",
+  "round_number": 1,
+  "tool": "review-respond",
+  "trigger": "check"
+}

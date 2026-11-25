@@ -118,7 +118,7 @@ All subprocess and HTTP calls go through `gateway.py`; fake binaries for each si
 
 ## Dependencies justified
 
-`pyyaml` (config), `pydantic` (validation), and the standard library for everything else (`sqlite3`, `argparse`, `subprocess`, `json`).
+`pyyaml` (config), `pydantic` (validation), and the standard library for everything else (`sqlite3`, `argparse`, `subprocess`, `json`). Test-only: `pytest`, and `jsonschema` (with its dependency `referencing`), which validates every golden `--json` output, hook payload and scripted sibling answer against `schemas/` and the pinned sibling copies in `tests/pinned/`; the schemas use `$ref` across files and `if`/`then` conditions that a hand-written check would not cover. They are never imported by the package.
 
 ## Non-goals for 0.x
 
