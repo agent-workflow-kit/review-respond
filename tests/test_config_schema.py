@@ -29,7 +29,8 @@ SAMPLE_REPO = "git.example.test/team/service"
 VALUES: list[Any] = [
     None, True, False, 0, 1, -1, 3, 63, 64, 65, 128, 600, 601, 1000, 1001, 1024, 1.5, 5.0,
     "", "x", "0", "5m", "7x", "1h", "500ms", "30d", "99999999999d", "-5m", " 5m", "5m\n",
-    "required", "off", "user,local", "user,", "a b", "a\nb", "a\x00b", "a\x1bb", "a\x85b",
+    "required", "off", "user,local", "user,", "a b", "a\nb", "a\x00b", "a\x1bb", "a\x85b", 
+    "a\u2028b", "a\u202eb", "a\u200fb", "a%b", "a;b",
     "A=B", "1X", "FOO", "REVIEW_RESPOND_X", "x" * 64, "x" * 65, "x" * 128, "x" * 129,
     "x" * 256, "x" * 257, "x" * 1024, "x" * 1025, "h.test:1", "h.test:1:2", "H.test:1",
     "a/b", "/a", "a/", "a//b", "a/../b", "**/x/**", "*.pem", "it's", "ab", "abc",
@@ -97,6 +98,19 @@ def schema_accepts(document: dict[str, Any]) -> bool:
     return True
 
 
+_CONTROLS = re.compile("[\x00-\x1f\x7f-\x9f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _is_free_text(path: tuple[Any, ...]) -> bool:
+    """Keys whose value is free text (the model refuses controls and bidi characters there)."""
+    return (
+        path[:1] in (("skill",), ("permission_profile",), ("model",), ("git",))
+        or path == ("respond_to_own_comments_prefix",)
+        or path[-1] == "cmd"
+        or any(part in path for part in ("allow_commands", "read_dirs", "token_command"))
+    )
+
+
 def _narrower(path: tuple[Any, ...], value: Any) -> bool:
     """Documented cases where the model refuses what the schema accepts."""
     key = ".".join(str(p) for p in path)
@@ -113,10 +127,16 @@ def _narrower(path: tuple[Any, ...], value: Any) -> bool:
         # durations above ten years
         if re.fullmatch(r"[0-9]+(?:ms|s|m|h|d)", value) and duration_ms(value) > 3650 * 86_400_000:
             return True
-        # control characters in free text, paths, argv items, git identity, commands
-        if re.search(r"[\x00-\x1f\x7f-\x9f]", value) and not re.search(
-            r"^(?:[A-Za-z0-9._-]+)$", value
+        # control, line-separator and bidi characters in free text (documented per key)
+        if _is_free_text(path) and _CONTROLS.search(value):
+            return True
+        # blank skill, model and git strings are meaningless
+        if not value.strip() and (
+            path in (("skill",), ("model",)) or path[:1] == ("git",) and path[-1] != "user_email"
         ):
+            return True
+        # cron.env_file is sourced by a shell: model-only character allowlist
+        if path == ("cron", "env_file") and not re.fullmatch(r"[A-Za-z0-9._/~+@:=,-]+", value):
             return True
     # zero durations where zero would disable a safety bound
     zero = value == "0" or (isinstance(value, str) and re.fullmatch(r"0(?:ms|s|m|h|d)", value))
@@ -195,3 +215,11 @@ def test_model_defaults_equal_schema_defaults() -> None:
         for sub, subspec in spec.get("properties", {}).items():
             if "default" in subspec and subspec["default"] is not None:
                 assert dumped[key].get(sub) == subspec["default"], f"{key}.{sub}"
+
+
+def test_every_free_text_key_refuses_a_control_character() -> None:
+    for path in ALL_LEAVES:
+        if not _is_free_text(path):
+            continue
+        for value in ("a\x01b", "a\u2028b", "a\u202eb"):
+            assert not model_accepts(nest(path, value)), (path, value)

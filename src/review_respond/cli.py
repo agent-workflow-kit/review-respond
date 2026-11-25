@@ -213,9 +213,12 @@ def _build_context(args: argparse.Namespace) -> Context:
     # `validate` loads the config itself and reports a bad one as its failed `config` check.
     if config_error is not None and args.command != "validate":
         raise config_error.to_cli_error()
-    if loaded is not None and not args.quiet:
+    if loaded is not None:
         # TODO(#9): also record these as `warning` events in log.jsonl.
         for item in loaded.warnings:
+            # --quiet silences notices, never the weakened-sandbox warning (a safety setting).
+            if args.quiet and item.code != "sandbox_weakened":
+                continue
             warn(f"{PROG}: warning: {item.code}: {sanitize_line(item.message)}\n")
     return Context(
         json=args.json,

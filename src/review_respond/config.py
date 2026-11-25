@@ -36,6 +36,7 @@ import yaml
 from pydantic import (
     AfterValidator,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     StringConstraints,
@@ -155,8 +156,9 @@ class _StrictLoader(yaml.SafeLoader):
         return super().construct_mapping(node, deep)
 
 
-# YAML 1.2 core schema, narrowed: decimal integers (no leading zero, at most 18 digits; longer
-# digit strings stay strings, so the model refuses them naming the key) without ``_``; no
+# YAML 1.2 core schema, narrowed: decimal integers (no leading zero, at most 18 digits; a longer
+# digit string matches the float resolver instead, and the strict models refuse it naming the
+# key) without ``_``; no
 # timestamps, no merge or ``=`` value tags, no yes/no/on/off.
 for _tag, _pattern, _first_chars in (
     ("bool", r"^(?:true|True|TRUE|false|False|FALSE)\Z", "tTfF"),
@@ -174,10 +176,14 @@ for _tag, _pattern, _first_chars in (
     )
 
 
-def _check_owner_and_mode(info: os.stat_result, path: Path | str) -> None:
+def _check_owner_and_mode(
+    info: os.stat_result, path: Path | str, *, allow_sticky: bool = False
+) -> None:
+    """Owned by you and not group/world writable. ``allow_sticky`` waives only the write check,
+    for a directory whose sticky bit stops others from replacing your file (such as ``/tmp``)."""
     if info.st_uid != os.geteuid():
         raise ConfigError(_name(path), None, "owned by another user; refusing to load it")
-    if info.st_mode & 0o022:
+    if info.st_mode & 0o022 and not (allow_sticky and info.st_mode & stat.S_ISVTX):
         raise ConfigError(
             _name(path), None, "writable by group or others; refusing to load it (chmod go-w)"
         )
@@ -217,6 +223,16 @@ def _read_file(path: Path) -> bytes:
         raise ConfigError(name, None, f"cannot be read ({exc.strerror})") from None
     finally:
         os.close(fd)
+
+
+def _check_parent(path: Path) -> None:
+    """The directory holding the config file must not let others replace it."""
+    parent = path.parent
+    try:
+        info = os.stat(parent)
+    except OSError as exc:
+        raise ConfigError(_name(parent), None, f"cannot be read ({exc.strerror})") from None
+    _check_owner_and_mode(info, parent, allow_sticky=True)
 
 
 def _parse(data: bytes, name: str) -> dict[str, Any]:
@@ -260,10 +276,13 @@ _OWNER: Final = _ecma(r"^[A-Za-z0-9._-]+$")
 _QUEUE: Final = _ecma(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SETTING_SOURCES: Final = _ecma(r"^(?:(?:user|project|local)(?:,(?:user|project|local))*)?$")
 _PREFIX: Final = _ecma(r"^[^\s]+$")
-_ENV_FILE: Final = _ecma(r"^[^'\s]+$")
-# No C0, DEL or C1 control character (a newline or tab is allowed only where a field says so).
-_NO_CONTROLS: Final = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-_HOOK_CMD_CONTROLS: Final = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# Narrower than the schema's `^[^'\s]+$`: the cron line sources this file inside a shell command.
+_ENV_FILE: Final = _ecma(r"^[A-Za-z0-9._/~+@:=,-]+$")
+# No C0, DEL or C1 control character, line or paragraph separator, or bidirectional control (a
+# newline or tab is allowed only where a field says so).
+_INVISIBLE: Final = "\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069"
+_NO_CONTROLS: Final = re.compile(rf"[\x00-\x1f\x7f-\x9f{_INVISIBLE}]")
+_HOOK_CMD_CONTROLS: Final = re.compile(rf"[\x00-\x08\x0b-\x1f\x7f-\x9f{_INVISIBLE}]")
 
 DEFAULT_OFF_LIMITS: Final[tuple[str, ...]] = (
     ".github/**", ".gitlab-ci.yml", ".gitlab/**", ".circleci/**", "Jenkinsfile",
@@ -278,17 +297,27 @@ DEFAULT_TRAILER: Final = "Assisted-by: review-respond (confirmed by <me.name>)"
 HOOK_NAMES: Final = ("pre-round", "pre-push", "post-pending", "post-attention", "post-confirm")
 
 
-def _duration_in_range(text: str) -> str:
-    if len(text) > 16:  # far above the cap; also keeps int() away from huge digit strings
+def _ms(text: str) -> int:
+    """Milliseconds of a duration the schema's pattern accepted; leading zeros are insignificant
+    and a number far above the cap is refused without converting it."""
+    match = re.fullmatch(r"([0-9]+)(ms|s|m|h|d)?", text)
+    if match is None:
+        raise ValueError("not a duration")
+    digits = match.group(1).lstrip("0") or "0"
+    if len(digits) > 15:
         raise ValueError("duration is too large (at most 3650d)")
-    if duration_ms(text) > MAX_DURATION_MS:
+    return duration_ms(digits + (match.group(2) or ""))
+
+
+def _duration_in_range(text: str) -> str:
+    if _ms(text) > MAX_DURATION_MS:
         raise ValueError("duration is too large (at most 3650d)")
     return text
 
 
 def _positive_duration(text: str) -> str:
     _duration_in_range(text)
-    if duration_ms(text) < 1:
+    if _ms(text) < 1:
         raise ValueError("must be positive (not 0)")
     return text
 
@@ -299,6 +328,12 @@ def _no_controls(text: str) -> str:
     return text
 
 
+def _not_blank(text: str) -> str:
+    if not text.strip():
+        raise ValueError("must not be blank")
+    return text
+
+
 def _not_null(cls: Any, value: Any) -> Any:
     if value is None:
         raise ValueError("must not be null")
@@ -306,11 +341,19 @@ def _not_null(cls: Any, value: Any) -> Any:
 
 
 def _unique(items: list[Any]) -> list[Any]:
-    seen: list[Any] = []
+    seen: set[Any] = set()
+    unhashable: list[Any] = []
     for item in items:
-        if item in seen:
+        try:
+            duplicate = item in seen
+            if not duplicate:
+                seen.add(item)
+        except TypeError:  # an unhashable entry: fall back to comparing
+            duplicate = item in unhashable
+            if not duplicate:
+                unhashable.append(item)
+        if duplicate:
             raise ValueError("must not repeat an entry")
-        seen.append(item)
     return items
 
 
@@ -328,6 +371,7 @@ EnvName = Annotated[str, StringConstraints(pattern=_ENV_NAME)]
 AccountEntry = Annotated[str, StringConstraints(pattern=_ACCOUNT_ENTRY)]
 Glob = Annotated[str, StringConstraints(min_length=1, max_length=256, pattern=_GLOB)]
 Text = Annotated[str, AfterValidator(_no_controls)]
+NonBlankText = Annotated[str, AfterValidator(_no_controls), AfterValidator(_not_blank)]
 
 
 class _Model(BaseModel):
@@ -379,10 +423,10 @@ class Jobs(_Model):
 
 
 class Git(_Model):
-    user_name: Text | None = Field(default=None, min_length=1, max_length=256)
+    user_name: NonBlankText | None = Field(default=None, min_length=1, max_length=256)
     user_email: Text | None = Field(default=None, min_length=3, max_length=256)
     # One line: the trailer is the commit message's last paragraph, so it cannot hold a newline.
-    trailer: Text = Field(default=DEFAULT_TRAILER, min_length=1, max_length=256)
+    trailer: NonBlankText = Field(default=DEFAULT_TRAILER, min_length=1, max_length=256)
 
 
 class Limits(_Model):
@@ -404,9 +448,30 @@ class Cron(_Model):
     env_file: str | None = Field(default=None, min_length=1, max_length=1024, pattern=_ENV_FILE)
 
 
+_HOOK_TIMEOUT_MESSAGE: Final = "must be 1 to 600 (seconds) or a duration of at most 600s"
+
+
+def _hook_timeout(value: Any) -> int | str:
+    """One check, one message: an integer of seconds, or a positive duration of at most 600s."""
+    if isinstance(value, bool):
+        raise ValueError(_HOOK_TIMEOUT_MESSAGE)
+    if isinstance(value, int):
+        if not 1 <= value <= 600:
+            raise ValueError(_HOOK_TIMEOUT_MESSAGE)
+        return value
+    if isinstance(value, str) and re.fullmatch(_DURATION, value):
+        try:
+            ms = _ms(value)
+        except ValueError:
+            raise ValueError(_HOOK_TIMEOUT_MESSAGE) from None
+        if 1 <= ms <= MAX_HOOK_TIMEOUT_MS:
+            return value
+    raise ValueError(_HOOK_TIMEOUT_MESSAGE)
+
+
 class HookCmd(_Model):
     cmd: str = Field(min_length=1, max_length=4096)
-    timeout: int | PositiveDuration = 30
+    timeout: Annotated[int | str, BeforeValidator(_hook_timeout)] = 30
     async_: bool = Field(default=False, alias="async")
 
     @field_validator("cmd", mode="after")
@@ -418,19 +483,9 @@ class HookCmd(_Model):
             raise ValueError("must not be blank")
         return value
 
-    @field_validator("timeout", mode="after")
-    @classmethod
-    def _timeout_in_range(cls, value: int | str) -> int | str:
-        if isinstance(value, int):
-            if not 1 <= value <= 600:
-                raise ValueError("must be 1 to 600 seconds")
-        elif duration_ms(value) > MAX_HOOK_TIMEOUT_MS:
-            raise ValueError("must be at most 600s")
-        return value
-
     @property
     def timeout_ms(self) -> int:
-        return self.timeout * 1000 if isinstance(self.timeout, int) else duration_ms(self.timeout)
+        return self.timeout * 1000 if isinstance(self.timeout, int) else _ms(self.timeout)
 
 
 class Hooks(_Model):
@@ -512,7 +567,7 @@ class Config(_Model):
     hosts_to_check: list[HostKey] | None = None
     reviewers: list[AccountEntry] = Field(default_factory=list)
     bot_authors: list[AccountEntry] = Field(default_factory=list)
-    respond_to_own_comments_prefix: str | None = Field(
+    respond_to_own_comments_prefix: Text | None = Field(
         default=None, min_length=1, max_length=64, pattern=_PREFIX
     )
     settle: Duration = "5m"
@@ -522,12 +577,12 @@ class Config(_Model):
     prefer_owner: str = Field(default="ticket-work", min_length=1, max_length=64, pattern=_OWNER)
     resolve_after_confirm: bool = False
     off_limits: list[Glob] = Field(default_factory=lambda: list(DEFAULT_OFF_LIMITS))
-    skill: Text = Field(default="respond-to-review", min_length=1, max_length=128)
+    skill: NonBlankText = Field(default="respond-to-review", min_length=1, max_length=128)
     permission_profile: Text | None = Field(default=None, min_length=1, max_length=1024)
     sandbox: Literal["required", "preferred", "off"] = "required"
     setting_sources: str = Field(default="", pattern=_SETTING_SOURCES)
     env_allowlist: list[EnvName] = Field(default_factory=list)
-    model: Text | None = Field(default=None, min_length=1, max_length=128)
+    model: NonBlankText | None = Field(default=None, min_length=1, max_length=128)
     agent: Agent = Field(default_factory=Agent)
     jobs: Jobs = Field(default_factory=Jobs)
     git: Git = Field(default_factory=Git)
@@ -626,11 +681,14 @@ _DURATION_KEYS: Final = frozenset(
 )  # fmt: skip
 
 
+_VALIDATOR_LOC: Final = re.compile(r"function-(?:after|before|wrap|plain)\[")
+
+
 def _dotted(loc: tuple[Any, ...]) -> str:
     out = ""
     for part in loc:
-        if part == "[key]":
-            continue
+        if part == "[key]" or (isinstance(part, str) and _VALIDATOR_LOC.match(part)):
+            continue  # pydantic internals, not keys
         if isinstance(part, int):
             out += f"[{part}]"
         else:
@@ -642,13 +700,10 @@ def _message(error: Mapping[str, Any], key: str) -> str:
     kind = error["type"]
     if kind == "extra_forbidden":
         return "unknown key"
+    is_duration = key in _DURATION_KEYS or key.startswith("repos.") and key.endswith(".settle")
+    if kind == "string_type" and is_duration:
+        return "must be a duration string; write it quoted, for example '0s' or '5m'"
     if kind == "string_pattern_mismatch":
-        is_duration = (
-            key in _DURATION_KEYS
-            or key.startswith("repos.")
-            and key.endswith(".settle")
-            or key.endswith(".timeout")
-        )
         return "has an invalid format" + (f" ({_DURATION_HINT})" if is_duration else "")
     return str(error["msg"]).removeprefix("Value error, ")
 
@@ -783,7 +838,7 @@ def _dropin_paths(directory: Path) -> list[Path]:
     name = _name(directory)
     try:
         info = os.stat(directory)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError):
         return []
     except OSError as exc:
         raise ConfigError(name, None, f"cannot be read ({exc.strerror})") from None
@@ -815,13 +870,26 @@ def load_config(
     env = os.environ if environ is None else environ
     path = Path(os.fspath(explicit)) if explicit is not None else default_config_path(env)
     files: list[Path] = []
-    if explicit is not None or os.path.lexists(path):
+    if explicit is not None:
         files.append(path)
+    else:
+        try:
+            os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            pass  # no default file: built-in defaults
+        except OSError as exc:
+            raise ConfigError(_name(path), None, f"cannot be read ({exc.strerror})") from None
+        except ValueError:
+            raise ConfigError(_name(path), None, "is not a valid path") from None
+        else:
+            files.append(path)
     files.extend(_dropin_paths(path.parent / "config.d"))
     merged: dict[str, Any] = {}
     total = 0
-    for file in files:
+    for index, file in enumerate(files):
         data = _read_file(file)
+        if index == 0 and file == path:
+            _check_parent(path)
         total += len(data)
         if total > MAX_TOTAL_BYTES:
             raise ConfigError(

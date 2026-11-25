@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +16,10 @@ from review_respond.config import (
     DEFAULT_OFF_LIMITS,
     MAX_DROP_INS,
     MAX_FILE_BYTES,
+    MAX_TOTAL_BYTES,
     Config,
     ConfigError,
+    _dotted,
     default_config_path,
     load_config,
 )
@@ -28,6 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def write(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0o700)  # the umask may leave a new directory group-writable
     path.write_text(text)
     path.chmod(0o600)
     return path
@@ -594,16 +599,355 @@ def test_default_actor_falls_back_to_the_os_user_without_me_name(
     assert seen[0].actor == f"human:{actor_mod.os_user_name()}"
 
 
-def test_warnings_go_to_stderr_unless_quiet(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_sandbox_warning_survives_quiet_but_env_ignored_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = conf(tmp_path, "sandbox: off\n")
+    monkeypatch.setenv("REVIEW_RESPOND_TYPO", "x")
     _, _, err = run(capsys, "pending", "--config", str(path))
-    assert "sandbox_weakened" in err
+    assert "sandbox_weakened" in err and "env_ignored" in err
     _, _, err = run(capsys, "pending", "--config", str(path), "--quiet")
-    assert "sandbox_weakened" not in err
+    assert "sandbox_weakened" in err
+    assert "env_ignored" not in err
 
 
 def test_config_error_is_a_cli_error() -> None:
     error = ConfigError("f", "k", "bad").to_cli_error()
     assert isinstance(error, CliError) and (error.code, error.exit_code) == ("config_invalid", 2)
+
+
+# ---- review round 1: loading, ownership, messages, narrowings --------------------------------
+
+
+def foreign_owner(monkeypatch: pytest.MonkeyPatch, target: Path) -> None:
+    """Make ``os.stat(target)`` (that exact path) report a file owned by someone else."""
+    real = os.stat
+
+    def fake(path: Any, *args: Any, **kwargs: Any) -> os.stat_result:
+        info = real(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(target):
+            fields = list(info)
+            fields[4] = info.st_uid + 1
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(os, "stat", fake)
+
+
+def test_file_owned_by_another_user_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = conf(tmp_path, "")
+    real = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: real + 1)
+    with pytest.raises(ConfigError, match="owned by another user"):
+        load_config(path, {})
+
+
+def test_dropin_dir_owned_by_another_user_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = conf(tmp_path, "")
+    directory = dropin_dir(tmp_path)
+    foreign_owner(monkeypatch, directory)
+    with pytest.raises(ConfigError, match="owned by another user"):
+        load_config(main, {})
+
+
+def test_config_parent_dir_owned_by_another_user_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = conf(tmp_path, "")
+    foreign_owner(monkeypatch, main.parent)
+    with pytest.raises(ConfigError, match="owned by another user"):
+        load_config(main, {})
+
+
+@pytest.mark.parametrize("mode", [0o020, 0o002])
+def test_group_and_world_write_bits_are_each_refused(tmp_path: Path, mode: int) -> None:
+    main = conf(tmp_path, "")
+    main.chmod(0o600 | mode)
+    with pytest.raises(ConfigError, match="writable by group or others"):
+        load_config(main, {})
+    main.chmod(0o600)
+    directory = dropin_dir(tmp_path)
+    directory.chmod(0o700 | mode)
+    with pytest.raises(ConfigError, match="writable by group or others"):
+        load_config(main, {})
+    directory.chmod(0o700)
+    main.parent.chmod(0o700 | mode)
+    with pytest.raises(ConfigError, match="writable by group or others"):
+        load_config(main, {})
+
+
+def test_writable_parent_with_the_sticky_bit_is_allowed(tmp_path: Path) -> None:
+    main = conf(tmp_path, "max_rounds: 4\n")
+    main.parent.chmod(0o1777)
+    assert load_config(main, {}).config.max_rounds == 4
+
+
+def test_sticky_parent_does_not_waive_the_owner_rule(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = conf(tmp_path, "")
+    main.parent.chmod(0o1777)
+    foreign_owner(monkeypatch, main.parent)
+    with pytest.raises(ConfigError, match="owned by another user"):
+        load_config(main, {})
+
+
+def test_default_config_parent_dir_is_checked(world: Any) -> None:
+    path = default_config_path(world.env)
+    write(path, "")
+    path.parent.chmod(0o777)
+    with pytest.raises(ConfigError, match="writable by group or others"):
+        load_config(None, world.env)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory modes")
+def test_unreadable_default_dir_is_an_error_not_defaults(world: Any) -> None:
+    directory = default_config_path(world.env).parent
+    directory.mkdir(parents=True)
+    directory.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match="cannot be read"):
+            load_config(None, world.env)
+    finally:
+        directory.chmod(0o700)
+
+
+def test_default_path_through_a_plain_file_means_defaults(world: Any) -> None:
+    directory = default_config_path(world.env).parent
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    write(directory, "not a directory")
+    assert load_config(None, world.env).files == ()
+
+
+def test_total_size_cap_applies_across_files(tmp_path: Path) -> None:
+    body = "#" + "x" * (MAX_FILE_BYTES - 1000) + "\n"
+    assert 5 * len(body) > MAX_TOTAL_BYTES
+    main = conf(tmp_path, body)
+    directory = dropin_dir(tmp_path)
+    for i in range(4):
+        write(directory / f"{i}.yaml", body)
+    with pytest.raises(ConfigError, match="together are larger"):
+        load_config(main, {})
+
+
+def test_unique_check_is_not_quadratic() -> None:
+    names = [f"a:{i}" for i in range(60000)]
+    start = time.monotonic()
+    Config.model_validate({"reviewers": names})
+    assert time.monotonic() - start < 3
+    with pytest.raises(ValueError, match="must not repeat"):
+        Config.model_validate({"reviewers": [*names, "a:7"]})
+
+
+def test_hook_timeout_message_has_no_pydantic_internals(tmp_path: Path) -> None:
+    for value in ("0", "601", "1h", "abc", "11m", "601s", "0s", "true", "1.5", "'0'"):
+        text = f"hooks:\n  pre-round: [{{cmd: a, timeout: {value}}}]\n"
+        with pytest.raises(ConfigError) as exc:
+            load(tmp_path, text)
+        assert exc.value.key == "hooks.pre-round[0].timeout", value
+        assert exc.value.reason == ("must be 1 to 600 (seconds) or a duration of at most 600s"), (
+            value
+        )
+        assert "function-" not in str(exc.value)
+
+
+def test_hook_timeout_boundaries(tmp_path: Path) -> None:
+    ok = "hooks:\n  post-pending: [{cmd: a, timeout: %s}]\n"
+    for value in ("600", "1", "600s", "10m", "600000ms", "1s"):
+        assert load(tmp_path, ok % value).hooks.post_pending[0].timeout_ms <= 600_000
+    for value in ("601", "0", "601s", "11m", "600001ms", "0s"):
+        fails(tmp_path, ok % value, "hooks.post-pending[0].timeout")
+
+
+def test_dotted_drops_validator_internals() -> None:
+    assert _dotted(("a", "function-after[f(), str]", "b")) == "a.b"
+    assert _dotted(("a", "[key]", 0)) == "a[0]"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "settle: 5\n",
+        "settle: 0\n",
+        "pending_ttl: 7\n",
+        "agent:\n  timeout: 5\n",
+        "repos:\n  h.test/a:\n    settle: 5\n",
+    ],
+)
+def test_bare_number_for_a_duration_says_to_quote_it(tmp_path: Path, text: str) -> None:
+    message = fails(tmp_path, text, "must be a duration string; write it quoted")
+    assert "'0s'" in message and "'5m'" in message
+
+
+def test_duration_range_boundaries(tmp_path: Path) -> None:
+    for value in ("3650d", "87600h", "5256000m", "315360000s", "315360000000ms"):
+        assert load(tmp_path, f"settle: {value}\n").settle == value
+    for value in ("3651d", "87601h", "5256001m", "315360001s", "315360000001ms"):
+        fails(tmp_path, f"settle: {value}\n", "settle", "too large")
+
+
+def test_long_zero_padded_durations_match_the_schema(tmp_path: Path) -> None:
+    assert load(tmp_path, "settle: '0000000000000005m'\n").settle == "0000000000000005m"
+    assert load(tmp_path, f"settle: '{'0' * 40}5m'\n").settle == "0" * 40 + "5m"
+    fails(tmp_path, "settle: '0000000000000005000000000d'\n", "settle", "too large")
+
+
+BAD_CHARS = ["\u2028", "\u2029", "\u200e", "\u200f", "\u202a", "\u202e", "\u2066", "\u2069", "\x01"]
+TEXT_DOCS = {
+    "skill": lambda v: {"skill": v},
+    "permission_profile": lambda v: {"permission_profile": v},
+    "model": lambda v: {"model": v},
+    "git.user_name": lambda v: {"git": {"user_name": v}},
+    "git.user_email": lambda v: {"git": {"user_email": v}},
+    "git.trailer": lambda v: {"git": {"trailer": v}},
+    "respond_to_own_comments_prefix": lambda v: {"respond_to_own_comments_prefix": v},
+    "hooks.pre-round[0].cmd": lambda v: {"hooks": {"pre-round": [{"cmd": v}]}},
+    "hosts.h.test.token_command[0]": lambda v: {"hosts": {"h.test": {"token_command": [v]}}},
+    "repos.h.test/a.respond.allow_commands[0][0]": lambda v: {
+        "repos": {"h.test/a": {"respond": {"allow_commands": [[v]]}}}
+    },
+    "repos.h.test/a.respond.read_dirs[0]": lambda v: {
+        "repos": {"h.test/a": {"respond": {"read_dirs": [v]}}}
+    },
+}
+
+
+@pytest.mark.parametrize("key", list(TEXT_DOCS))
+def test_text_fields_refuse_controls_and_line_or_bidi_separators(tmp_path: Path, key: str) -> None:
+    for char in BAD_CHARS:
+        fails(tmp_path, json.dumps(TEXT_DOCS[key](f"ab{char}cd")), key.split("[")[0])
+
+
+@pytest.mark.parametrize(
+    "doc",
+    [{"skill": "  "}, {"model": "   "}, {"git": {"user_name": "   "}}, {"git": {"trailer": "  "}}],
+)
+def test_blank_text_is_refused(tmp_path: Path, doc: dict[str, Any]) -> None:
+    fails(tmp_path, json.dumps(doc), "must not be blank")
+
+
+CRON_BAD = ["a%b", "a;rm", "a$b", "a`b", "a|b", "a&b", "a\\b", "a(b)", "a*b", 'a"b', "a<b"]
+CRON_BAD += ["a b", "a#b", "a!b", "a\u202eb"]
+
+
+@pytest.mark.parametrize("value", CRON_BAD)
+def test_cron_env_file_charset_is_narrow(tmp_path: Path, value: str) -> None:
+    fails(tmp_path, json.dumps({"cron": {"env_file": value}}), "cron.env_file")
+
+
+def test_cron_env_file_allowed_characters(tmp_path: Path) -> None:
+    for value in ("/home/u/.config/env.sh", "~/e", "a,b=c:d@e+f-g_h"):
+        cfg = load(tmp_path, json.dumps({"cron": {"env_file": value}}))
+        assert cfg.cron.env_file == value
+
+
+def test_trailing_newline_is_refused_in_pattern_fields(tmp_path: Path) -> None:
+    fails(tmp_path, json.dumps({"prefer_owner": "a\n"}), "prefer_owner")
+    fails(tmp_path, json.dumps({"respond_to_own_comments_prefix": "a\n"}), "prefix")
+
+
+@pytest.mark.parametrize("value", ["", "007", "9" * 19, "+5", " 5", "5 ", "5\n", "0x5", "1_0"])
+def test_malformed_integer_variables_are_refused_naming_the_variable(
+    tmp_path: Path, value: str
+) -> None:
+    var = "REVIEW_RESPOND_MAX_ROUNDS"
+    message = fails(tmp_path, "", var, "max_rounds", env={var: value})
+    assert "environment variable" in message
+
+
+def test_empty_listed_variable_is_invalid_not_unset(tmp_path: Path) -> None:
+    for var in ("REVIEW_RESPOND_SETTLE", "REVIEW_RESPOND_PREFER_OWNER"):
+        fails(tmp_path, "", var, env={var: ""})
+
+
+def test_every_key_set_to_a_non_default_value_round_trips(tmp_path: Path) -> None:
+    hook = {"cmd": "echo hi", "timeout": 10, "async": False}
+    doc: dict[str, Any] = {
+        "me": {"name": "zed", "accounts": {"h.test": "u1"}},
+        "hosts": {"h.test": {"token_env": "TOK", "token_command": ["pass", "show"]}},
+        "hosts_to_check": ["h.test"],
+        "reviewers": ["h.test:1"],
+        "bot_authors": ["h.test:2"],
+        "respond_to_own_comments_prefix": "@bot",
+        "settle": "7m",
+        "max_rounds": 4,
+        "pending_ttl": "3d",
+        "access_cache_ttl": "2h",
+        "prefer_owner": "other",
+        "resolve_after_confirm": True,
+        "off_limits": ["docs/**"],
+        "skill": "my-skill",
+        "permission_profile": "profile",
+        "sandbox": "preferred",
+        "setting_sources": "user,local",
+        "env_allowlist": ["FOO"],
+        "model": "m1",
+        "agent": {"timeout": "20m"},
+        "jobs": {"queue": "q1", "kill_grace": "60s", "max_running": 2, "pass_env": ["BAR"]},
+        "git": {"user_name": "Z", "user_email": "z@example.test", "trailer": "T: x"},
+        "limits": {
+            "requests_per_host": 7,
+            "prompt_bytes": 2048,
+            "reply_bytes": 100,
+            "diff_bytes": 4096,
+        },
+        "attention": {"ineligible_comment": True},
+        "retention": {"records": "10d"},
+        "cron": {"env_file": "/home/x/env"},
+        "hooks": {
+            "pre-round": [hook],
+            "pre-push": [hook],
+            "post-pending": [{**hook, "async": True}],
+            "post-attention": [hook],
+            "post-confirm": [hook],
+        },
+        "repos": {
+            "h.test/o/r": {
+                "respond_fresh": True,
+                "respond": {"allow_commands": [["make", "test"]], "read_dirs": ["/d"]},
+                "settle": "1m",
+                "max_rounds": 2,
+                "reviewers": ["h.test:3"],
+            }
+        },
+    }
+    schemas.validate("review-respond/config.json", doc)
+    cfg = load(tmp_path, json.dumps(doc))
+    assert cfg.canonical() == doc
+
+
+def test_repo_override_merges_across_dropins(tmp_path: Path) -> None:
+    main = conf(tmp_path, "repos:\n  h.test/a:\n    settle: 1m\n    max_rounds: 2\n")
+    directory = dropin_dir(tmp_path)
+    write(
+        directory / "1.yaml",
+        "repos:\n  h.test/a:\n    max_rounds: 5\n    reviewers: ['h.test:1']\n",
+    )
+    write(
+        directory / "2.yaml",
+        "repos:\n  h.test/a:\n    settle: 2m\n  h.test/b:\n    max_rounds: 9\n",
+    )
+    cfg = load_config(main, {}).config
+    a = cfg.repo_settings("h.test/a")
+    assert (a.settle, a.max_rounds, a.reviewers) == ("2m", 5, ("h.test:1",))
+    assert cfg.repo_settings("h.test/b").max_rounds == 9
+
+
+def test_repo_max_rounds_override_does_not_leak_to_other_repos(tmp_path: Path) -> None:
+    cfg = load(tmp_path, "max_rounds: 4\nrepos:\n  h.test/x:\n    max_rounds: 2\n")
+    assert cfg.repo_settings("h.test/x").max_rounds == 2
+    assert cfg.repo_settings("h.test/y").max_rounds == 4
+
+
+def test_default_config_hash_is_pinned() -> None:
+    assert Config().sha256() == "b5fb676b2f1e0bfc7f0e9232216e8029c56831c09778a952aa62f7c58542a176"
+
+
+def test_hash_ignores_key_order(tmp_path: Path) -> None:
+    a = load(tmp_path, "max_rounds: 4\nsettle: 1m\nme: {name: a, accounts: {h.test: '1'}}\n")
+    b = load(tmp_path, "me: {accounts: {h.test: '1'}, name: a}\nsettle: 1m\nmax_rounds: 4\n")
+    assert a.sha256() == b.sha256()

@@ -20,6 +20,7 @@ import pytest
 from review_respond import actor as actor_mod
 from review_respond import cli, output
 from review_respond.cli import main
+from review_respond.config import Config
 from review_respond.errors import (
     CODE_EXIT,
     EXIT_CODES,
@@ -283,7 +284,7 @@ def test_global_flags_reach_handler(
     assert ctx == Context(
         json=True,
         config=tmp_path / "c.yaml",
-        settings=captured[0].settings,
+        settings=Config(),
         dry_run=True,
         yes=True,
         actor="human:alice",
