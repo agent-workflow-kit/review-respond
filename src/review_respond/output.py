@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config
+from .store import Store
 
 PROG = "review-respond"
 
@@ -34,6 +35,8 @@ class Context:
     # The loaded config; None for `validate` (it loads the config itself, TODO(#12)) and for the
     # fallback context used before the flags are parsed.
     settings: Config | None = None
+    # The open state database (every command opens it first; a read-only one on a newer schema).
+    store: Store | None = None
 
 
 @dataclass(frozen=True)

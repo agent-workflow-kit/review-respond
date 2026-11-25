@@ -281,10 +281,12 @@ def test_global_flags_reach_handler(
     )
     assert code == 0
     ctx = captured[0]
+    assert ctx.store is None  # --dry-run on a fresh state never creates it (#9)
     assert ctx == Context(
         json=True,
         config=tmp_path / "c.yaml",
         settings=Config(),
+        store=ctx.store,
         dry_run=True,
         yes=True,
         actor="human:alice",
@@ -752,7 +754,14 @@ def test_subprocess_result_file_and_unimplemented(tmp_path: Path) -> None:
 
 # ---- every error code has a producer here or a tracked owner ---------------------------------
 
-PRODUCED_HERE = {"internal", "usage", "human_only", "config_invalid"}  # config: test_config.py
+PRODUCED_HERE = {  # config: test_config.py; state_unsafe, version_skew: test_store.py
+    "internal",
+    "usage",
+    "human_only",
+    "config_invalid",
+    "state_unsafe",
+    "version_skew",
+}
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
     "lease_lost": 10,
@@ -768,8 +777,6 @@ OWNER_ISSUE = {
     "outcome_unknown": 34,
     "identity_missing": 33,
     "throwaway_missing": 32,
-    "state_unsafe": 9,
-    "version_skew": 9,
     "confirmation_required": 32,
     "escalated": 37,
     "refused": 25,
