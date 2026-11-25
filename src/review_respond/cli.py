@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import dataclasses
 import traceback
 from collections.abc import Callable, Sequence
 from datetime import timedelta
@@ -17,6 +18,7 @@ from .config import ConfigError, LoadedConfig, load_config
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
 from .output import PROG, Context, Outcome, emit, sanitize_line, warn
+from .store import Store, open_state_dir
 
 DESCRIPTION = (
     "Respond to review comments on your own pull requests, with fixes and replies you confirm."
@@ -37,6 +39,9 @@ _DRY_RUN_COMMANDS = frozenset(
 )
 _OVERRIDE_COMMANDS = frozenset({"respond", "confirm"})
 _ALIASES = {"approve": "confirm"}
+# Commands that never write state.db: they still work on a schema newer than this binary knows
+# (interface: Upgrades). `cron` edits the crontab only.
+READ_ONLY_COMMANDS = frozenset({"list", "show", "pending", "export", "validate", "cron"})
 
 
 class _Parser(argparse.ArgumentParser):
@@ -214,7 +219,7 @@ def _build_context(args: argparse.Namespace) -> Context:
     if config_error is not None and args.command != "validate":
         raise config_error.to_cli_error()
     if loaded is not None:
-        # TODO(#9): also record these as `warning` events in log.jsonl.
+        # TODO(#11): also record these as `warning` events in log.jsonl (the writer is #11's).
         for item in loaded.warnings:
             # --quiet silences notices, never the weakened-sandbox warning (a safety setting).
             if args.quiet and item.code != "sandbox_weakened":
@@ -257,6 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     fallback = Context(json=pre_json, result_file=pre_result)
     parser = build_parser()
     ctx = fallback
+    opened: Store | None = None
     try:
         args = parser.parse_args(args_list)
         if args.command is None:
@@ -267,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         command = _ALIASES.get(raw, raw)
         args.command = command
         ctx = _build_context(args)
+        opened = Store.open(open_state_dir(), write=command not in READ_ONLY_COMMANDS)
+        ctx = dataclasses.replace(ctx, store=opened)
         handler = HANDLERS.get(command) or _not_implemented(command)
         outcome = handler(ctx, args)
         return emit(outcome.payload, outcome.human, outcome.exit_code, ctx)
@@ -280,3 +288,6 @@ def main(argv: list[str] | None = None) -> int:
             warn("".join(sanitize_line(line) + "\n" for line in lines))
         internal = CliError("internal", f"unexpected {type(exc).__name__}")
         return _report(internal, ctx)
+    finally:
+        if opened is not None:
+            opened.close()
