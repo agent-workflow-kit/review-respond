@@ -34,7 +34,7 @@ review-respond does not use pr-watch. Any other program (the harness, cron) may 
 |---|---|
 | `--json` | machine output; every command that prints data supports it (schemas in `schemas/cli/`) |
 | `--config PATH` | config file (see Config) |
-| `--dry-run` | on `check`, `respond`, `confirm`, `reject`, `edit`, `drop-reply`, `stop`, `prune`: show what would happen and change nothing: reads only, no hook runs, no sibling write; `confirm --dry-run` runs steps 1 and 2 and prints the plan |
+| `--dry-run` | on `check`, `respond`, `confirm`, `reject`, `edit`, `drop-reply`, `stop`, `prune`, `cron`: show what would happen and change nothing: reads only, no hook runs, no sibling write; `confirm --dry-run` runs steps 1 and 2 and prints the plan |
 | `--yes` | skip a confirmation; accepted only with a human actor (a TTY, or `--actor human:<user>`). `--yes`, `--force`, `--allow-sensitive` and `--override-escalation` with an automatic actor exit 2 `human_only`. `confirm`, `edit` and `drop-reply` need a human actor (a TTY, or `--actor human:<user>`), else exit 13 `confirmation_required`; `reject` and `stop` do not |
 | `--actor A` | `human:<user>` or `auto:<name>`; the default is `human:<user>` on a TTY and `auto:unknown` otherwise. Every action review-respond takes on its own (a job, `check`, a sweep) records the actor `auto:review-respond`; an `--actor auto:<name>` given by a caller is recorded as given |
 | `--override-escalation` | human only; `respond` and `confirm`: every hook that escalates in that call counts as continuing (a veto still vetoes); recorded in audit. A plain rerun runs every hook again |
@@ -65,7 +65,7 @@ Global flags go after the subcommand. Free text (a note, a reply, a commit messa
 
 ### Error envelope
 
-With `--json`, errors print `{"error": {"code", "message", "reason"?, "details"?}}` on stdout and the message on stderr. `confirm` and `check` print their result object (`schemas/cli/confirm.json`, `schemas/cli/check.json`) also on exit 12, with the envelope's inner object in an added `error` member; every other command prints the envelope. `lower_error` (`{code, message, reason?, details?}`) carries a sibling's error object when a sibling failed.
+With `--json`, errors print `{"error": {"code", "message", "reason"?, "details"?, "lower_error"?}}` on stdout and the message on stderr. `confirm` and `check` print their result object (`schemas/cli/confirm.json`, `schemas/cli/check.json`) also on exit 12, with the envelope's inner object in an added `error` member; every other command prints the envelope. `lower_error` (`{code, message, reason?, details?}`) carries a sibling's error object when a sibling failed.
 
 ### Error codes
 
