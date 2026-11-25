@@ -64,3 +64,11 @@ def parse_since(text: str, *, now: datetime | None = None, flag: str = "--since"
         return current - parse_duration(text, flag=flag)
     except OverflowError:
         raise CliError("usage", f"{flag} is out of range") from None
+
+
+def duration_ms(text: str) -> int:
+    """A duration in milliseconds; ``ValueError`` when it is not a duration (config values)."""
+    match = _DURATION_RE.fullmatch(text)
+    if match is None or (match.group(2) is None and match.group(1) != "0"):
+        raise ValueError("not a duration")
+    return int(match.group(1)) * _UNIT_MS[match.group(2) or "s"]

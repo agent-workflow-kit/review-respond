@@ -59,7 +59,8 @@ def os_user_name() -> str:
 def default_actor(*, tty: bool | None = None, user: str | None = None) -> str:
     """``human:<user>`` on a TTY, ``auto:unknown`` otherwise.
 
-    TODO(#7): ``<user>`` should be ``me.name`` from the loaded config when it is set.
+    ``user`` is ``me.name`` from the loaded config when it is set (the caller passes it), else
+    the OS user name.
     """
     is_tty = stdin_is_tty() if tty is None else tty
     if not is_tty:

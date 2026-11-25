@@ -739,7 +739,9 @@ Location, drop-ins and precedence follow the design guide (`~/.config/review-res
 | `hooks.<name>` | none | hook command lists |
 | `repos.<id>.*` | none | per-repo overrides, exactly these keys: `respond_fresh`, `respond.allow_commands`, `respond.read_dirs`, `settle`, `max_rounds`, `reviewers` |
 
-Every duration (config keys, `--older-than`, `--since`) is an integer and a unit: `ms`, `s`, `m`, `h` or `d`. Invalid config fails fast with the key's name.
+Every duration (config keys, `--older-than`, `--since`) is an integer and a unit: `ms`, `s`, `m`, `h` or `d`. Invalid config fails fast with the key's name. Every command except `validate` loads the config first and exits 2 `config_invalid` (the message names the file or `REVIEW_RESPOND_*` variable and the key, never the value) when it is invalid.
+
+Loading: with `--config PATH` that file replaces `config.yaml` (it must exist) and the drop-ins are read from the `config.d` beside it. Each file and drop-in is at most 256 KiB (1 MiB together, 256 drop-ins) and must be a regular file owned by you and not writable by group or others, because hooks run from this config; YAML anchors, aliases, tags, duplicate keys, non-string keys and the merge key are refused, and `yes`, `no`, `on` and `off` are strings. A key may be `null` only where `schemas/config.json` allows it. A `repos.<id>` key left out inherits the global value. Narrower than the schema: durations are at most `3650d`, `pending_ttl`, `agent.timeout`, `jobs.kill_grace` and hook timeouts are not `0`, a hook timeout is at most 600 seconds, `async` is for post hooks only, `jobs.pass_env` cannot name `REVIEW_RESPOND_*`, and free text has no control characters (a hook `cmd` may hold a newline or tab). `sandbox: preferred` or `off` prints a warning. A `REVIEW_RESPOND_*` variable that is not in the list above is ignored with a warning.
 
 ## Environment variables
 
