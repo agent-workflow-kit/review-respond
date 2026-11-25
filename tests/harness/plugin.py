@@ -52,13 +52,15 @@ class World:
 
 
 @pytest.fixture(autouse=True)
-def world(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[World]:
+def world(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[World]:
     """Isolate every test: private HOME and XDG, fakes first on PATH, the exec guard active."""
     for name in list(os.environ):
         if name.startswith(SCRUBBED_PREFIXES) or name in SCRUBBED_NAMES:
             monkeypatch.delenv(name)
-    root = tmp_path / "world"
-    root.mkdir()
+    # Outside the test's own tmp_path, so tests that list tmp_path see only their files.
+    root = tmp_path_factory.mktemp("world")
     fakes = Fakes(root)
     procs = ProcRegistry()
     w = World(root, fakes, procs)
