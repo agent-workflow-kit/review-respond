@@ -598,3 +598,166 @@ def test_a_flag_set_before_the_agent_starts_cancels_and_never_launches(scene: Sc
     assert scene.comment_states()[C1] == "unhandled"  # back to where it was delivered from
     assert scene.calls("agent-spawn") == []
     assert scene.temp_files() == []
+
+
+def during(sc: Scene, tool: str, command: str, action: Callable[[], None]) -> Any:
+    """Run ``action`` in a thread once the fake has recorded a call of ``tool command``."""
+    import threading
+    import time
+
+    def watch() -> None:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if sc.fakes.calls(tool, command):
+                action()
+                return
+            time.sleep(0.02)
+
+    t = threading.Thread(target=watch)
+    t.start()
+    return t
+
+
+def test_a_stop_during_the_wait_ends_the_round_canceled_with_the_stored_reason(
+    scene: Scene,
+) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    script_wait(scene, "killed", sleep=1.0)  # end reason stopped: the agent was stopped
+    t = during(scene, "agent-spawn", "wait", lambda: set_flag(scene))
+    assert scene.job() == 0
+    t.join(timeout=30)
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "stopped", 1)
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("stopped",)]
+
+
+def test_a_flag_set_while_the_agent_launches_stops_it_before_the_wait(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene, sleep=1.0)
+    scene.fakes.script("agent-spawn", "stop", json={"agent": None, "action": "none",
+        "session_stop": None, "already_parked": True, "removed": True, "warnings": []},
+        schema=False)  # fmt: skip
+    script_wait(scene, "killed")
+    t = during(scene, "agent-spawn", "resume", lambda: set_flag(scene))
+    assert scene.job() == 0
+    t.join(timeout=30)
+    (stop,) = scene.calls("agent-spawn", "stop")
+    assert stop.positionals["agent_id"] == FORK
+    assert stop.flags["--actor"] == "auto:review-respond"
+    assert stop.flags["--grace"] == "75s"
+    assert [c.command for c in scene.calls("agent-spawn")] == ["resume", "stop", "wait"]
+    assert scene.round()["state"] == "canceled"
+    audit = [json.loads(x) for x in (scene.state / "audit.jsonl").read_text().splitlines()]
+    assert [(a["phase"], a["action"]) for a in audit] == [("attempted", "stop"), ("outcome", "stop")]
+
+
+def test_a_signal_exit_of_wait_is_reread_through_show(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script("agent-spawn", "wait", json=error_doc("internal"), exit=143, schema=False)
+    show = show_after(scene)
+    show["runs"][0]["outcome"] = outcome_doc("failed")
+    script_show(scene, show)
+    assert scene.job() == 12
+    row = scene.round()
+    assert (row["state"], row["failure_reason"], row["counted"]) == ("failed", "agent_failed", 1)
+
+
+def test_a_signal_exit_of_wait_with_a_live_agent_leaves_the_round_running(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script("agent-spawn", "wait", json=error_doc("internal"), exit=130, schema=False)
+    script_show(scene, show_after(scene, status="live"))
+    assert scene.job() == 0
+    assert scene.round()["state"] == "running"
+    assert scene.comment_states()[C1] == "delivered"
+    assert len(scene.temp_files()) == 2  # the finalizer (#24) removes them with the round
+
+
+def test_a_done_run_whose_agent_is_still_live_is_left_to_the_finalizer(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    script_wait(scene)
+    script_show(scene, show_after(scene, status="live"))
+    assert scene.job() == 0
+    assert scene.round()["state"] == "running"
+
+
+def test_an_escalation_stores_the_agents_question_cut_and_sanitized(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    doc = waited(scene, "blocked", reason="which\x00 file?", summary="s" * 5000)
+    scene.fakes.script("agent-spawn", "wait", json=doc, exit=13, schema="agent-spawn/cli/wait.json")
+    assert scene.job() == 13
+    row = scene.round()
+    assert row["state"] == "escalated"
+    assert len(row["escalation_summary"].encode()) == 4096
+    assert row["escalation_reason"].startswith("which")
+
+
+# ---- artifact failures ------------------------------------------------------------------------
+
+
+def with_artifact(sc: Scene, artifact: Any, *, implicit: bool = False) -> None:
+    (sc.root / "src").mkdir(exist_ok=True)
+    (sc.root / "src" / "app.py").write_text("x = 1\n")
+    script_reads(sc)
+    script_throwaway(sc)
+    script_resume(sc)
+    script_wait(sc)
+    script_show(sc, show_after(sc, artifact=artifact, implicit=implicit))
+
+
+def broken_ref(sc: Scene) -> dict[str, Any]:
+    ref = artifact_file(sc, good_artifact())
+    ref["sha256"] = "0" * 64
+    return ref
+
+
+ARTIFACT_CASES: list[tuple[str, Callable[[Scene], tuple[Any, bool]], str, str | None]] = [
+    ("missing", lambda sc: (None, False), "artifact_missing", None),
+    ("implicit", lambda sc: (artifact_file(sc, good_artifact()), True), "implicit_done", None),
+    ("frozen", lambda sc: (broken_ref(sc), False), "artifact_invalid", "frozen_file"),
+    ("json", lambda sc: (artifact_file(sc, b"{not json"), False), "artifact_invalid", "json"),
+    ("schema", lambda sc: (artifact_file(sc, good_artifact(extra=1)), False),
+     "artifact_invalid", "schema"),
+    ("marker", lambda sc: (artifact_file(sc, good_artifact(skill_marker="other")), False),
+     "artifact_invalid", "skill_marker"),
+    ("replies", lambda sc: (artifact_file(
+        sc, good_artifact(replies=[{"comment_id": "gh:rc:zz", "body": "x"}])), False),
+     "artifact_invalid", "replies"),
+    ("paths", lambda sc: (artifact_file(sc, good_artifact(changed_files=["../x"])), False),
+     "artifact_invalid", "paths"),
+    ("message", lambda sc: (artifact_file(sc, good_artifact(commit_message="a\x00b")), False),
+     "artifact_invalid", "commit_message"),
+    ("path_state", lambda sc: (artifact_file(sc, good_artifact(changed_files=["nope.py"])), False),
+     "artifact_invalid", "path_state"),
+]  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "build, reason, detail", [c[1:] for c in ARTIFACT_CASES], ids=[c[0] for c in ARTIFACT_CASES]
+)
+def test_each_artifact_failure_ends_the_round_with_its_reason_and_detail(
+    scene: Scene, build: Callable[[Scene], tuple[Any, bool]], reason: str, detail: str | None
+) -> None:
+    artifact, implicit = build(scene)
+    with_artifact(scene, artifact, implicit=implicit)
+    assert scene.job() == 12
+    row = scene.round()
+    assert (row["state"], row["failure_reason"], row["failure_detail"], row["counted"]) == (
+        "failed",
+        reason,
+        detail,
+        1,
+    )
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.temp_files() == []
