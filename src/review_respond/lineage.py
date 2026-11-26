@@ -80,7 +80,9 @@ _FORK_COLUMNS: Final = "agent_id, pr, round, source, state, failed_passes, refus
 
 
 def get_fork(conn: sqlite3.Connection, agent_id: str) -> Fork | None:
-    row = conn.execute(f"SELECT {_FORK_COLUMNS} FROM forks WHERE agent_id = ?", (agent_id,)).fetchone()
+    row = conn.execute(
+        f"SELECT {_FORK_COLUMNS} FROM forks WHERE agent_id = ?", (agent_id,)
+    ).fetchone()
     return None if row is None else Fork(*row)
 
 
@@ -127,9 +129,7 @@ def record_fork(
         raise CliError("internal", "a fork cannot be its own source")
     if (
         conn.execute("SELECT 1 FROM prs WHERE base_agent = ?", (agent_id,)).fetchone() is not None
-        or conn.execute(
-            "SELECT 1 FROM rounds WHERE base_agent_id = ?", (agent_id,)
-        ).fetchone()
+        or conn.execute("SELECT 1 FROM rounds WHERE base_agent_id = ?", (agent_id,)).fetchone()
         is not None
     ):
         raise CliError("internal", "an agent that is a base cannot be recorded as a fork")
@@ -209,10 +209,7 @@ def mark_teardown_pending(conn: sqlite3.Connection, agent_id: str, *, now: float
     fork = get_fork(conn, agent_id) if is_agent_id(agent_id) else None
     if fork is None or fork.state != "round":
         return False
-    if (
-        conn.execute("SELECT 1 FROM prs WHERE base_agent = ?", (agent_id,)).fetchone()
-        is not None
-    ):
+    if conn.execute("SELECT 1 FROM prs WHERE base_agent = ?", (agent_id,)).fetchone() is not None:
         return False
     _set_state(conn, fork, "teardown_pending", now)
     return True
@@ -240,9 +237,7 @@ def teardown_pass(lease: Lease, spawn: AgentSpawn) -> list[Teardown]:
     store = lease.store
     done: list[Teardown] = []
     for fork in list_forks(store.conn, state="teardown_pending"):
-        base = store.conn.execute(
-            "SELECT base_agent FROM prs WHERE pr = ?", (fork.pr,)
-        ).fetchone()
+        base = store.conn.execute("SELECT base_agent FROM prs WHERE pr = ?", (fork.pr,)).fetchone()
         if base is not None and base[0] == fork.agent_id:
             continue  # inconsistent row: never tear down the base
         result = spawn.teardown(fork.agent_id, actor=ACTOR)

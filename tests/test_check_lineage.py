@@ -15,7 +15,6 @@ from tests.harness.plugin import World
 from tests.harness.spawn_run import error_doc
 from tests.test_check import (
     PR7,
-    config,  # noqa: F401  (fixture)
     log_events,
     one_comment,
     pr_item,
@@ -24,7 +23,14 @@ from tests.test_check import (
     script_comments,
     script_prs,
     sql,
+    write_config,
 )
+
+
+@pytest.fixture
+def config(world: World) -> Path:
+    return write_config(world)
+
 
 AG = "ag-cccccccc"
 WT = "wt-aaaaaaaa"
@@ -89,9 +95,7 @@ def test_a_live_base_agent_keeps_the_pr_waiting_agent_live(
 def test_an_unreadable_agent_spawn_is_lower_failed_and_sets_no_block(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
-    world.fakes.script(
-        "agent-spawn", "list", json=error_doc("lower_failed"), exit=12, schema=False
-    )
+    world.fakes.script("agent-spawn", "list", json=error_doc("lower_failed"), exit=12, schema=False)
     code, doc = pass_with(world, capsys, config)
     assert code == 0
     assert pr_of(doc, PR7)["errors"] == ["lower_failed"]
@@ -129,10 +133,10 @@ def test_a_pass_tears_down_forks_marked_for_it_and_nothing_else(
     script_comments(world.fakes, PR7, [])
     run(capsys, "check", config=config)  # stores the PR
     insert_fork(world, "ag-fffffff2", "teardown_pending")
+    gone = original("ag-fffffff2", PR7, status="torn_down", torn_down_at="2026-01-01T12:00:00Z")
     world.fakes.script(
         "agent-spawn", "teardown",
-        json={"agent": original("ag-fffffff2", PR7, status="torn_down", torn_down_at="2026-01-01T12:00:00Z"), "worktrees": [], "warnings": []},
-        schema=False,
+        json={"agent": gone, "worktrees": [], "warnings": []}, schema=False,
     )  # fmt: skip
     script_prs(world.fakes, [pr_item(7)])
     script_comments(world.fakes, PR7, [])

@@ -254,6 +254,8 @@ due(pr):
 
 `agent_busy(pr)`: the base agent or the PR's base fork has status `launching`, `live` or `tearing_down`, or a promotion pending.
 
+`check` computes it with `agent-spawn show` of the base agent (or from the `list` answer that found it) and stores the observation with the PR; `list` and `show` print the stored value. An agent-spawn answer that cannot be read counts as busy, the PR reports `lower_failed` and nothing is set or cleared for it in that pass.
+
 `check` starts due rounds, oldest due first, while the number of `queued` and `running` rounds over all PRs is below `jobs.max_running` (default 1), in both placements (with jobsctl the queue's own cap applies as well). A due PR over that number is `waiting` with `capacity`. A human `respond` is not bound by `jobs.max_running`. A round's prompt holds the eligible unhandled comments at the moment its job starts.
 
 **Counting.** A round is **counted** when its run started: agent-spawn reported an outcome other than `not-started` (exit 0 after a run, 13 from the session phase, 14 to 18), or `agent-spawn show` gives its run a non-null `first_working_at`. Every counted round counts, including a stopped one that started and the round after `reject --redo`. The PR's limit is reached when the number of counted rounds is at least `max_rounds`. At the limit, `post-attention` reason `round_limit` fires once per block episode; only `respond --force` or a higher `max_rounds` continues.

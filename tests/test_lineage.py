@@ -13,9 +13,8 @@ import pytest
 from review_respond import labels, lineage
 from review_respond.errors import CliError
 from review_respond.store import Store, open_state_dir, pass_lease_key
-from tests.harness import builders
 from tests.harness.adversarial import FORGED_AGENT_IDS
-from tests.test_rounds import AGENT, BASE, Env
+from tests.test_rounds import Env
 
 ORIGINAL = "ag-oooooooo"
 FORK1, FORK2, FORK3 = "ag-fffffff2", "ag-fffffff3", "ag-fffffff4"
@@ -48,15 +47,13 @@ def set_base(env: Env, agent: str | None) -> None:
 
 
 def base_of(env: Env) -> str | None:
-    return env.store.conn.execute(
-        "SELECT base_agent FROM prs WHERE pr = ?", (env.pr,)
-    ).fetchone()[0]
+    return env.store.conn.execute("SELECT base_agent FROM prs WHERE pr = ?", (env.pr,)).fetchone()[
+        0
+    ]
 
 
 def states(env: Env) -> dict[str, str]:
-    return {
-        r[0]: r[1] for r in env.store.conn.execute("SELECT agent_id, state FROM forks")
-    }
+    return {r[0]: r[1] for r in env.store.conn.execute("SELECT agent_id, state FROM forks")}
 
 
 def round_with_fork(env: Env, agent: str, end: str = "pending") -> str:
@@ -368,7 +365,9 @@ def script_teardown(fakes: Any, agent: str, exit: int = 0, **kw: Any) -> None:
         )  # fmt: skip
 
 
-def test_teardown_acts_only_on_recorded_forks_marked_for_it(env: Env, gateway: Any, fakes: Any) -> None:
+def test_teardown_acts_only_on_recorded_forks_marked_for_it(
+    env: Env, gateway: Any, fakes: Any
+) -> None:
     pending_teardown(env, FORK1)
     round_with_fork(env, FORK2, "pending")  # not marked
     switch(env, round_with_fork(env, FORK3, "pending"))  # the base
@@ -433,9 +432,7 @@ def test_three_failed_passes_report_teardown_refused_once(
     assert fork.refused_at is not None
 
 
-def test_exit_0_is_the_answer_whatever_the_body_says(
-    env: Env, gateway: Any, fakes: Any
-) -> None:
+def test_exit_0_is_the_answer_whatever_the_body_says(env: Env, gateway: Any, fakes: Any) -> None:
     pending_teardown(env, FORK1)
     fakes.script("agent-spawn", "teardown", stdout="not json", exit=0, schema=False)
     assert env.lease is not None

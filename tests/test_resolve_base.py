@@ -1,5 +1,5 @@
-"""resolve_base and agent_busy (docs/interface.md: Fork lineage, Settle and round start): which agent
-is a PR's base, what a label may and may not select, and what the due rule sees of the agent."""
+"""resolve_base and agent_busy (docs/interface.md: Fork lineage, Settle and round start): which
+agent is a PR's base, what a label may and may not select, and what the due rule sees of it."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from tests.harness.adversarial import FORGED_AGENT_IDS
 from tests.harness.agents import list_doc, original, show_doc, wt_record
 from tests.harness.fakes import Fakes
 from tests.harness.spawn_run import error_doc
-from tests.test_lineage import FORK1, FORK2, round_with_fork, switch
+from tests.test_lineage import FORK1, round_with_fork, switch
 from tests.test_rounds import Env
 
 C1, C2, C3 = "ag-cccccccc", "ag-dddddddd", "ag-eeeeeeee"
@@ -116,7 +116,9 @@ def cand(agent_id: str, env: Env, wt: str = WT1, **over: Any) -> dict[str, Any]:
 # ---- finding the original agent ----------------------------------------------------------------
 
 
-def test_the_one_matching_agent_is_the_base_and_is_stored(env: Env, tools: Tools, fakes: Fakes) -> None:
+def test_the_one_matching_agent_is_the_base_and_is_stored(
+    env: Env, tools: Tools, fakes: Fakes
+) -> None:
     script_list(fakes, cand(C1, env))
     script_wt(fakes, WT1)
     got = resolve(env, tools)
@@ -426,8 +428,8 @@ def test_a_second_round_forks_the_first_fork_with_no_extra_flags(
     tools.spawn.resume_fork(
         base.agent_id, cwd=tmp_path, kind="respond", mode="headless", skill="respond-to-review",
         plugin_dir=tmp_path, prompt_file=tmp_path / "p", permission_profile=tmp_path / "pp",
-        sandbox="required", setting_sources=(), env_allowlist=(), labels=(("round", "rd-aaaaaaaa"),),
-        actor="auto:review-respond",
+        sandbox="required", setting_sources=(), env_allowlist=(),
+        labels=(("round", "rd-aaaaaaaa"),), actor="auto:review-respond",
     )  # fmt: skip
     (call,) = fakes.calls("agent-spawn", "resume")
     assert call.argv[:3] == ["resume", FORK1, "--fork"]
