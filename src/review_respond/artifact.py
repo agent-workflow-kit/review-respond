@@ -294,12 +294,12 @@ def reply_problem(body: str, reply_bytes: int) -> str | None:
         size = len(body.encode("utf-8"))
     except UnicodeEncodeError:
         return "the reply is not valid UTF-8"
+    if size > reply_bytes or len(body) > MAX_BODY_CHARS:
+        return f"the reply is larger than {reply_bytes} bytes"
     # the shared sanitizer marks exactly the characters that show nothing (Cf, Cc, Zl, Zp, Co, Cn,
     # fillers, variation selectors), so a body of only those and whitespace is empty
     if all(ch.isspace() or sanitize(ch) != ch for ch in body):
         return "the reply is empty"
-    if size > reply_bytes or len(body) > MAX_BODY_CHARS:
-        return f"the reply is larger than {reply_bytes} bytes"
     if _TEXT_CONTROL_RE.search(body):
         return "the reply holds a control character"
     if _BIDI_RE.search(body):

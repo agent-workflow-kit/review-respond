@@ -525,7 +525,7 @@ validate(outcome):
   strict JSON (no duplicate keys, depth <= 8); any exception -> artifact_invalid (detail json)
   schema (schemas/artifact.json, unknown keys refused; covers only types, keys, the comment-id pattern, marker length and replies maxItems) -> artifact_invalid (detail schema)
   skill_marker != the bundled plugin's marker -> artifact_invalid (detail skill_marker)
-  replies: comment_id in the round's delivered ids, each once; body non-empty (a body of only whitespace or invisible characters, categories Cf, Cc, Zl, Zp, Co, Cn, is empty), at most limits.reply_bytes UTF-8 bytes and at most 65536 characters,
+  replies: comment_id in the round's delivered ids, each once; body non-empty (a body of only whitespace or characters the shared sanitizer would change, that is invisible, format, control, separator, private-use, unassigned, filler and variation-selector characters, is empty; the size limits are checked first), at most limits.reply_bytes UTF-8 bytes and at most 65536 characters,
      no C0 control other than tab, LF and CR, no DEL, no C1 control, no bidi control (U+200E, U+200F, U+061C, U+202A-U+202E, U+2066-U+2069), no U+2028 or U+2029 -> artifact_invalid (detail replies)
   each path in changed_files and deleted_files: UTF-8, at most 4096 bytes, each component at most 255 bytes, no NUL or control character,
      relative, no backslash, no ':', no empty, '.' or '..' component, no component that folds to .git (wtctl's alias rule),

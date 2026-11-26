@@ -797,7 +797,7 @@ def test_commit_message_tab_newline_and_cr_are_allowed() -> None:
 
 INVISIBLE_ONLY = [
     "\u200b", "\ufeff", "\u200b\ufeff", " \u200b\n\ufeff\t", "\u2028", "\u2029", "\u200d",
-    "\ue000", "\u0378", "\x00",
+    "\ue000", "\u0378", "\x00", "\u3164", "\u2800", "\u115f\u1160\uffa0",
 ]  # fmt: skip
 BIDI_AND_SEPARATORS = [
     "\u200e", "\u200f", "\u061c", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
@@ -810,6 +810,11 @@ def test_replies_invisible_only_body_is_empty(body: str) -> None:
     assert reply_problem(body, REPLY_BYTES) == "the reply is empty"
     doc = good() | {"replies": [{"comment_id": "gh:rc:AAA", "body": body}]}
     invalid(parse(dump(doc)), "replies")
+
+
+def test_reply_problem_checks_size_before_emptiness() -> None:
+    assert reply_problem("\u200b" * 11, 10) == "the reply is larger than 10 bytes"
+    assert reply_problem("\u200b" * 3, 10) == "the reply is empty"
 
 
 @pytest.mark.parametrize("ch", BIDI_AND_SEPARATORS)
