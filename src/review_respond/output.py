@@ -7,12 +7,12 @@ import os
 import stat
 import sys
 import tempfile
-import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Config
+from .prompt import sanitize_line as sanitize_line
 from .store import Store
 
 if TYPE_CHECKING:
@@ -60,16 +60,6 @@ class Outcome:
     payload: dict[str, Any] = field(default_factory=lambda: {})
     human: str = ""
     exit_code: int = 0
-
-
-def sanitize_line(text: str) -> str:
-    """Mark control, format and separator characters so untrusted text cannot move the cursor."""
-    return "".join(
-        f"<U+{ord(ch):04X}>"
-        if unicodedata.category(ch) in {"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"}
-        else ch
-        for ch in text
-    )
 
 
 def dump_json(document: dict[str, Any]) -> str:

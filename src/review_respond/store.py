@@ -588,6 +588,56 @@ class StateDir:
         finally:
             os.close(dfd)
 
+    def write_private_file(self, subdir: str, name: str, data: bytes) -> Path:
+        """Create ``<state>/<subdir>/<name>`` (directory 0700, file 0600 set explicitly) and
+        return its path. Never follows a symlink and never replaces an existing file (the
+        ``FileExistsError`` is the caller's). ``subdir`` and ``name`` are single plain names."""
+        for part in (subdir, name):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", part):
+                raise ValueError("not a plain file name")
+        dfd = _open_dir(self.path / subdir, euid=self.euid, create=True, dir_fd=self.fd)
+        try:
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=dfd,
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                view = memoryview(data)
+                while view:
+                    view = view[os.write(fd, view) :]
+                os.fsync(fd)
+            except BaseException:
+                # A half-written file would make a retry fail with FileExistsError.
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=dfd)
+                raise
+            finally:
+                os.close(fd)
+            _fsync_dir(dfd)
+        finally:
+            os.close(dfd)
+        return self.path / subdir / name
+
+    def remove_private_file(self, subdir: str, name: str) -> bool:
+        """Delete ``<state>/<subdir>/<name>``; ``False`` when it or the directory is missing."""
+        for part in (subdir, name):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", part):
+                raise ValueError("not a plain file name")
+        try:
+            dfd = _open_dir(self.path / subdir, euid=self.euid, create=False, dir_fd=self.fd)
+        except CliError:
+            return False
+        try:
+            os.unlink(name, dir_fd=dfd)
+            return True
+        except FileNotFoundError:
+            return False
+        finally:
+            os.close(dfd)
+
     def get_file(self, owner: str, digest: str) -> bytes:
         """The bytes of a stored file; ``state_unsafe`` when missing, unsafe or its hash differs.
 
