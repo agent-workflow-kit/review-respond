@@ -518,6 +518,7 @@ class ReadComment:
     thread_outdated: bool | None
     path: str | None
     line: int | None
+    side: str | None = None  # the thread's side (left or right); only the prompt shows it
 
 
 @dataclass(frozen=True)
@@ -558,7 +559,7 @@ def _parse_comments(result: Result, pr: str) -> CommentRead:
         outdated = _opt_bool(thread.get("outdated"), "outdated")
         path = _opt_text(thread.get("path"), "path", 4096, one_line=True)
         line = _int(thread.get("line"), "line", minimum=1, maximum=10**9, nullable=True)
-        _enum(thread.get("side"), _SIDES, "side")
+        side: str | None = _enum(thread.get("side"), _SIDES, "side")
         _int(thread.get("start_line"), "start_line", minimum=1, maximum=10**9, nullable=True)
         _opt_match(thread.get("commit_sha"), _SHA_RE, "commit_sha")
         comments = _array(thread.get("comments"), "comments", MAX_COMMENTS_PER_READ)
@@ -589,6 +590,7 @@ def _parse_comments(result: Result, pr: str) -> CommentRead:
                     thread_outdated=outdated,
                     path=path,
                     line=line,
+                    side=side,
                 )
             )
     return CommentRead(pr, head_sha, complete, tuple(out))
@@ -770,6 +772,8 @@ class Refreshed:
     account_known: bool = True
     # the failure code of the account resolution when ``account_known`` is false
     account_code: str | None = None
+    # what `forgectl show` said (state, head, fork); None only when nothing was read
+    facts: PrFacts | None = None
 
 
 OnRead = Callable[[StoredPr, CommentRead], None]
@@ -1073,15 +1077,16 @@ class Detection:
                 not_yours=False,
                 account_known=False,
                 account_code=account_code or "identity_unknown",
+                facts=facts,
             )
         if facts.author_id != account:
-            return Refreshed(stored=None, author_id=facts.author_id, not_yours=True)
+            return Refreshed(stored=None, author_id=facts.author_id, not_yours=True, facts=facts)
         with self.lease.transaction() as conn:
             _upsert(conn, facts, self._now())
             stored = get_pr(conn, pr)
         if stored is None:  # cannot happen: the upsert just ran
             raise CliError("internal", "a stored PR vanished")
-        return Refreshed(stored=stored, author_id=facts.author_id, not_yours=False)
+        return Refreshed(stored=stored, author_id=facts.author_id, not_yours=False, facts=facts)
 
     def _ensure_installed_at(self) -> None:
         stamp = self.started_at.strftime("%Y-%m-%dT%H:%M:%SZ")

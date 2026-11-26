@@ -15,8 +15,8 @@ through ``Store.try_acquire``, never by writing the row). Nothing here takes a l
 
 Seams owned by later issues:
 
-- TODO(#23): the job calls ``start``, ``record_job``, ``record_agent``, ``note_started`` and
-  ``finish_run``; its failed PR read (not only its comment read) must increment
+- ``job.py`` (#23) calls ``start``, ``record_throwaway``, ``record_agent``, ``note_started`` and
+  ``finish_run`` (``record_job`` is the placement's, #24); its failed PR read increments
   ``prs.read_failures`` (``detect`` does for comment reads) before ``cancel_read_failed``, which
   reads that count and never writes it.
 - TODO(#24): job placement, the queued reconcile (``reconcile_lost`` is its write) and the
@@ -450,6 +450,22 @@ class Rounds:
 
         return self._run(round_id, frozenset({"running"}), body)
 
+    def record_throwaway(self, round_id: str, throwaway_id: str) -> Transition:
+        """Store the round throwaway's wtctl record id (a running round, before the agent: the
+        finalizer and the cleanup find the throwaway by it). The same id again changes nothing; a
+        different one is ``internal``."""
+        if not _THROWAWAY_RE.fullmatch(throwaway_id):
+            raise ValueError("throwaway_id is not a plain identifier")
+
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
+            if row.throwaway_id is not None:
+                if row.throwaway_id != throwaway_id:
+                    raise CliError("internal", f"round {row.id} already has another throwaway")
+                return None
+            return _Plan({"throwaway_id": throwaway_id}, "throwaway")
+
+        return self._run(round_id, frozenset({"running"}), body)
+
     def note_started(self, round_id: str) -> Transition:
         """Counting: the run reached ``working``; the round counts toward ``max_rounds``."""
 
@@ -531,6 +547,22 @@ class Rounds:
             new_block = self._block(conn, row, "failed")
             return self._end(
                 row, "failed", False, "job_lost", new_block=new_block, failure_reason="job_lost"
+            )
+
+        return self._run(round_id, frozenset({"queued"}), body, extra=extra)
+
+    def fail_queued(self, round_id: str, *, extra: EndStep | None = None) -> Transition:
+        """``_job`` cannot build what the round needs and no comment was delivered yet (the
+        prompt cannot fit ``limits.prompt_bytes`` even for one comment, the stored note is
+        unreadable, the session settings are unsafe): ``queued`` -> ``failed`` (``internal``),
+        not counted, block ``failed``. The state table has no such row (a decision for the
+        maintainer, see docs/interface.md Round states): without a block a due ``check`` would
+        queue the same round again at every pass."""
+
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
+            new_block = self._block(conn, row, "failed")
+            return self._end(
+                row, "failed", False, "internal", new_block=new_block, failure_reason="internal"
             )
 
         return self._run(round_id, frozenset({"queued"}), body, extra=extra)
