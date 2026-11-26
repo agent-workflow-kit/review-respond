@@ -237,12 +237,16 @@ def forgectl_prs(
     }
 
 
-def host_error(host: str, code: str = "upstream_error", message: str = "host said no") -> dict[str, Any]:
+def host_error(
+    host: str, code: str = "upstream_error", message: str = "host said no"
+) -> dict[str, Any]:
     return {"host": host, "code": code, "message": message}
 
 
 def forgectl_whoami_hosts(
-    *hosts: str, ids: dict[str, str | None] | None = None, token_source: dict[str, str] | None = None,
+    *hosts: str,
+    ids: dict[str, str | None] | None = None,
+    token_source: dict[str, str] | None = None,
     errors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """`forgectl whoami` for several hosts; `token_source` maps a host to `none` and so on."""

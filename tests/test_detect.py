@@ -229,7 +229,14 @@ def test_a_second_listing_updates_the_head_but_keeps_created_at_and_first_seen(
     detection.run()
     before = rows(store)[pr_ref(1)]
     gateway.clock.advance(60)  # type: ignore[attr-defined]
-    script_prs(fakes, [pr_item(1, head_sha=builders.HEAD_B, head_ref="feat/y", created_at="2030-01-01T00:00:00Z")])
+    script_prs(
+        fakes,
+        [
+            pr_item(
+                1, head_sha=builders.HEAD_B, head_ref="feat/y", created_at="2030-01-01T00:00:00Z"
+            )
+        ],
+    )
     script_comments(fakes, pr_ref(1))
     make(gateway, lease).run()
     after = rows(store)[pr_ref(1)]
@@ -307,9 +314,7 @@ def test_a_failed_whoami_with_no_configured_hosts_is_lower_failed(
 def test_a_host_without_an_account_id_is_a_failed_host_and_nothing_is_read(
     gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
 ) -> None:
-    fakes.script(
-        "forgectl", "whoami", json=builders.forgectl_whoami_hosts(HOST, ids={HOST: None})
-    )
+    fakes.script("forgectl", "whoami", json=builders.forgectl_whoami_hosts(HOST, ids={HOST: None}))
     result = make(gateway, lease, config=settings(accounts=False)).run().hosts[0]
     assert (result.ok, result.code) == (False, "identity_unknown")
     assert forgectl_calls(fakes, "prs") == []
@@ -361,7 +366,9 @@ def test_a_host_failure_leaves_the_other_hosts_processed(
     stored = rows(store)
     assert set(stored) == {pr_ref(9), other["pr"]}
     assert dict(stored[pr_ref(9)]) == dict(before)  # nothing on the failed host changed
-    events = [json.loads(line) for line in (store.state_path / "log.jsonl").read_text().splitlines()]
+    events = [
+        json.loads(line) for line in (store.state_path / "log.jsonl").read_text().splitlines()
+    ]
     assert [(e["event"], e["host"], e["code"]) for e in events] == [
         ("host_failed", HOST, "upstream_error")
     ]
@@ -477,7 +484,7 @@ def test_an_error_code_that_is_not_a_plain_name_cannot_reach_the_log_or_result(
     fakes.script(
         "forgectl",
         "prs",
-        json={"error": {"code": "x\nINJECT {\"level\":\"error\"}", "message": "m"}},
+        json={"error": {"code": 'x\nINJECT {"level":"error"}', "message": "m"}},
         exit=12,
         schema=False,
         match={"flags": {"--host": HOST}},
@@ -528,7 +535,12 @@ def test_an_incomplete_listing_never_infers_a_close(
     ids=["not_found_is_unknown_not_closed", "upstream_error", "still_open"],
 )
 def test_show_that_does_not_report_closed_or_merged_changes_nothing(
-    answer: dict[str, Any], exit_code: int, gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+    answer: dict[str, Any],
+    exit_code: int,
+    gateway: Gateway,
+    fakes: Fakes,
+    store: Store,
+    lease: Lease,
 ) -> None:
     ref = insert_pr(store, 8)
     script_prs(fakes, [])
@@ -814,7 +826,11 @@ COMMENT_BREAKERS: dict[str, Callable[[str], dict[str, Any]]] = {
         [
             builders.thread(
                 "gh:rt:T1",
-                [builders.comment("gh:rc:C1", "a", author={"login": "x", "id": 5, "is_bot": False})],
+                [
+                    builders.comment(
+                        "gh:rc:C1", "a", author={"login": "x", "id": 5, "is_bot": False}
+                    )
+                ],
             )
         ],
         pr=ref,
@@ -833,7 +849,11 @@ def test_a_comment_read_that_does_not_fit_the_schema_is_lower_failed_and_changes
     assert caught.value.code == "lower_failed"
     assert caught.value.lower is not None and caught.value.lower["code"] == "bad_output"
     row = rows(store)[ref]
-    assert (row["comment_count"], row["last_comments_read_at"], row["read_failures"]) == (2, None, 1)
+    assert (row["comment_count"], row["last_comments_read_at"], row["read_failures"]) == (
+        2,
+        None,
+        1,
+    )
 
 
 def test_hostile_comment_text_is_carried_unchanged_and_never_in_argv(

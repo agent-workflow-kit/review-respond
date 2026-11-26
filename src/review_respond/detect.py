@@ -37,7 +37,9 @@ MAX_THREADS_PER_READ: Final = 20_000
 MAX_WHOAMI_HOSTS: Final = 64
 
 # The patterns of the pinned forgectl schemas (tests/pinned/forgectl/schemas/defs.json).
-_HOST: Final = r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
+_HOST: Final = (
+    r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*(?::[0-9]{1,5})?"
+)
 _REPO_RE: Final = re.compile(_HOST + r"(?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+")
 _HOST_RE: Final = re.compile(_HOST)
 _SHA_RE: Final = re.compile(r"[0-9a-f]{40}")
@@ -573,7 +575,9 @@ class Detection:
             return None, code if code != "unknown" and isinstance(code, str) else "whoami_failed"
         if host in who.errors:
             return None, who.errors[host]
-        return (who.accounts.get(host), None) if who.accounts.get(host) else (None, "identity_unknown")
+        return (
+            (who.accounts.get(host), None) if who.accounts.get(host) else (None, "identity_unknown")
+        )
 
     def account_id(self, host: str) -> str | None:
         """Your account id on ``host`` (the comparison key of eligibility, #14)."""
@@ -725,7 +729,9 @@ class Detection:
     def _ensure_installed_at(self) -> None:
         stamp = self.started_at.strftime("%Y-%m-%dT%H:%M:%SZ")
         with self.lease.transaction() as conn:
-            conn.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ('installed_at', ?)", (stamp,))
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('installed_at', ?)", (stamp,)
+            )
 
     def read_comments(self, pr: str) -> CommentRead:
         """The one per-PR read (check, check --pr, respond and the job).
