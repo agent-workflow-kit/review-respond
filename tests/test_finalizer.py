@@ -340,7 +340,7 @@ def test_a_job_that_takes_its_lease_while_jobsctl_is_asked_keeps_the_round(
     assert scene.round()["state"] == "queued" and block(scene) is None
 
 
-# ---- the finalizer: a running round whose job is gone ---------------------------------------------
+# ---- the finalizer: a running round whose job is gone ------------------------------------------
 
 
 def left_running(
@@ -724,7 +724,7 @@ def test_a_fresh_candidate_outside_the_throwaway_is_not_accepted(
     assert sc.round()["failure_reason"] == "job_lost"
 
 
-# ---- the base after agent_gone, and held jobs -----------------------------------------------------
+# ---- the base after agent_gone, and held jobs ---------------------------------------------------
 
 
 def test_a_round_that_ended_agent_gone_resets_the_pr_base(
