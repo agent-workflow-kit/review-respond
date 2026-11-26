@@ -110,6 +110,50 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             PRIMARY KEY (repo, author_id)
         ) WITHOUT ROWID""",
     ),
+    (
+        # The handled set (#15): one row per (PR, comment id). `body_sha256` is the hash of the
+        # whole current body; `body_file` names the stored (bounded) text under the PR's
+        # directory and `body_bytes` is the full size. `first_seen_at` is the local time the
+        # comment was first stored, `body_seen_at` the local time its current hash was first
+        # stored (the settle timestamp). Times are epoch seconds. The CHECKs keep a `delivered`
+        # row complete and the closed value sets closed.
+        """CREATE TABLE comments (
+            pr TEXT NOT NULL REFERENCES prs (pr),
+            comment_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            author_id TEXT,
+            author_login TEXT,
+            created_at TEXT NOT NULL,
+            host_updated_at TEXT NOT NULL,
+            body_sha256 TEXT NOT NULL,
+            body_file TEXT,
+            body_bytes INTEGER NOT NULL,
+            first_seen_at REAL NOT NULL,
+            body_seen_at REAL NOT NULL,
+            state TEXT NOT NULL
+                CHECK (state IN ('seen', 'unhandled', 'delivered', 'handled', 'deleted')),
+            round TEXT,
+            delivered_sha256 TEXT,
+            delivered_from TEXT CHECK (delivered_from IN ('seen', 'unhandled')),
+            handled_sha256 TEXT,
+            handled_reason TEXT CHECK (handled_reason IN ('resolved')),
+            edited INTEGER NOT NULL DEFAULT 0 CHECK (edited IN (0, 1)),
+            eligible INTEGER NOT NULL CHECK (eligible IN (0, 1)),
+            reason TEXT,
+            thread_resolved INTEGER NOT NULL CHECK (thread_resolved IN (0, 1)),
+            outdated INTEGER CHECK (outdated IN (0, 1)),
+            path TEXT,
+            line INTEGER,
+            reply_to TEXT,
+            rev INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (pr, comment_id),
+            CHECK (state != 'delivered'
+                   OR (round IS NOT NULL AND delivered_sha256 IS NOT NULL
+                       AND delivered_from IS NOT NULL)),
+            CHECK (state != 'handled' OR handled_sha256 IS NOT NULL)
+        ) WITHOUT ROWID""",
+        "CREATE INDEX comments_by_state ON comments (pr, state)",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 

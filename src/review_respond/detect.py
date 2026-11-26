@@ -10,8 +10,9 @@ Owned by later issues, left as seams:
 - Eligibility (`eligibility.py`) and the access cache are done here: `Detection.read_comments`
   returns one `Verdict` per comment (`CommentRead.verdicts`), and each uncached `forgectl access`
   lookup is charged `LOOKUP_COST` to the host's `Budget`, the one the reads are charged to.
-- TODO(#15): the comment records and the handled set; `Detection(on_read=...)` receives each good
-  read, and `absent_comment_ids` is the only rule about deletion (never from an incomplete read).
+- The comment records and the handled set are `handled.py` (#15): `HandledSet.record_read` is the
+  `Detection(on_read=...)` hook; `absent_comment_ids` is the only rule about deletion (never from
+  an incomplete read). TODO(#17): `check` passes `HandledSet(...).record_read` as `on_read`.
 - TODO(#16): the due rule, settle and the PR block (columns arrive with their migration).
 - TODO(#17): the `check` command, `check --pr`, `all_hosts_failed` and the `pass` lease.
 """
