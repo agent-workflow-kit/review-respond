@@ -124,7 +124,7 @@ Ends a `pending` record (`rejected`); with `--redo` the round's comments become 
 
 ### `edit <id> [--reply COMMENT_ID --body-file F] [--message-file F]`
 
-Replaces one reply or the commit message of a `pending` record. The new text passes the artifact's checks (a reply non-empty and at most `limits.reply_bytes`; the message at most 4 KiB, then the commit-message procedure). A `COMMENT_ID` that has no reply in the record exits 10 `not_found`; `edit` cannot add a reply. The diff cannot be edited. An edited record is marked `edited` and has a new `content_sha256`. Needs a human actor.
+Replaces one reply or the commit message of a `pending` record. The new text passes the artifact's reply and commit-message checks (see Artifact; then the commit-message procedure). A `COMMENT_ID` that has no reply in the record exits 10 `not_found`; `edit` cannot add a reply. The diff cannot be edited. An edited record is marked `edited` and has a new `content_sha256`. Needs a human actor.
 
 ### `drop-reply <id> <comment_id>`
 
@@ -523,17 +523,19 @@ validate(outcome):
   r.artifact is null            -> artifact_missing
   open r.artifact.path without following links; regular file; size == r.artifact.size <= 1 MiB; sha256 == r.artifact.sha256  else artifact_invalid (detail frozen_file)
   strict JSON (no duplicate keys, depth <= 8); any exception -> artifact_invalid (detail json)
-  schema (schemas/artifact.json, unknown keys refused) -> artifact_invalid (detail schema)
+  schema (schemas/artifact.json, unknown keys refused; covers only types, keys, the comment-id pattern, marker length and replies maxItems) -> artifact_invalid (detail schema)
   skill_marker != the bundled plugin's marker -> artifact_invalid (detail skill_marker)
-  replies: comment_id in the round's delivered ids, each once; body non-empty, at most limits.reply_bytes UTF-8 bytes -> artifact_invalid (detail replies)
+  replies: comment_id in the round's delivered ids, each once; body non-empty (a body of only whitespace or invisible characters, categories Cf, Cc, Zl, Zp, Co, Cn, is empty), at most limits.reply_bytes UTF-8 bytes and at most 65536 characters,
+     no C0 control other than tab, LF and CR, no DEL, no C1 control, no bidi control (U+200E, U+200F, U+061C, U+202A-U+202E, U+2066-U+2069), no U+2028 or U+2029 -> artifact_invalid (detail replies)
   each path in changed_files and deleted_files: UTF-8, at most 4096 bytes, each component at most 255 bytes, no NUL or control character,
      relative, no backslash, no ':', no empty, '.' or '..' component, no component that folds to .git (wtctl's alias rule),
+     no leading '-', no character the shared sanitizer would change, no git~N alias of .git (also folded),
      unique after NFC and case folding, no path a prefix directory of another, no path in both lists, at most 1000 per list -> artifact_invalid (detail paths)
-  commit_message at most 4 KiB -> artifact_invalid (detail commit_message)
+  commit_message at most 4 KiB, with the same control and bidi rules as a reply body -> artifact_invalid (detail commit_message)
   path-state checks -> artifact_invalid (detail path_state)
 ```
 
-`empty_result` is decided after the stored diff: a round with no replies and an empty diff fails `empty_result`. A missing skill exits 0 in agent-spawn, so a wrong or missing marker is an invalid artifact. Paths are refused, never rewritten. **Path-state checks** run before every extract, after the agent is not live: each `changed_files` path is, by a no-follow `lstat` chain from the round throwaway root, a regular file with one link; each `deleted_files` path is absent (ENOENT); otherwise the round fails `artifact_invalid` (detail `path_state`) at record time, or `confirm` exits 20 `diff_changed` (`details.cause: path_state`). `--dest` is always the clean throwaway path from review-respond's own record. A copy of the validated artifact is stored in the state directory.
+`empty_result` is decided after the stored diff: a round with no replies and an empty diff fails `empty_result`. The `schema` step is only the keywords listed on its line; the other schema keywords (path pattern, `uniqueItems`, path `minLength` and `maxLength`, reply body and commit message limits) are enforced by the later `paths`, `replies` and `commit_message` details, which are at least as strict and take precedence for those fields. A missing skill exits 0 in agent-spawn, so a wrong or missing marker is an invalid artifact. Paths are refused, never rewritten. **Path-state checks** run before every extract, after the agent is not live: each `changed_files` path is, by a no-follow `lstat` chain from the round throwaway root, a regular file with one link; each `deleted_files` path is absent (ENOENT); otherwise the round fails `artifact_invalid` (detail `path_state`) at record time, or `confirm` exits 20 `diff_changed` (`details.cause: path_state`). `--dest` is always the clean throwaway path from review-respond's own record. A copy of the validated artifact is stored in the state directory.
 
 The artifact's file lists are never trusted for what they say about the working copy: the stored diff and the touched paths come from extraction in a clean checkout, not from the round throwaway or the lists.
 

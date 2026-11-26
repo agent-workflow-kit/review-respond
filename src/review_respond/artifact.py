@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from .outcomes import ARTIFACT_FAILURES, FAILURE_DETAILS
-from .prompt import sanitize, sanitize_capped
+from .prompt import sanitize
 
 MAX_ARTIFACT_BYTES: Final = 1024 * 1024
 MAX_DEPTH: Final = 8
@@ -44,13 +44,14 @@ MAX_PATHS: Final = 1000
 MAX_PATH_BYTES: Final = 4096
 MAX_COMPONENT_BYTES: Final = 255
 MAX_COMMIT_MESSAGE_BYTES: Final = 4096
-MAX_ESCALATION_BYTES: Final = 4096
 COMMENT_ID_PATTERN: Final = r"^[A-Za-z0-9][A-Za-z0-9:/_=.+-]{0,255}$"
 
 _COMMENT_ID_RE: Final = re.compile(COMMENT_ID_PATTERN)
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
 # C0 (but not tab, newline, carriage return), DEL and C1: never in a reply or a commit message.
 _TEXT_CONTROL_RE: Final = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+# Bidi controls and the line and paragraph separators: never in a reply or a commit message.
+_BIDI_RE: Final = re.compile("[\u200e\u200f\u061c\u202a-\u202e\u2066-\u2069\u2028\u2029]")
 _GIT_SHORT_RE: Final = re.compile(r"git~[0-9]+")
 _CHUNK: Final = 64 * 1024
 
@@ -287,17 +288,22 @@ def _schema_problem(doc: Any) -> str | None:
 
 def reply_problem(body: str, reply_bytes: int) -> str | None:
     """Why ``body`` is not a valid reply, or None: non-empty, at most ``reply_bytes`` UTF-8 bytes
-    (and the schema's 65536 characters), no control character other than tab and line breaks."""
+    (and the schema's 65536 characters), no control character other than tab and line breaks, no
+    bidi control or line separator."""
     try:
         size = len(body.encode("utf-8"))
     except UnicodeEncodeError:
         return "the reply is not valid UTF-8"
-    if not body.strip():
+    # the shared sanitizer marks exactly the characters that show nothing (Cf, Cc, Zl, Zp, Co, Cn,
+    # fillers, variation selectors), so a body of only those and whitespace is empty
+    if all(ch.isspace() or sanitize(ch) != ch for ch in body):
         return "the reply is empty"
     if size > reply_bytes or len(body) > MAX_BODY_CHARS:
         return f"the reply is larger than {reply_bytes} bytes"
     if _TEXT_CONTROL_RE.search(body):
         return "the reply holds a control character"
+    if _BIDI_RE.search(body):
+        return "the reply holds a bidirectional control or line-separator character"
     return None
 
 
@@ -312,16 +318,9 @@ def commit_message_problem(message: str) -> str | None:
         return f"the commit message is larger than {MAX_COMMIT_MESSAGE_BYTES} bytes"
     if _TEXT_CONTROL_RE.search(message):
         return "the commit message holds a control character"
+    if _BIDI_RE.search(message):
+        return "the commit message holds a bidirectional control or line-separator character"
     return None
-
-
-def escalation_text(text: str | None) -> str | None:
-    """An escalation reason or summary from the report, made safe to store: sanitized (one marker
-    per invisible or control character, a newline and tab kept) and cut to 4096 UTF-8 bytes
-    without splitting a marker."""
-    if text is None:
-        return None
-    return sanitize_capped(text, max_bytes=MAX_ESCALATION_BYTES, newlines=True)[0]
 
 
 # ---- paths --------------------------------------------------------------------------------

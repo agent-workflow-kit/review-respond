@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import random
 import socket
+import threading
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +22,6 @@ from review_respond.artifact import (
     FrozenRef,
     check_path_state,
     commit_message_problem,
-    escalation_text,
     parse_artifact_bytes,
     reply_problem,
     validate_artifact,
@@ -171,7 +173,16 @@ def test_frozen_file_dangling_and_looping_symlink(tmp_path: Path) -> None:
 def test_frozen_file_fifo_refused_without_blocking(tmp_path: Path) -> None:
     fifo = tmp_path / "fifo.json"
     os.mkfifo(fifo)
-    invalid(run(FrozenRef(str(fifo), 5, "0" * 64)), "frozen_file")
+    box: list[ArtifactResult] = []
+    worker = threading.Thread(
+        target=lambda: box.append(run(FrozenRef(str(fifo), 5, "0" * 64))), daemon=True
+    )
+    worker.start()
+    worker.join(timeout=10)
+    if worker.is_alive():  # a daemon thread: a regression fails here instead of hanging the suite
+        pytest.fail("validating a FIFO blocked")
+    assert len(box) == 1
+    invalid(box[0], "frozen_file")
 
 
 def test_frozen_file_socket_refused(tmp_path: Path) -> None:
@@ -210,16 +221,47 @@ def test_frozen_file_huge_file_refused_before_reading(tmp_path: Path) -> None:
     invalid(run(FrozenRef(str(path), art.MAX_ARTIFACT_BYTES + 1, "0" * 64)), "frozen_file")
 
 
+def test_frozen_file_one_byte_over_the_cap_is_refused_with_its_real_sha(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    size = art.MAX_ARTIFACT_BYTES + 1
+    path = tmp_path / "huge.json"
+    sha = hashlib.sha256()
+    with path.open("wb") as handle:
+        handle.truncate(size)  # sparse: reads as zeros
+    for _ in range(size // 65536):
+        sha.update(bytes(65536))
+    sha.update(bytes(size % 65536))
+
+    def no_read(*_a: Any, **_k: Any) -> bytes:
+        raise AssertionError("the file must not be read")
+
+    monkeypatch.setattr(os, "read", no_read)
+    result = run(FrozenRef(str(path), size, sha.hexdigest()))
+    invalid(result, "frozen_file")
+    assert "size" in result.message
+
+
 def test_frozen_file_exactly_at_cap_is_read(tmp_path: Path) -> None:
-    pad = "x" * (art.MAX_ARTIFACT_BYTES - len(dump(good() | {"commit_message": ""})) - 20)
-    raw = dump(
-        good() | {"commit_message": "", "replies": [{"comment_id": "gh:rc:AAA", "body": "a"}]}
-    )
-    assert len(raw) < art.MAX_ARTIFACT_BYTES
-    assert (
-        pad
-    )  # the cap itself is exercised by the huge-file test; this one proves a small file reads
+    body = dump(good())
+    raw = body + b" " * (art.MAX_ARTIFACT_BYTES - len(body))  # trailing whitespace is valid JSON
+    assert len(raw) == art.MAX_ARTIFACT_BYTES
+    result = run(freeze(tmp_path, raw))
+    assert result.ok, result.message
+    assert result.raw == raw
+
+
+def test_frozen_file_read_in_several_chunks(tmp_path: Path) -> None:
+    body = dump(good())
+    raw = body + b" " * (3 * 65536 + 17)
     assert run(freeze(tmp_path, raw)).ok
+
+
+def test_frozen_file_negative_size_message(tmp_path: Path) -> None:
+    ref = freeze(tmp_path, dump(good()))
+    result = run(FrozenRef(ref.path, -1, ref.sha256))
+    invalid(result, "frozen_file")
+    assert "size" in result.message
 
 
 def test_frozen_file_negative_or_bad_ref_fields(tmp_path: Path) -> None:
@@ -236,6 +278,67 @@ def test_frozen_file_grown_after_stat_is_not_read_past_size(tmp_path: Path) -> N
     path.write_bytes(raw + b" " * 50)
     ref = FrozenRef(str(path), len(raw), hashlib.sha256(raw).hexdigest())
     invalid(run(ref), "frozen_file")
+
+
+class _FakeStat:
+    """An fstat result that claims a regular file of a chosen size."""
+
+    def __init__(self, size: int) -> None:
+        self.st_mode = 0o100600
+        self.st_size = size
+
+
+def test_read_guard_stat_size_alone(tmp_path: Path) -> None:
+    ref = freeze(tmp_path, dump(good()))
+    result = run(FrozenRef(ref.path, ref.size + 3, ref.sha256))
+    invalid(result, "frozen_file")
+    assert "size differs" in result.message
+
+
+def test_read_guard_length_after_read_alone_short_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fstat claims the reported size, but the file is shorter when read."""
+    raw = dump(good())
+    ref = freeze(tmp_path, raw)
+    monkeypatch.setattr(os, "fstat", lambda _fd: _FakeStat(ref.size + 5))
+    result = run(FrozenRef(ref.path, ref.size + 5, ref.sha256))
+    invalid(result, "frozen_file")
+    assert "length differs" in result.message
+
+
+def test_read_guard_length_after_read_alone_grown_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """fstat claims the reported size, but the file grew: one byte past it is read, then refused."""
+    raw = dump(good())
+    path = tmp_path / "grown.json"
+    path.write_bytes(raw + b" " * 50)
+    monkeypatch.setattr(os, "fstat", lambda _fd: _FakeStat(len(raw)))
+    result = run(FrozenRef(str(path), len(raw), hashlib.sha256(raw).hexdigest()))
+    invalid(result, "frozen_file")
+    assert "length differs" in result.message
+
+
+def test_read_loop_is_bounded_by_the_reported_size(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "long.json"
+    path.write_bytes(b"x" * 300_000)
+    monkeypatch.setattr(os, "fstat", lambda _fd: _FakeStat(100_000))
+    real_read = os.read
+    returned: list[int] = []
+
+    def spy(fd: int, n: int) -> bytes:
+        chunk = real_read(fd, n)
+        returned.append(len(chunk))
+        return chunk
+
+    monkeypatch.setattr(os, "read", spy)
+    result = run(FrozenRef(str(path), 100_000, "0" * 64))
+    invalid(result, "frozen_file")
+    assert sum(returned) == 100_001  # never more than the reported size plus one byte
+    assert max(returned) <= 65536
 
 
 def test_frozen_file_not_readable(tmp_path: Path) -> None:
@@ -496,7 +599,11 @@ def test_replies_body_over_the_schema_character_cap_with_a_huge_limit() -> None:
     invalid(result, "replies")
 
 
-@pytest.mark.parametrize("ch", ["\x00", "\x01", "\x1b", "\x7f", "\x85", "\x9b", "\x08"])
+@pytest.mark.parametrize(
+    "ch",
+    ["\x00", "\x01", "\x08", "\x0b", "\x0c", "\x0e", "\x1b", "\x1f", "\x7f", "\x80", "\x85"]
+    + ["\x9b", "\x9f"],
+)
 def test_replies_control_characters_refused(ch: str) -> None:
     doc = good() | {"replies": [{"comment_id": "gh:rc:AAA", "body": f"a{ch}b"}]}
     invalid(parse(dump(doc)), "replies")
@@ -627,6 +734,25 @@ def test_paths_unicode_normalization_duplicates_refused() -> None:
     invalid(parse(dump(good() | {"changed_files": ["cafÉ", "café"]})), "paths")
 
 
+def test_key_applies_nfc_then_casefold_then_nfc() -> None:
+    precomposed = "\u0390"  # iota with dialytika and tonos
+    decomposed = "\u03b9\u0308\u0301"
+    assert art._key(f"d/{precomposed}") == art._key(f"d/{decomposed}")  # pyright: ignore[reportPrivateUsage]
+    invalid(parse(dump(good() | {"changed_files": [precomposed, decomposed]})), "paths")
+    invalid(parse(dump(good() | {"changed_files": ["d/\u212b", "d/\u00e5"]})), "paths")
+
+
+def test_fold_git_runs_nfkc_before_and_after_casefold() -> None:
+    fold = art._fold_git  # pyright: ignore[reportPrivateUsage]
+    # before: a modifier letter capital G only becomes "G" under NFKC, then must fold to "g"
+    assert fold(".\u1d33it") == ".git"
+    # after: casefolding "\u0390" yields text that is not NFKC-stable until the second pass
+    for ch in ("\u0390", "\u03b0", "\u1e96", "\u01f0"):
+        out = fold(ch)
+        assert out == unicodedata.normalize("NFKC", out)
+    invalid(parse(dump(good() | {"changed_files": [".\u1d33it/x"]})), "paths")
+
+
 def test_paths_in_both_lists_refused() -> None:
     doc = good() | {"changed_files": ["a.py"], "deleted_files": ["A.py"]}
     invalid(parse(dump(doc)), "paths")
@@ -656,9 +782,66 @@ def test_commit_message_limits() -> None:
     assert parse(dump(good() | {"commit_message": "é" * 2048})).ok
 
 
-@pytest.mark.parametrize("ch", ["\x00", "\x1b", "\x7f", "\x9b"])
+@pytest.mark.parametrize(
+    "ch",
+    ["\x00", "\x01", "\x08", "\x0b", "\x0c", "\x0e", "\x1b", "\x1f", "\x7f", "\x80"]
+    + ["\x9b", "\x9f"],
+)
 def test_commit_message_control_characters(ch: str) -> None:
     invalid(parse(dump(good() | {"commit_message": f"a{ch}b"})), "commit_message")
+
+
+def test_commit_message_tab_newline_and_cr_are_allowed() -> None:
+    assert parse(dump(good() | {"commit_message": "a\tb\nc\r\nd"})).ok
+
+
+INVISIBLE_ONLY = [
+    "\u200b", "\ufeff", "\u200b\ufeff", " \u200b\n\ufeff\t", "\u2028", "\u2029", "\u200d",
+    "\ue000", "\u0378", "\x00",
+]  # fmt: skip
+BIDI_AND_SEPARATORS = [
+    "\u200e", "\u200f", "\u061c", "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+    "\u2066", "\u2067", "\u2068", "\u2069", "\u2028", "\u2029",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("body", INVISIBLE_ONLY)
+def test_replies_invisible_only_body_is_empty(body: str) -> None:
+    assert reply_problem(body, REPLY_BYTES) == "the reply is empty"
+    doc = good() | {"replies": [{"comment_id": "gh:rc:AAA", "body": body}]}
+    invalid(parse(dump(doc)), "replies")
+
+
+@pytest.mark.parametrize("ch", BIDI_AND_SEPARATORS)
+def test_replies_bidi_and_line_separators_refused(ch: str) -> None:
+    problem = reply_problem(f"a{ch}b", REPLY_BYTES)
+    assert problem is not None and "bidirectional" in problem
+    doc = good() | {"replies": [{"comment_id": "gh:rc:AAA", "body": f"a{ch}b"}]}
+    invalid(parse(dump(doc)), "replies")
+
+
+@pytest.mark.parametrize("ch", BIDI_AND_SEPARATORS)
+def test_commit_message_bidi_and_line_separators_refused(ch: str) -> None:
+    problem = commit_message_problem(f"fix: a{ch}b")
+    assert problem is not None and "bidirectional" in problem
+    invalid(parse(dump(good() | {"commit_message": f"fix: a{ch}b"})), "commit_message")
+
+
+def test_legitimate_unicode_still_passes_reply_and_message() -> None:
+    text = "caf\u00e9 \u4e2d\u6587 \U0001f468\u200d\U0001f469\u200d\U0001f467 na\u00efve"
+    assert reply_problem(text, REPLY_BYTES) is None
+    assert commit_message_problem(text) is None
+    assert reply_problem("\U0001f468\u200d\U0001f469", REPLY_BYTES) is None
+    doc = good() | {
+        "replies": [{"comment_id": "gh:rc:AAA", "body": text}],
+        "commit_message": text,
+    }
+    assert parse(dump(doc)).ok
+
+
+def test_reply_problem_lone_surrogate_is_not_utf8() -> None:
+    problem = reply_problem("a\ud800", REPLY_BYTES)
+    assert problem is not None and "not valid UTF-8" in problem
 
 
 def test_commit_message_problem_is_shared_with_edit() -> None:
@@ -807,6 +990,36 @@ def test_path_state_hard_link_refused(tree: Path, tmp_path: Path) -> None:
     invalid(ps(tree, ["b.py"], []), "path_state")
 
 
+def test_path_state_deleted_stat_error_on_unreadable_parent(tree: Path) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("running with privileges that ignore modes")
+    parent = tree / "d"
+    parent.mkdir()
+    parent.chmod(0o444)  # readable (can be opened) but not searchable: stat of a child is EACCES
+    try:
+        invalid(ps(tree, [], ["d/gone"]), "path_state")
+        parent.chmod(0)
+        invalid(ps(tree, [], ["d/gone"]), "path_state")
+    finally:
+        parent.chmod(0o755)
+
+
+@pytest.mark.parametrize("code", [errno.EACCES, errno.ENAMETOOLONG, errno.EIO, errno.ELOOP])
+def test_path_state_deleted_final_stat_error_is_not_absent(
+    tree: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    real_stat = os.stat
+
+    def boom(path: Any, *a: Any, **k: Any) -> os.stat_result:
+        if k.get("dir_fd") is None:  # only the walk's final-component stat fails
+            return real_stat(path, *a, **k)
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(os, "stat", boom)
+    invalid(ps(tree, [], ["gone.py"]), "path_state")
+    invalid(ps(tree, [], ["src/gone.py"]), "path_state")
+
+
 def test_path_state_special_files_refused(tree: Path) -> None:
     os.mkfifo(tree / "fifo")
     s = socket.socket(socket.AF_UNIX)
@@ -856,26 +1069,6 @@ def test_path_state_special_paths_fixture(tmp_path: Path) -> None:
     ):
         if name in sp.entries:
             invalid(ps(sp.tree, [name], []), "path_state")
-
-
-# ---- escalation text ----------------------------------------------------------------------
-
-
-def test_escalation_text_bounds_and_sanitizes() -> None:
-    assert escalation_text(None) is None
-    assert escalation_text("need input") == "need input"
-    out = escalation_text("a‮b\x1b[0m\nc")
-    assert out == "a<U+202E>b<U+001B>[0m\nc"
-    big = escalation_text("é" * 5000)
-    assert big is not None and len(big.encode()) <= art.MAX_ESCALATION_BYTES
-    marked = escalation_text("x" * 4090 + "‮‮")
-    assert marked is not None and len(marked.encode()) <= art.MAX_ESCALATION_BYTES
-    assert not marked.endswith("<U+202")  # a marker is never split
-
-
-def test_escalation_text_lone_surrogate() -> None:
-    out = escalation_text("a\ud800b")
-    assert out == "a<U+D800>b"
 
 
 # ---- reading is race-free in construction -------------------------------------------------
@@ -960,7 +1153,34 @@ def test_fuzz_lite_agrees_with_the_schema_and_never_raises() -> None:
         if result.ok:
             assert validator.is_valid(doc), doc
         if result.detail == "schema":
-            assert not validator.is_valid(doc) or doc != good()
+            assert not validator.is_valid(doc), doc
+
+
+PATH_TOKENS = [".", "/", "..", ".git", "a", ".GIT", "//", "/", "\n", "b/", "a/", ".git/", "~1"]
+
+
+def _path_from_tokens(rng: random.Random) -> str:
+    return "".join(rng.choice(PATH_TOKENS) for _ in range(rng.randint(1, 5)))
+
+
+def test_fuzz_paths_schema_invalid_is_refused_and_reaches_the_paths_step() -> None:
+    validator = _schema_validator()
+    rng = random.Random(20260227)
+    reached = 0
+    for _ in range(400):
+        changed = [_path_from_tokens(rng) for _ in range(rng.randint(0, 3))]
+        deleted = [_path_from_tokens(rng) for _ in range(rng.randint(0, 2))]
+        if rng.random() < 0.2 and changed:
+            changed.append(changed[0])  # a duplicate (uniqueItems)
+        doc = good() | {"changed_files": changed, "deleted_files": deleted}
+        result = parse(dump(doc))
+        assert result.failure in (None, "artifact_invalid")
+        assert result.detail != "schema", doc  # strings only: the schema step cannot refuse these
+        if not validator.is_valid(doc):
+            assert not result.ok, doc
+        if result.detail in ("paths", "commit_message") or result.ok:
+            reached += 1
+    assert reached >= 300
 
 
 def test_fuzz_lite_random_bytes_never_raise() -> None:
@@ -992,14 +1212,3 @@ def test_schema_constants_match_the_schema_file() -> None:
     defs = json.loads((OWN_SCHEMAS / "defs.json").read_text())["$defs"]
     assert defs["path"]["maxLength"] == art.MAX_PATH_BYTES
     assert defs["comment_id"]["pattern"] == art.COMMENT_ID_PATTERN
-
-
-def test_reads_the_file_with_no_follow_flags() -> None:
-    src = (Path(art.__file__)).read_text()
-    assert "O_NOFOLLOW" in src and "S_ISREG" in src
-
-
-def test_escalation_bound_matches_the_rounds_module() -> None:
-    from review_respond.rounds import MAX_ESCALATION_BYTES
-
-    assert art.MAX_ESCALATION_BYTES == MAX_ESCALATION_BYTES
