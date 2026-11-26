@@ -769,7 +769,7 @@ def test_check_fields_with_mixed_type_unknown_keys_is_a_value_error(state: State
         log_of(state).emit("finalize", {1: "x", "a": "y", b"k": 2})  # type: ignore[dict-item]
 
 
-@pytest.mark.parametrize("code", [10**400, -1, 256])
+@pytest.mark.parametrize("code", [10**400, 2**31, -(2**31) - 1, True])
 def test_exit_code_is_bounded(state: StateDir, code: int) -> None:
     with pytest.raises(ValueError):
         audit_of(state).decision("push", PR, {"status": "failed", "exit_code": code})
@@ -778,10 +778,12 @@ def test_exit_code_is_bounded(state: StateDir, code: int) -> None:
                                            "timed_out": False})  # fmt: skip
 
 
-def test_exit_code_bounds_accept_0_and_255(state: StateDir) -> None:
-    audit_of(state).decision("push", PR, {"status": "failed", "exit_code": 255})
-    audit_of(state).decision("push", PR, {"status": "ok", "exit_code": 0})
-    assert len(check_all(state.path / "audit.jsonl", "review-respond/audit.json")) == 2
+@pytest.mark.parametrize("code", [-9, -15, 0, 255, 2**31 - 1, -(2**31)])
+def test_exit_code_bounds_accept_signals_and_extremes(state: StateDir, code: int) -> None:
+    audit_of(state).decision("push", PR, {"status": "failed", "exit_code": code})
+    log_of(state).emit("hook_result", {"hook": "pre-push", "exit_code": code,
+                                       "timed_out": False})  # fmt: skip
+    assert len(check_all(state.path / "audit.jsonl", "review-respond/audit.json")) == 1
 
 
 def test_naive_datetimes_are_refused(state: StateDir) -> None:

@@ -127,6 +127,9 @@ def _integer(minimum: int | None = None, maximum: int | None = None) -> Check:
     return check
 
 
+_EXIT_CODE: Final = _integer(-(2**31), 2**31 - 1)
+
+
 def _boolean(value: object) -> object:
     if type(value) is not bool:
         raise ValueError("value is not a boolean")
@@ -378,7 +381,7 @@ _INPUT_CHECKS: Final[dict[str, Check]] = {
     "override_escalation": _boolean,
 }
 _RESULT_CHECKS: Final[dict[str, Check]] = {
-    "exit_code": _nullable(_integer(0, 255)),
+    "exit_code": _nullable(_EXIT_CODE),
     "reason": _nullable(_enum(*REFUSAL_REASONS)),
     "comment_id": _nullable(_pattern(_COMMENT)),
     "commit_sha": _nullable(_pattern(_SHA)),
@@ -562,7 +565,7 @@ _EVENTS: Final[dict[str, tuple[dict[str, Check], dict[str, Check]]]] = {
         _NO_FIELDS,
     ),
     "hook_result": (
-        {"hook": _enum(*HOOKS), "exit_code": _nullable(_integer(0, 255)), "timed_out": _boolean},
+        {"hook": _enum(*HOOKS), "exit_code": _nullable(_EXIT_CODE), "timed_out": _boolean},
         {
             "object_id": _nullable(_pattern(_OBJECT)),
             "duration_ms": _integer(0),

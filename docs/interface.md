@@ -785,7 +785,7 @@ Details of the writers:
 - Warning events (`warning`: a code, an optional PR or round id, and a `key` that is sanitized and at most 256 characters; the message is never logged) are written even under `--quiet`, once per invocation. `log.jsonl` has no rotation and no deduplication and grows without bound; a persistent warning adds a line per run.
 - `lease` events: `lost` is level `error`, `taken_over` and `stalled` are `warn`. `acquired` and `released` are in the schema enum but are not emitted. A `pr:<digest>` key has no canonical PR, so its event has no `pr`; a `round:<id>` key fills `round` only when the id matches the round-id pattern, otherwise the event has no `round`.
 - `inputs` may also hold `round` (a round id), `comment_id` and `actor_source` (`flag`, `tty` or `default`; reserved, not yet written by any command).
-- `result.exit_code` is `null` or an integer from 0 to 255; timestamps given as datetimes must carry a time zone.
+- `result.exit_code` is `null` or an integer from -2147483648 to 2147483647 (negative values are signals); timestamps given as datetimes must carry a time zone.
 
 ## Hardened git
 
