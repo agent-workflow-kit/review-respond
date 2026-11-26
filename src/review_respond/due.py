@@ -4,9 +4,9 @@
 ``decide`` and ``derive_state`` are pure functions of ``DueInputs``, a snapshot that ``load_inputs``
 reads from the state database. The settle clock only ever sees ``Candidate.settle_ts``, the local
 time review-respond first stored a comment's current body hash (``comments.body_seen_at``, an edit
-restarts it), and ``Candidate.first_seen_at``, the local time the comment was first stored
-(``comments.first_seen_at``, an edit never moves it; the one-hour ceiling counts from it, so edits
-cannot hold a PR in settling); no forge timestamp can reach either.
+restarts it), and ``Candidate.unhandled_since``, the local time the comment last became unhandled
+(``comments.unhandled_since``, an edit of an unhandled comment never moves it; the one-hour ceiling
+counts from it, so edits cannot hold a PR in settling); no forge timestamp can reach either.
 
 ``prs.block`` is written only here, under a lease and through ``cas_update``: ``set_block`` (only
 when the PR has no block) and ``clear_block`` (only by the causes the interface documents for the
@@ -83,16 +83,16 @@ class Block:
 @dataclass(frozen=True)
 class Candidate:
     """An eligible unhandled comment: its id, its settle timestamp (local first-stored time of its
-    current body hash, epoch seconds) and the local time the comment was first stored. Without
-    ``first_seen_at`` the comment counts as never edited (first seen at ``settle_ts``)."""
+    current body hash, epoch seconds) and the local time the comment last became unhandled. Without
+    ``unhandled_since`` the comment counts as never edited (unhandled since ``settle_ts``)."""
 
     id: str
     settle_ts: float
-    first_seen_at: float | None = None
+    unhandled_since: float | None = None
 
     @property
-    def first_seen(self) -> float:
-        return self.settle_ts if self.first_seen_at is None else self.first_seen_at
+    def since(self) -> float:
+        return self.settle_ts if self.unhandled_since is None else self.unhandled_since
 
 
 @dataclass(frozen=True)
@@ -161,13 +161,14 @@ def _check_host_state(state: str) -> bool:
 def _bounds_passed(i: DueInputs) -> bool:
     """Either settle bound has passed. The first: the newest eligible comment (by ``settle_ts``) is
     at least ``settle`` old. The second, a constant: the first-seen time of the oldest is at least
-    an hour ago; an edit restarts ``settle_ts`` but never ``first_seen_at``. A negative settle
+    an hour ago; an edit restarts ``settle_ts`` but never ``unhandled_since``, which only a return
+    to ``unhandled`` from another state restarts. A negative settle
     counts as 0; a comment first stored in the future (the clock went backwards) is never old."""
     if math.isnan(i.settle_seconds):
         raise ValueError("settle is not a number")
     settle = max(0.0, i.settle_seconds)
     newest = max(c.settle_ts for c in i.eligible)
-    oldest = min(c.first_seen for c in i.eligible)
+    oldest = min(c.since for c in i.eligible)
     return i.now - newest >= settle or i.now - oldest >= SETTLE_CEILING_SECONDS
 
 
@@ -354,9 +355,9 @@ def apply(lease: Lease, pr: str, i: DueInputs) -> Applied:
 
 
 def _eligible_rows(conn: sqlite3.Connection, pr: str) -> list[tuple[str, float, float]]:
-    """(id, settle_ts, first_seen_at) of the eligible unhandled comments, oldest settle first."""
+    """(id, settle_ts, unhandled_since) of the eligible unhandled comments, oldest settle first."""
     rows = conn.execute(
-        "SELECT comment_id, body_seen_at, first_seen_at FROM comments"
+        "SELECT comment_id, body_seen_at, coalesce(unhandled_since, first_seen_at) FROM comments"
         " WHERE pr = ? AND state = 'unhandled' AND eligible = 1 ORDER BY body_seen_at, comment_id",
         (pr,),
     ).fetchall()

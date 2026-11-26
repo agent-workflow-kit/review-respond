@@ -173,6 +173,10 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "ALTER TABLE prs ADD COLUMN base_agent TEXT",
         "ALTER TABLE prs ADD COLUMN records_current INTEGER NOT NULL DEFAULT 0"
         " CHECK (records_current IN (0, 1))",
+        # `comments.unhandled_since` is the local time the comment last became `unhandled` from
+        # another state (the due rule's one-hour ceiling counts from it; an edit of an unhandled
+        # comment never moves it). Null for rows stored before it existed: read as first_seen_at.
+        "ALTER TABLE comments ADD COLUMN unhandled_since REAL",
     ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)

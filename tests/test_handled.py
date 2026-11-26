@@ -329,6 +329,54 @@ def test_an_edited_handled_comment_becomes_unhandled_and_edited(env: Env) -> Non
     assert (record.round, record.delivered_sha256, record.delivered_from) == (None, None, None)
 
 
+def since(env: Env, cid: str = CID) -> float | None:
+    row = env.store.conn.execute(
+        "SELECT unhandled_since FROM comments WHERE pr = ? AND comment_id = ?", (env.ref, cid)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def test_a_new_unhandled_comment_is_unhandled_since_it_was_first_stored(env: Env) -> None:
+    env.read(rc())
+    assert since(env) == env.get().first_seen_at
+
+
+def test_a_seen_comment_has_no_unhandled_since(env: Env) -> None:
+    env.read(rc(created=BEFORE))
+    assert since(env) is None
+
+
+def test_an_edit_of_an_unhandled_comment_keeps_unhandled_since(env: Env) -> None:
+    env.read(rc(body="one"))
+    first = since(env)
+    env.advance(120)
+    env.read(rc(body="two"))
+    assert since(env) == first
+
+
+def test_an_edit_of_a_handled_comment_sets_unhandled_since_to_now(env: Env) -> None:
+    _handled(env)
+    env.advance(7200)
+    env.read(rc(body="two"))
+    assert since(env) == env.get().body_seen_at
+    assert since(env) == env.get().first_seen_at + 7200
+
+
+def test_a_released_delivery_sets_unhandled_since_to_the_release_time(env: Env) -> None:
+    env.read(rc())
+    env.hs.deliver(env.ref, [CID], round_id="r-1")
+    env.advance(500)
+    assert env.hs.release(env.ref, "r-1") == [CID]
+    assert since(env) == env.get().first_seen_at + 500
+
+
+def test_a_redone_comment_sets_unhandled_since_to_the_redo_time(env: Env) -> None:
+    _handled(env)
+    env.advance(500)
+    env.hs.redo(env.ref, "r-1")
+    assert since(env) == env.get().first_seen_at + 500
+
+
 def test_an_edit_is_held_back_while_a_record_of_the_pr_is_open(env: Env) -> None:
     _handled(env)
     env.open_record = True

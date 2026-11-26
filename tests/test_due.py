@@ -250,10 +250,10 @@ def test_settle_bounds(ages: tuple[float, ...], settle: float, due_expected: boo
     assert got.why == ("due" if due_expected else "settling")
 
 
-def test_an_edited_comment_cannot_hold_a_pr_in_settling_beyond_one_hour_from_first_seen() -> None:
-    # settle_ts keeps restarting with every edit; the ceiling counts from first_seen_at
-    def edited(first_seen_age: float) -> DueInputs:
-        return inputs(eligible=(Candidate("c", NOW - 10, NOW - first_seen_age),))
+def test_an_edited_comment_cannot_hold_a_pr_in_settling_beyond_one_hour() -> None:
+    # settle_ts keeps restarting with every edit; the ceiling counts from unhandled_since
+    def edited(since_age: float) -> DueInputs:
+        return inputs(eligible=(Candidate("c", NOW - 10, NOW - since_age),))
 
     assert due.decide(edited(HOUR - 1)) == Decision(False, "settling")
     assert due.derive_state(edited(HOUR - 1)) == ("settling", None)
@@ -261,7 +261,7 @@ def test_an_edited_comment_cannot_hold_a_pr_in_settling_beyond_one_hour_from_fir
     assert due.derive_state(edited(HOUR)) == ("waiting", "capacity")
 
 
-def test_a_first_seen_in_the_future_is_never_old() -> None:
+def test_an_unhandled_since_in_the_future_is_never_old() -> None:
     future = inputs(eligible=(Candidate("c", NOW - 10, NOW + 50),), settle_seconds=99999.0)
     assert due.decide(future) == Decision(False, "settling")
     assert due.derive_state(future) == ("settling", None)
@@ -967,20 +967,35 @@ def test_hostile_comment_ids_do_not_reach_sql(
     assert store.conn.execute("SELECT count(*) FROM prs").fetchone()[0] == 1
 
 
-def test_a_comment_re_edited_every_few_minutes_is_due_one_hour_after_first_seen(
+def test_a_comment_re_edited_every_few_minutes_is_due_one_hour_after_it_became_unhandled(
     store: Store, handled: HandledSet, pr: str, gateway: Gateway
 ) -> None:
     read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body="v0"))
-    first = load(store, pr, gateway).eligible[0].first_seen
+    first = load(store, pr, gateway).eligible[0].since
     for step in range(1, 17):  # an edit every 4 minutes: settle_ts keeps restarting
         advance(gateway, 240)
         read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body=f"v{step}"))
         seen = load(store, pr, gateway)
-        assert seen.eligible[0].first_seen == first  # first_seen_at is not restarted by an edit
+        assert seen.eligible[0].since == first  # unhandled_since is not restarted by an edit
         elapsed = 240 * step
         assert due.decide(seen).due is (elapsed >= HOUR), step
         expected = ("waiting", "capacity") if elapsed >= HOUR else ("settling", None)
         assert due.derive_state(seen) == expected, step
+
+
+def test_a_handled_comment_edited_now_gets_a_fresh_settle_window(
+    store: Store, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body="v0"))
+    with store.transaction() as conn:
+        conn.execute("UPDATE comments SET state = 'handled', handled_sha256 = body_sha256")
+    advance(gateway, 2 * HOUR)  # first stored two hours ago, handled meanwhile
+    read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body="v1"))
+    seen = load(store, pr, gateway)
+    assert due.decide(seen) == Decision(False, "settling")
+    assert due.derive_state(seen) == ("settling", None)
+    advance(gateway, 300)
+    assert due.decide(load(store, pr, gateway)).due is True
 
 
 # ---- the detect handshake: records_current is cleared by the stamp ---------------------------
