@@ -750,14 +750,17 @@ def test_validate_does_not_open_or_create_the_state(
     assert not state_path(world).exists()
 
 
-def test_validate_ignores_an_unsafe_state_directory(
+def test_validate_does_not_refuse_on_an_unsafe_state_directory(
     world: object, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # the state check is validate's own (a failed `state` check, see test_validate.py); the
+    # generic state gate in front of every other command does not run for it
     path = state_path(world)
     path.mkdir(parents=True)
     path.chmod(0o755)
-    probe(monkeypatch, "validate")
+    seen = probe(monkeypatch, "validate")
     assert main(["validate"]) == 0
+    assert seen[0].store is None
 
 
 @pytest.mark.parametrize("command", ["check", "respond", "prune", "cron"])

@@ -312,6 +312,19 @@ def test_a_swallowed_violation_is_still_recorded_and_fails_the_check(world: Worl
 # -- cleanup of surviving group members -----------------------------------------------------
 
 
+def process_state(pid: int) -> str | None:
+    """State letter from ``/proc/<pid>/stat``, or None once the process is gone.
+
+    Reads once and treats a vanished file as gone: the member can be reaped between any
+    existence check and the read, so check-then-read is racy.
+    """
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    return text.rsplit(")", 1)[1].split()[0]
+
+
 def test_cleanup_kills_a_member_that_outlived_its_exited_leader(procs: ProcRegistry) -> None:
     leader = subprocess.Popen(
         ["bash", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"],
@@ -326,13 +339,9 @@ def test_cleanup_kills_a_member_that_outlived_its_exited_leader(procs: ProcRegis
         assert start_time(member) == member_started and member_started is not None
         assert [p.pid for p in procs.cleanup()] == [leader.pid]
         deadline = time.monotonic() + 5
-        while start_time(member) is not None and time.monotonic() < deadline:
-            fields = Path(f"/proc/{member}/stat").read_text().rsplit(")", 1)[1].split()
-            if fields[0] == "Z":
-                break
+        while process_state(member) not in (None, "Z") and time.monotonic() < deadline:
             time.sleep(0.05)
-        stat = Path(f"/proc/{member}/stat")
-        assert not stat.exists() or stat.read_text().rsplit(")", 1)[1].split()[0] == "Z"
+        assert process_state(member) in (None, "Z")
     finally:
         if start_time(member) == member_started:
             os.kill(member, signal.SIGKILL)

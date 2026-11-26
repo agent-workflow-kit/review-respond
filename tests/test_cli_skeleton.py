@@ -127,7 +127,8 @@ def test_job_is_hidden_from_top_level_help(capsys: pytest.CaptureFixture[str]) -
             assert name in out
 
 
-@pytest.mark.parametrize("command", [*COMMANDS, "_job"])
+# validate is implemented (tests/test_validate.py)
+@pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c != "validate"])
 def test_unimplemented_command_exits_1_with_message(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -747,14 +748,24 @@ def test_subprocess_version_and_no_tty_actor(tmp_path: Path) -> None:
 
 def test_subprocess_result_file_and_unimplemented(tmp_path: Path) -> None:
     result = tmp_path / "r.json"
-    proc = run_subprocess(tmp_path, "validate", "--json", "--result-file", str(result))
+    proc = run_subprocess(tmp_path, "pending", "--json", "--result-file", str(result))
     assert proc.returncode == 1
     assert result.read_text() == proc.stdout
 
 
+def test_subprocess_validate_without_siblings_fails_its_checks(tmp_path: Path) -> None:
+    # PATH is /usr/bin:/bin: no sibling is installed, so the dependencies check fails (exit 12)
+    result = tmp_path / "r.json"
+    proc = run_subprocess(tmp_path, "validate", "--json", "--result-file", str(result))
+    assert proc.returncode == 12
+    assert result.read_text() == proc.stdout
+    assert json.loads(proc.stdout)["ok"] is False
+
+
 # ---- every error code has a producer here or a tracked owner ---------------------------------
 
-# config: test_config.py; state_unsafe, version_skew: test_store.py; lease_*: test_leases.py
+# config: test_config.py; tool_missing, tool_too_old: test_validate.py;
+# state_unsafe, version_skew: test_store.py; lease_*: test_leases.py
 PRODUCED_HERE = {
     "lease_lost",
     "lease_timeout",
@@ -764,13 +775,13 @@ PRODUCED_HERE = {
     "config_invalid",
     "state_unsafe",
     "version_skew",
+    "tool_missing",
+    "tool_too_old",
 }
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
     "not_found": 17,
     "vetoed": 37,
-    "tool_missing": 12,
-    "tool_too_old": 12,
     "lower_failed": 13,
     "all_hosts_failed": 17,
     "push_failed": 34,

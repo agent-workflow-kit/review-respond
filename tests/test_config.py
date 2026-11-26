@@ -583,8 +583,10 @@ def test_validate_does_not_fail_on_a_bad_config(
 ) -> None:
     path = conf(tmp_path, "max_rounds: 0\n")
     code, out, _ = run(capsys, "validate", "--json", "--config", str(path))
-    # exit 1 `internal`: validate is not implemented yet (TODO(#12)), but not config_invalid
-    assert json.loads(out)["error"]["code"] == "internal" and code == 1
+    # a failed `config` check with a document, exit 12; never the exit-2 `config_invalid` envelope
+    doc = json.loads(out)
+    assert code == 12 and "error" not in doc
+    assert {"name": "config", "ok": False, "code": "config_invalid"} in doc["checks"]
 
 
 def test_human_only_outranks_a_bad_config(
