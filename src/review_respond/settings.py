@@ -182,7 +182,6 @@ _BAD_MODULES: Final = frozenset(
     {"timeit", "runpy", "code", "pdb", "http.server", "pip", "ensurepip", "trace", "idlelib"}
     | {"cprofile", "profile"}
 )
-_INTERPRETER_FLAG_LETTERS: Final = frozenset("ceEprxM")
 _LAUNCHERS: Final = frozenset({"npm", "pnpm", "yarn", "uv", "poetry", "cargo", "go"})
 _LAUNCHER_WORDS: Final = frozenset({"dlx", "exec", "install", "run"})
 _BAD_FLAGS: Final = frozenset({"-c", "-C", "-e", "-E", "-f"})
@@ -403,16 +402,6 @@ def _check_interpreter(items: Sequence[str], key: str) -> None:
         module = items[2].lower()
         if any(module == bad or module.startswith(bad + ".") for bad in _BAD_MODULES):
             raise _refuse(key, "this module cannot be allowed", items[2])
-        rest = items[3:]
-    else:
-        rest = items[2:]
-    for item in rest:
-        if (
-            item.startswith("-")
-            and not item.startswith("--")
-            and _INTERPRETER_FLAG_LETTERS & set(item[1:])
-        ):
-            raise _refuse(key, "an option cluster that can run code cannot be allowed", item)
 
 
 def _check_argv(argv: Sequence[object], key: str) -> tuple[str, ...]:
@@ -453,11 +442,17 @@ def _check_argv(argv: Sequence[object], key: str) -> tuple[str, ...]:
     for item in items:
         if _VAR_ASSIGN.match(item):
             raise _refuse(key, "a VAR=value element cannot be allowed", item)
+    # git, make and the launchers take options that run code or change the directory; for any
+    # other program (and for the arguments of an interpreter's script or module) only the exact
+    # words count. An interpreter's own options come before its script and are refused above.
+    broad = program == "git" or program == "make" or program in _LAUNCHERS
     for item in items[1:]:
-        if (
-            item in _BAD_FLAGS
-            or item.lower().startswith(_BAD_FLAG_PREFIXES)
-            or (item[:2] in ("-C", "-f") and not item.startswith("--"))
+        if item in _BAD_FLAGS or (
+            broad
+            and (
+                item.lower().startswith(_BAD_FLAG_PREFIXES)
+                or (item[:2] in ("-C", "-f") and not item.startswith("--"))
+            )
         ):
             raise _refuse(
                 key, "an option that runs code or changes the directory cannot be allowed", item
