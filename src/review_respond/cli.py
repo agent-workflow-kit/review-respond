@@ -42,6 +42,8 @@ _OVERRIDE_COMMANDS = frozenset({"respond", "confirm"})
 _ALIASES = {"approve": "confirm"}
 # Commands that never write state.db: they still work on a schema newer than this binary knows
 # (interface: Upgrades). `cron` edits the crontab only.
+# todo(#24): `show` runs the finalizer, which writes round state, yet it is read-only here so it
+# has no audit/log writers; the finalizer must open them lazily (open_jsonl_files) when it acts.
 READ_ONLY_COMMANDS = frozenset({"list", "show", "pending", "export", "validate", "cron"})
 
 
@@ -265,6 +267,8 @@ def _build_context(
             actor=actor,
             decision_ids=check_decision_ids(args.decision_id or ()),
             config_sha256=loaded.config.sha256() if loaded is not None else None,
+            # todo(#25): actor_source (flag, tty, default) is reserved: the actor resolution above
+            # does not report its source yet; the first command that writes audit records passes it.
             override_escalation=getattr(args, "override_escalation", False),
         )
     if loaded is not None:

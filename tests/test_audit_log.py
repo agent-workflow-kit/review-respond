@@ -607,3 +607,189 @@ def test_patterns_and_enums_match_the_schemas() -> None:
         props = set(events[event]["properties"]) - {"ts", "level", "event"}
         assert set(required) | set(optional) == props, event
         assert set(required) == set(events[event]["required"]) - {"ts", "level", "event"}, event
+
+
+# ---- round 1 review fixes ----------------------------------------------------------------
+
+
+def _first_append(state: StateDir) -> JsonlFile:
+    file = JsonlFile(state, "log.jsonl")
+    file.append({"n": 1})
+    return file
+
+
+def _swap_unlink(state: StateDir) -> None:
+    (state.path / "log.jsonl").unlink()
+
+
+def _swap_rename(state: StateDir) -> None:
+    (state.path / "log.jsonl").rename(state.path / "moved.jsonl")
+
+
+def _swap_symlink(state: StateDir) -> None:
+    target = state.path.parent / "elsewhere"
+    target.write_text("")
+    (state.path / "log.jsonl").unlink()
+    (state.path / "log.jsonl").symlink_to(target)
+
+
+def _swap_replace(state: StateDir) -> None:
+    path = state.path / "log.jsonl"
+    path.unlink()
+    path.write_text("")
+    path.chmod(0o600)
+
+
+def _swap_chmod(state: StateDir) -> None:
+    (state.path / "log.jsonl").chmod(0o666)
+
+
+def _swap_hard_link(state: StateDir) -> None:
+    os.link(state.path / "log.jsonl", state.path / "alias.jsonl")
+
+
+@pytest.mark.parametrize(
+    "swap",
+    [_swap_unlink, _swap_rename, _swap_symlink, _swap_replace, _swap_chmod, _swap_hard_link],
+)
+def test_a_file_changed_while_open_is_refused_on_the_next_append(
+    state: StateDir, swap: Any
+) -> None:
+    file = _first_append(state)
+    swap(state)
+    with pytest.raises(CliError) as caught:
+        file.append({"n": 2})
+    assert caught.value.code == "state_unsafe"
+    assert (
+        not (state.path.parent / "elsewhere").exists()
+        or (state.path.parent / "elsewhere").read_bytes() == b""
+    )
+
+
+def test_changed_file_is_refused_through_audit_and_log_writers(state: StateDir) -> None:
+    audit = audit_of(state)
+    audit.decision("stop", PR, {"status": "ok"})
+    _swap_unlink_audit = state.path / "audit.jsonl"
+    _swap_unlink_audit.unlink()
+    with pytest.raises(CliError) as caught:
+        audit.decision("stop", PR, {"status": "ok"})
+    assert caught.value.code == "state_unsafe"
+    log = log_of(state)
+    log.warning("one")
+    (state.path / "log.jsonl").unlink()
+    with pytest.raises(CliError) as caught:
+        log.warning("two")
+    assert caught.value.code == "state_unsafe"
+
+
+@pytest.mark.parametrize("key", ["round:abc", "round:rd-ABCDEFGH", "round:rd-aaaaaaa1"])
+@pytest.mark.parametrize("action", ["taken_over", "stalled", "lost"])
+def test_lease_callback_is_total_for_round_keys_the_store_accepts(
+    state: StateDir, key: str, action: str
+) -> None:
+    log_of(state).lease_callback()(action, key)
+    (only,) = check_all(state.path / "log.jsonl", "review-respond/log.json")
+    assert (only["kind"], only["action"]) == ("round", action)
+    assert "round" not in only
+
+
+def test_failed_first_audit_append_prevents_the_external_action(state: StateDir) -> None:
+    def fail(fd: int, data: bytes) -> int:
+        raise OSError(28, "No space left on device")
+
+    actions: list[str] = []
+
+    def act(audit: AuditLog) -> None:
+        audit.attempted("push", PR)
+        actions.append("pushed")
+
+    broken = AuditLog(
+        JsonlFile(state, "audit.jsonl", write=fail), actor="human:t", clock=FakeClock()
+    )
+    with pytest.raises(CliError):
+        act(broken)
+    assert actions == []
+    act(audit_of(state))
+    assert actions == ["pushed"]
+
+
+SENTINEL = "SENTINEL-COMMENT-BODY-9f3"
+
+
+def test_no_fixture_comment_text_reaches_either_file(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(f"REVIEW_RESPOND_{SENTINEL.replace('-', '_')}", "1")
+    state = open_state_dir(_state_path(world))
+    audit = audit_of(state)
+    attempt = audit.attempted("reply", PR, inputs={"comment_id": "gh:rc:1"})
+    audit.outcome(attempt, "reply", PR, {"status": "ok", "comment_id": "gh:rc:2"})
+    for bad in (
+        lambda: audit.decision("reply", PR, {"status": "ok", "comment_id": SENTINEL + "\n x"}),
+        lambda: audit.decision("reply", SENTINEL, {"status": "ok"}),
+        lambda: audit.decision("reply", PR, {"status": "ok"}, inputs={"head_sha": SENTINEL}),
+    ):
+        with pytest.raises(ValueError) as caught:
+            bad()
+        assert SENTINEL not in str(caught.value)
+    log_of(state).warning("env_ignored", key="REVIEW_RESPOND_NOT_A_THING")
+    main(["check", "--quiet"])
+    for name in ("audit.jsonl", "log.jsonl"):
+        assert SENTINEL.encode() not in (state.path / name).read_bytes()
+
+
+def test_flock_failure_never_truncates_another_writers_line(
+    state: StateDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fcntl
+
+    path = state.path / "log.jsonl"
+
+    def no_lock(fd: int, op: int) -> None:
+        raise OSError(errno_enolck, "no locks")
+
+    errno_enolck = 37
+    other: list[int] = []
+
+    def other_then_fail(fd: int, data: bytes) -> int:
+        other.append(os.open(path, os.O_WRONLY | os.O_APPEND))
+        os.write(other[0], b'{"other":1}\n')
+        raise OSError(28, "No space left on device")
+
+    file = JsonlFile(state, "log.jsonl", write=other_then_fail)
+    monkeypatch.setattr(fcntl, "flock", no_lock)
+    with pytest.raises(OSError):
+        file.append({"n": 1})
+    os.close(other[0])
+    assert path.read_bytes() == b'{"other":1}\n'
+
+
+def test_check_fields_with_mixed_type_unknown_keys_is_a_value_error(state: StateDir) -> None:
+    with pytest.raises(ValueError):
+        log_of(state).emit("finalize", {1: "x", "a": "y", b"k": 2})  # type: ignore[dict-item]
+
+
+@pytest.mark.parametrize("code", [10**400, -1, 256])
+def test_exit_code_is_bounded(state: StateDir, code: int) -> None:
+    with pytest.raises(ValueError):
+        audit_of(state).decision("push", PR, {"status": "failed", "exit_code": code})
+    with pytest.raises(ValueError):
+        log_of(state).emit("hook_result", {"hook": "pre-push", "exit_code": code,
+                                           "timed_out": False})  # fmt: skip
+
+
+def test_exit_code_bounds_accept_0_and_255(state: StateDir) -> None:
+    audit_of(state).decision("push", PR, {"status": "failed", "exit_code": 255})
+    audit_of(state).decision("push", PR, {"status": "ok", "exit_code": 0})
+    assert len(check_all(state.path / "audit.jsonl", "review-respond/audit.json")) == 2
+
+
+def test_naive_datetimes_are_refused(state: StateDir) -> None:
+    naive = datetime(2026, 1, 1, 12, 0, 0)
+    with pytest.raises(ValueError):
+        log_of(state).emit(
+            "check_pass", {"started_at": naive, "finished_at": naive, "already_running": False}
+        )
+    audit = AuditLog(JsonlFile(state, "audit.jsonl"), actor="auto:x", clock=FakeClock(naive))
+    with pytest.raises(ValueError):
+        audit.decision("stop", PR, {"status": "ok"})

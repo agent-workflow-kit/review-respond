@@ -114,9 +114,13 @@ def _nullable(inner: Check) -> Check:
     return lambda value: None if value is None else inner(value)
 
 
-def _integer(minimum: int | None = None) -> Check:
+def _integer(minimum: int | None = None, maximum: int | None = None) -> Check:
     def check(value: object) -> object:
-        if type(value) is not int or (minimum is not None and value < minimum):
+        if (
+            type(value) is not int
+            or (minimum is not None and value < minimum)
+            or (maximum is not None and value > maximum)
+        ):
             raise ValueError("value is not an acceptable integer")
         return value
 
@@ -165,6 +169,8 @@ def clean_text(text: str, limit: int) -> str:
 
 
 def format_ts(moment: datetime) -> str:
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("timestamp has no time zone")
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
@@ -176,10 +182,10 @@ def _check_fields(
 ) -> dict[str, object]:
     unknown = set(fields) - set(required) - set(optional)
     if unknown:
-        raise ValueError(f"{what}: unknown field {sorted(unknown)[0]!r}")
+        raise ValueError(f"{what}: unknown field {min(unknown, key=repr)!r}")
     missing = set(required) - set(fields)
     if missing:
-        raise ValueError(f"{what}: missing field {sorted(missing)[0]!r}")
+        raise ValueError(f"{what}: missing field {min(missing, key=repr)!r}")
     out: dict[str, object] = {}
     for name, value in fields.items():
         check = required.get(name) or optional[name]
@@ -279,6 +285,17 @@ class JsonlFile:
             raise
         return fd
 
+    def _recheck(self, fd: int) -> None:
+        """Under the lock: the descriptor still is the safe file the name points to."""
+        info = os.fstat(fd)
+        self._verify(info)  # also refuses an unlinked file (st_nlink 0)
+        try:
+            named = os.lstat(self.name, dir_fd=self._dir_fd)
+        except OSError:
+            raise _unsafe(f"{self.path} was removed or replaced while in use") from None
+        if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+            raise _unsafe(f"{self.path} was removed or replaced while in use")
+
     def append(self, record: Mapping[str, object]) -> None:
         """Append one record as one line. ``OSError`` when the write fails (no partial line is
         left behind), ``CliError`` ``state_unsafe`` when the file is unsafe."""
@@ -300,6 +317,7 @@ class JsonlFile:
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 locked = True
             try:
+                self._recheck(fd)
                 size = os.fstat(fd).st_size
                 data = line
                 if size > 0 and os.pread(fd, 1, size - 1) != b"\n":
@@ -312,8 +330,9 @@ class JsonlFile:
                             raise OSError(errno.EIO, "write made no progress")
                         view = view[written:]
                 except BaseException:
-                    with contextlib.suppress(OSError):
-                        os.ftruncate(fd, size)
+                    if locked:  # unlocked, the tail may be another writer's line
+                        with contextlib.suppress(OSError):
+                            os.ftruncate(fd, size)
                     raise
             finally:
                 if locked:
@@ -359,7 +378,7 @@ _INPUT_CHECKS: Final[dict[str, Check]] = {
     "override_escalation": _boolean,
 }
 _RESULT_CHECKS: Final[dict[str, Check]] = {
-    "exit_code": _nullable(_integer()),
+    "exit_code": _nullable(_integer(0, 255)),
     "reason": _nullable(_enum(*REFUSAL_REASONS)),
     "comment_id": _nullable(_pattern(_COMMENT)),
     "commit_sha": _nullable(_pattern(_SHA)),
@@ -543,7 +562,7 @@ _EVENTS: Final[dict[str, tuple[dict[str, Check], dict[str, Check]]]] = {
         _NO_FIELDS,
     ),
     "hook_result": (
-        {"hook": _enum(*HOOKS), "exit_code": _nullable(_integer()), "timed_out": _boolean},
+        {"hook": _enum(*HOOKS), "exit_code": _nullable(_integer(0, 255)), "timed_out": _boolean},
         {
             "object_id": _nullable(_pattern(_OBJECT)),
             "duration_ms": _integer(0),
@@ -654,7 +673,10 @@ class LogWriter:
             if matched is None:
                 raise ValueError("invalid lease key")
             kind = matched.group(1) or matched.group(2) or matched.group(3)
-            self.lease(kind, action, round=matched.group(4))
+            round_id = matched.group(4)
+            if round_id is not None and not re.fullmatch(_ROUND, round_id):
+                round_id = None  # a key the store accepts but no round id: logged without it
+            self.lease(kind, action, round=round_id)
 
         return on_event
 
