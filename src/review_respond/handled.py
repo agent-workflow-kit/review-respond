@@ -130,6 +130,11 @@ def _digest(text: str) -> str:
     return sha256(text.encode("utf-8", "replace")).hexdigest()
 
 
+def body_digest(text: str) -> str:
+    """The sha256 a stored body is known by (what ``deliver(expected=...)`` compares)."""
+    return _digest(text)
+
+
 def _cut(text: str) -> bytes:
     """The text as UTF-8, cut to the storage bound without splitting a character."""
     raw = text.encode("utf-8", "replace")
@@ -261,6 +266,14 @@ class HandledSet:
             name
             for (name,) in self.lease.store.conn.execute(
                 "SELECT body_file FROM comments WHERE pr = ? AND body_file IS NOT NULL", (pr.pr,)
+            )
+        }
+        # a queued round's note (stored by ``respond`` under the PR's directory) is kept too
+        keep |= {
+            name
+            for (name,) in self.lease.store.conn.execute(
+                "SELECT note_sha256 FROM rounds WHERE pr = ? AND note_sha256 IS NOT NULL",
+                (pr.pr,),
             )
         }
         stored.prune_owner_files(pr.digest, keep, min_age=self._prune_grace)

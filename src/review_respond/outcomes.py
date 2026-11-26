@@ -53,7 +53,7 @@ FAILURE_DETAILS: Final = (
 )
 COMMANDS: Final = ("resume", "launch", "wait", "wtctl_create", "sigterm", "job_gone")
 _AGENT_SPAWN: Final = ("resume", "launch", "wait")
-_STOP_REASONS: Final = ("stopped", "forwarded_term", "forwarded_hup", "forwarded_int")
+STOP_REASONS: Final = ("stopped", "forwarded_term", "forwarded_hup", "forwarded_int")
 
 
 @dataclass(frozen=True)
@@ -146,7 +146,7 @@ def _map(end: RunEnd) -> Mapped:
     if code == 14:
         return _failed("unreported", True)
     if code == 15:
-        if end.cancel_requested and end.end_reason in _STOP_REASONS:
+        if end.cancel_requested and end.end_reason in STOP_REASONS:
             return Mapped("canceled", None, True, 0)
         return _failed("agent_failed", True)
     if code == 16:

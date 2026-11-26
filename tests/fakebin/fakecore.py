@@ -516,6 +516,7 @@ def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None)
         "tool": prog,
         "argv": tokens,
         "cwd": os.getcwd(),
+        "pid": os.getpid(),
         "env": dict(os.environ),
         "stdin": None,
         "stdin_tty": sys.stdin is not None and sys.stdin.isatty(),

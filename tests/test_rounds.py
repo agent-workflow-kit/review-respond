@@ -1276,3 +1276,40 @@ def test_a_flagged_start_with_no_selection_ends_canceled_with_the_flag_reason(
     block = env.block()
     assert (block is not None and block["reason"] == "stopped") is blocks
     assert (block is None) is not blocks
+
+
+# ---- the job's two additions (#23) --------------------------------------------------------------
+
+
+def test_record_throwaway_stores_the_id_once_and_never_replaces_it(env: Env) -> None:
+    rid = env.running()
+    assert env.rounds.record_throwaway(rid, "wt-aaaaaaaa").changed
+    assert env.row(rid).throwaway_id == "wt-aaaaaaaa"
+    assert not env.rounds.record_throwaway(rid, "wt-aaaaaaaa").changed
+    with pytest.raises(CliError) as excinfo:
+        env.rounds.record_throwaway(rid, "wt-bbbbbbbb")
+    assert excinfo.value.code == "internal"
+    with pytest.raises(ValueError):
+        env.rounds.record_throwaway(rid, "../x")
+
+
+def test_record_throwaway_needs_a_running_round(env: Env) -> None:
+    rid = env.queued()
+    assert not env.rounds.record_throwaway(rid, "wt-aaaaaaaa").changed
+    assert env.row(rid).throwaway_id is None
+
+
+def test_fail_queued_fails_the_round_not_counted_and_blocks_the_pr(env: Env) -> None:
+    rid = env.queued()
+    moved = env.rounds.fail_queued(rid)
+    assert moved.changed and moved.new_block
+    row = env.row(rid)
+    assert (row.state, row.failure_reason, row.counted) == ("failed", "internal", False)
+    assert (env.block() or {}).get("reason") == "failed"
+    assert env.comment(C1)[0] == "unhandled"
+
+
+def test_fail_queued_leaves_a_running_round_alone(env: Env) -> None:
+    rid = env.running()
+    assert not env.rounds.fail_queued(rid).changed
+    assert env.row(rid).state == "running"

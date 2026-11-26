@@ -19,6 +19,7 @@ from .check import handle as handle_check
 from .config import ConfigError, LoadedConfig, load_config
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
+from .job import handle as handle_job
 from .output import PROG, Context, Outcome, emit, sanitize_line, warn
 from .store import Store, open_state_dir, state_dir_path
 from .validate import handle as handle_validate
@@ -34,6 +35,7 @@ Handler = Callable[[Context, argparse.Namespace], Outcome]
 # Commands implemented so far, by canonical name. Each later issue registers its handler here
 # (one line each); a command with no handler exits 1 `internal` with a clear message.
 HANDLERS: dict[str, Handler] = {
+    "_job": handle_job,
     "check": handle_check,
     "list": handle_list,
     "show": handle_show,
@@ -253,6 +255,8 @@ def _build_context(
         config_error = exc
     if explicit_actor is not None:
         actor = explicit_actor
+    elif args.command == "_job":
+        actor = "auto:review-respond"  # a job acts on its own (interface: Global flags)
     else:
         actor = default_actor(user=loaded.config.me.name if loaded is not None else None)
     check_human_only(

@@ -448,6 +448,10 @@ class _Tool:
 # program and the result reports `overflow`.
 FORGECTL_OUTPUT_CAP = 8 * 1024 * 1024
 FORGECTL_COMMENTS_CAP = 64 * 1024 * 1024
+# What ``agent-spawn wait`` and ``show`` and ``wtctl create`` may print: their documents are small;
+# a stream that passes it stops the process and the result is ``overflow`` (``internal``).
+AGENT_SPAWN_OUTPUT_CAP = 8 * 1024 * 1024
+WTCTL_OUTPUT_CAP = 8 * 1024 * 1024
 
 
 class Forgectl(_Tool):
@@ -606,10 +610,12 @@ class AgentSpawn(_Tool):
         if timeout is not None:
             args += ["--timeout", _arg(timeout, "timeout")]
         # The call blocks as long as the run lasts: no gateway timeout of its own.
-        return self._run([*args, "--json"], timeout=None)
+        return self._run([*args, "--json"], timeout=None, max_output=AGENT_SPAWN_OUTPUT_CAP)
 
     def show(self, agent_id: str) -> Result:
-        return self._run(["show", _arg(agent_id, "agent id"), "--json"])
+        return self._run(
+            ["show", _arg(agent_id, "agent id"), "--json"], max_output=AGENT_SPAWN_OUTPUT_CAP
+        )
 
     def list(self, *, labels: Sequence[tuple[str, str]] = ()) -> Result:
         args = ["list"]
@@ -678,7 +684,10 @@ class Wtctl(_Tool):
         args = ["create", "--throwaway", "--repo", _arg(repo, "repo"), "--ref", _arg(ref, "ref")]
         if source is not None:
             args += ["--source", _arg(source, "source")]
-        return self._run([*args, *_labels(labels), *_actor_flags(actor, ()), "--json"])
+        return self._run(
+            [*args, *_labels(labels), *_actor_flags(actor, ()), "--json"],
+            max_output=WTCTL_OUTPUT_CAP,
+        )
 
     def extract(
         self,
