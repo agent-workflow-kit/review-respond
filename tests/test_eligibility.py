@@ -960,12 +960,23 @@ def test_an_access_answer_that_does_not_fit_the_schema_is_an_unknown_and_not_cac
         schema=False,
         match={"positionals": {"repo": REPO, "user": "reviewer-one"}},
     )
-    det = Detection(gateway, lease, settings())
+    det = Detection(gateway, lease, settings(limits={"requests_per_host": 3}))
     result = read(
-        gateway, lease, store, fakes, doc_of(builders.comment("gh:rc:c1", "x")), detection=det
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(
+            builders.comment("gh:rc:c1", "x"),
+            builders.comment("gh:rc:c2", "y", author=ALICE),
+        ),
+        detection=det,
     )
     assert verdict(result, "gh:rc:c1") == (False, "unknown_access")
     assert cache_rows(store) == []
+    # the misfit answer still cost 2 of 3: alice's lookup does not fit and is never made
+    assert verdict(result, "gh:rc:c2") == (False, "unknown_access")
+    assert len(access_calls(fakes)) == 1
 
 
 def test_garbage_output_from_access_is_an_unknown(
@@ -978,9 +989,22 @@ def test_garbage_output_from_access_is_an_unknown(
         schema=False,
         match={"positionals": {"repo": REPO, "user": "reviewer-one"}},
     )
-    result = read(gateway, lease, store, fakes, doc_of(builders.comment("gh:rc:c1", "x")))
+    det = Detection(gateway, lease, settings(limits={"requests_per_host": 3}))
+    result = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(
+            builders.comment("gh:rc:c1", "x"),
+            builders.comment("gh:rc:c2", "y", author=ALICE),
+        ),
+        detection=det,
+    )
     assert verdict(result, "gh:rc:c1") == (False, "unknown_access")
     assert cache_rows(store) == []
+    assert verdict(result, "gh:rc:c2") == (False, "unknown_access")  # the garbage cost 2 of 3
+    assert len(access_calls(fakes)) == 1
 
 
 def test_the_hosts_form_of_the_user_in_an_answer_is_accepted(
