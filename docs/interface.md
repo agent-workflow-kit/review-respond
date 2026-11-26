@@ -254,6 +254,8 @@ due(pr):
 
 `agent_busy(pr)`: the base agent or the PR's base fork has status `launching`, `live` or `tearing_down`, or a promotion pending.
 
+`check` computes it with `agent-spawn show` of the base agent (or from the `list` answer that found it) and stores the observation with the PR; `list` and `show` print the stored value. An agent-spawn answer that cannot be read counts as busy, the PR reports `lower_failed` and nothing is set or cleared for it in that pass.
+
 `check` starts due rounds, oldest due first, while the number of `queued` and `running` rounds over all PRs is below `jobs.max_running` (default 1), in both placements (with jobsctl the queue's own cap applies as well). A due PR over that number is `waiting` with `capacity`. A human `respond` is not bound by `jobs.max_running`. A round's prompt holds the eligible unhandled comments at the moment its job starts.
 
 **Counting.** A round is **counted** when its run started: agent-spawn reported an outcome other than `not-started` (exit 0 after a run, 13 from the session phase, 14 to 18), or `agent-spawn show` gives its run a non-null `first_working_at`. Every counted round counts, including a stopped one that started and the round after `reject --redo`. The PR's limit is reached when the number of counted rounds is at least `max_rounds`. At the limit, `post-attention` reason `round_limit` fires once per block episode; only `respond --force` or a higher `max_rounds` continues.
@@ -400,12 +402,12 @@ resolve_base(pr):
   if the PR reference is too long for a label (Labels): cands = []
   else cands = agent-spawn list --label pr=<pr> --json
   keep c only if c.agent_id is not in forks, c.repo == pr.repo, c.worktree is not null,
-     wtctl show <c.worktree.record_id> --json has branch == pr.head_ref, and c.run_kind is not third-party-reading
+     wtctl show <c.worktree.record_id> --json has branch == pr.head_ref, and c.run_kind is not third-party-reading (a kind in `review`, `gate-check`, `respond`)
   preferred = [c for c in cands if label owner=<prefer_owner>]
   return newest(preferred) or newest(cands) or FRESH if opted in (repos.<id>.respond_fresh) or NONE
 ```
 
-A label is not authenticated, so the match is verified against the worktree and branch as above; among equal candidates the most recent wins. Each round forks the base agent into the round's throwaway. The lineage updates are transactional:
+A label is not authenticated, so the match is verified against the worktree and branch as above; among equal candidates the most recent wins. The third-party-reading kinds are `review`, `gate-check` and `respond` (architecture section 5.3, kinds table); an unknown kind name gets the review profile and so counts as one. Taint is not a filter here: a tainted original is a valid base, because a `respond` fork reads third-party text; agent-spawn refuses a resume that must not happen, which surfaces as exit 20 `tainted` at round time. A `wtctl show` that cannot be read (timeout, any exit but 0 and 10, not JSON) on a candidate no earlier candidate beat decides nothing: `resolve_base` returns `unknown`, stored with `agent_busy` 1 and reported `lower_failed`, never none or a fresh session. Each round forks the base agent into the round's throwaway. The lineage updates are transactional:
 
 ```text
 lineage updates (forks table states: base, round, teardown_pending, torn_down):
@@ -413,7 +415,7 @@ lineage updates (forks table states: base, round, teardown_pending, torn_down):
   record pushed (with a diff) or done (without): pr.base_agent_id = round fork; previous base fork (if ours) -> teardown_pending   [same transaction]
   terminal rounds and closed PRs: Cleanup
   check: for each teardown_pending: agent-spawn teardown <id> --actor auto:review-respond; exit 0 or 10 -> torn_down;
-         20 live -> agent-spawn stop first, retry next pass; after 3 failed passes post-attention teardown_refused once
+         20 with reason live -> agent-spawn stop first, retry next pass (any other exit 20 reason: a failed pass, no stop); after 3 failed passes post-attention teardown_refused once
 ```
 
 With no original agent, a PR in a repo opted in with `repos.<id>.respond_fresh: true` gets a fresh `respond-to-review` session in the round's throwaway; after a confirm it is the base like any other fork. A fresh session knows the PR only from the comments and the files. A fork PR gets no round of any kind in 0.x (Eligibility).

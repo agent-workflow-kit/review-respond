@@ -20,6 +20,7 @@ from tests.test_check import (
     HOST,
     PR7,
     PR8,
+    agent_spawn,  # noqa: F401  (autouse: check resolves the base agent)
     gold,
     run,
     sql,

@@ -241,6 +241,60 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             AND NEW.state NOT IN ('confirmed', 'rejected', 'expired', 'closed')
         BEGIN SELECT RAISE(ABORT, 'a pending round is settled by its record'); END""",
     ),
+    (
+        # Fork lineage (#19). `forks` holds every agent id review-respond created (a round's
+        # fork or fresh session) and is the only set it ever acts on: the original agent has no
+        # row. `state`: round (a round's agent, not the base), base (the PR's base, at most one
+        # per PR), teardown_pending, torn_down; states only move forward. `source` is the base
+        # agent the fork was made from (null: a fresh session). `failed_passes` counts teardown
+        # passes that did not end in a tombstone; `refused_at` is set when the third one is
+        # reported (post-attention teardown_refused fires once). `prs.agent_busy` is the last
+        # observation of the base agent (1 also when it could not be read): the due rule's
+        # `agent_busy`. Times are epoch seconds.
+        """CREATE TABLE forks (
+            agent_id TEXT PRIMARY KEY CHECK (length(agent_id) = 11 AND agent_id GLOB
+                'ag-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]'),
+            pr TEXT NOT NULL REFERENCES prs (pr),
+            round TEXT NOT NULL UNIQUE REFERENCES rounds (id),
+            source TEXT CHECK (source IS NULL OR (length(source) = 11 AND source GLOB
+                'ag-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]')),
+            state TEXT NOT NULL CHECK (state IN ('round', 'base', 'teardown_pending',
+                'torn_down')),
+            failed_passes INTEGER NOT NULL DEFAULT 0 CHECK (failed_passes >= 0),
+            refused_at REAL,
+            rev INTEGER NOT NULL DEFAULT 0,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL
+        ) WITHOUT ROWID""",
+        "CREATE UNIQUE INDEX forks_one_base ON forks (pr) WHERE state = 'base'",
+        "CREATE INDEX forks_by_state ON forks (state, pr)",
+        """CREATE TRIGGER forks_forward_only BEFORE UPDATE ON forks
+        WHEN NEW.state != OLD.state AND NOT (
+            (OLD.state = 'round' AND NEW.state IN ('base', 'teardown_pending', 'torn_down'))
+            OR (OLD.state = 'base' AND NEW.state IN ('teardown_pending', 'torn_down'))
+            OR (OLD.state = 'teardown_pending' AND NEW.state = 'torn_down'))
+        BEGIN SELECT RAISE(ABORT, 'a fork state only moves forward'); END""",
+        "ALTER TABLE prs ADD COLUMN agent_busy INTEGER NOT NULL DEFAULT 0"
+        " CHECK (agent_busy IN (0, 1))",
+        # A database from before this migration may hold rounds that already forked: each such
+        # agent becomes a row in state `round` (`source` is the round's base agent when it is a
+        # well-formed id, else null). An agent that is a PR's base, or a repeated id, is skipped.
+        """INSERT OR IGNORE INTO forks (agent_id, pr, round, source, state, created_at, updated_at)
+        SELECT r.agent_id, r.pr, r.id,
+            CASE WHEN length(r.base_agent_id) = 11 AND r.base_agent_id GLOB
+                'ag-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]'
+                AND r.base_agent_id != r.agent_id THEN r.base_agent_id END,
+            'round', r.created_at, r.created_at
+        FROM rounds r
+        WHERE r.agent_id IS NOT NULL AND length(r.agent_id) = 11 AND r.agent_id GLOB
+            'ag-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]'
+            AND NOT EXISTS (SELECT 1 FROM prs p WHERE p.base_agent = r.agent_id)""",
+        # What a fork row says about its origin never changes.
+        """CREATE TRIGGER forks_origin_is_immutable BEFORE UPDATE ON forks
+        WHEN NEW.agent_id != OLD.agent_id OR NEW.pr != OLD.pr OR NEW.round != OLD.round
+            OR NEW.source IS NOT OLD.source
+        BEGIN SELECT RAISE(ABORT, 'a fork keeps its agent, PR, round and source'); END""",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 

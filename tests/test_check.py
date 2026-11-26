@@ -18,6 +18,7 @@ from review_respond import check as check_module
 from review_respond.cli import main
 from review_respond.store import Store, open_state_dir, pass_lease_key, pr_digest, pr_lease_key
 from tests.harness import builders, schemas
+from tests.harness.agents import original, show_doc
 from tests.harness.builders import HOST, HOST_B, REVIEWER, pr_item, pr_ref
 from tests.harness.fakes import Fakes
 from tests.harness.plugin import World
@@ -111,7 +112,20 @@ def fix_times(world: World, *, block_at: float = OLD) -> None:
         block_at)  # fmt: skip
 
 
-def set_agent(world: World, pr: str = PR7, agent: str = "agent-1") -> None:
+AGENT = "ag-sssssss2"
+
+
+@pytest.fixture(autouse=True)
+def agent_spawn(world: World) -> None:
+    """The base agent is resolved before the due rule (lineage.resolve_base): by default agent-spawn
+    knows no agent for the PR (``list`` is empty) and the stored base, once `set_agent` sets one,
+    is a parked original. A test that needs another answer scripts it first."""
+    world.fakes.script("agent-spawn", "list", json={"agents": []}, schema=False, times=None)
+    shown = show_doc(original(AGENT, PR7, status="parked"))
+    world.fakes.script("agent-spawn", "show", json=shown, times=None)
+
+
+def set_agent(world: World, pr: str = PR7, agent: str = AGENT) -> None:
     sql(world, "UPDATE prs SET base_agent = ? WHERE pr = ?", agent, pr)
 
 
@@ -169,8 +183,9 @@ def test_a_pass_reports_the_due_pr_and_starts_nothing(
     }  # fmt: skip
     assert sql(world, "SELECT block FROM prs") == [(None,)]
     gold(golden, "check-due", doc)
-    # nothing was started: no sibling other than forgectl was called
-    for tool in ("agent-spawn", "wtctl", "pr-comment", "jobsctl", "claude-session"):
+    # nothing was started: agent-spawn was only read (show), no other sibling was called
+    assert {c.command for c in world.fakes.calls("agent-spawn")} <= {"show", "list"}
+    for tool in ("wtctl", "pr-comment", "jobsctl", "claude-session"):
         assert world.fakes.calls(tool) == []
 
 
@@ -699,6 +714,30 @@ def test_dry_run_reads_the_stored_state_and_calls_nothing(
     assert len(world.fakes.calls("forgectl")) == 3  # the first pass only (--version, prs, comments)
     assert len(log_events(world)) == before
     gold(golden, "check-dry-run", doc)
+
+
+def test_dry_run_on_a_schema_7_database_reads_it_unmigrated(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    one_pr_pass(world, capsys, config)
+    sql(
+        world,
+        "INSERT INTO rounds (id, pr, number, state, trigger_kind, created_at, ended_at,"
+        " cancel_reason) VALUES ('rd-aaaaaaaa', ?, 1, 'canceled', 'check', 1, 1, 'stopped')",
+        PR7,
+    )  # fmt: skip
+    for statement in (
+        "DROP TABLE forks",
+        "ALTER TABLE prs DROP COLUMN agent_busy",
+        "PRAGMA user_version = 7",
+    ):
+        sql(world, statement)
+    code, doc, _ = run(capsys, "check", "--dry-run", config=config)
+    assert code == 0 and [p["pr"] for p in doc["prs"]] == [PR7]
+    assert sql(world, "PRAGMA user_version") == [(7,)]  # not migrated
+    for command in (("list",), ("show", PR7)):
+        code, _, _ = run(capsys, *command, config=config)
+        assert code == 0
 
 
 def test_dry_run_without_a_state_directory_creates_nothing(

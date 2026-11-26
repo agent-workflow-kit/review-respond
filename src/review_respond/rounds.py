@@ -31,7 +31,7 @@ Seams owned by later issues:
   ``cancel_read_failed``, ``cancel_flagged``, ``start``'s ``nothing_to_respond``): it runs in the
   same transaction after the block is set and is told whether this call set it (``new_block``,
   also on ``Transition``); the post is queued only for a new block.
-- TODO(#19): ``agent_busy`` and the forks rows; TODO(#25): ``respond`` clears blocks.
+- TODO(#25): ``respond`` clears blocks. The forks rows and ``agent_busy`` are ``lineage``'s (#19).
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Final, Protocol
 
-from . import due
+from . import due, lineage
 from .audit import ROUND_STATES
 from .errors import CliError
 from .handled import HandledSet
@@ -201,15 +201,26 @@ def list_rounds(conn: sqlite3.Connection, pr: str) -> list[RoundRow]:
 def round_facts(conn: sqlite3.Connection, pr: str) -> due.RoundFacts:
     """What the due rule and the PR state need from the rounds table. ``record_open`` is true
     while a round of the PR is ``pending`` (TODO(#29): from the records table); ``agent_busy`` is
-    TODO(#19)."""
+    the last observation of the base agent (``prs.agent_busy``, written by ``resolve_base``)."""
     queued, running, counted, pending = conn.execute(
         "SELECT coalesce(sum(state = 'queued'), 0), coalesce(sum(state = 'running'), 0),"
         " coalesce(sum(counted), 0), coalesce(sum(state = 'pending'), 0)"
         " FROM rounds WHERE pr = ?",
         (pr,),
     ).fetchone()
+    # A read-only open of a database older than the column never migrates: no observation, not busy.
+    has_busy = any(r[1] == "agent_busy" for r in conn.execute("PRAGMA table_info(prs)"))
+    busy = (
+        conn.execute("SELECT agent_busy FROM prs WHERE pr = ?", (pr,)).fetchone()
+        if has_busy
+        else None
+    )
     return due.RoundFacts(
-        queued=queued > 0, running=running > 0, counted=counted, record_open=pending > 0
+        queued=queued > 0,
+        running=running > 0,
+        counted=counted,
+        record_open=pending > 0,
+        agent_busy=bool(busy and busy[0]),
     )
 
 
@@ -427,6 +438,11 @@ class Rounds:
                 if row.agent_id != agent_id:
                     raise CliError("internal", f"round {row.id} already has another agent")
                 return None
+            # the fork row (state round) is stored with the agent id, in this transaction
+            lineage.record_fork(
+                conn, pr=row.pr, round_id=row.id, agent_id=agent_id, source=row.base_agent_id,
+                now=self._now(),
+            )  # fmt: skip
             changes: dict[str, object] = {"agent_id": agent_id}
             if throwaway_id is not None:
                 changes["throwaway_id"] = throwaway_id

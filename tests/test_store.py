@@ -281,6 +281,82 @@ def test_real_migrations_apply_in_order_on_each_prior_version() -> None:
         assert schema(conn) == schema(fresh)
 
 
+PR_UP = "git.example.test/org/repo#7"
+OLD_AG, ROUND_AG, ROUND_ID = "ag-aaaaaaaa", "ag-bbbbbbbb", "rd-aaaaaaaa"
+
+
+def v7_with_data() -> sqlite3.Connection:
+    """A database as v0.14.0 left it (7 migrations): a PR with a base agent and a forked round."""
+    conn = sqlite3.connect(":memory:", isolation_level=None)
+    conn.execute("PRAGMA foreign_keys = ON")
+    migrate(conn, MIGRATIONS[:7])
+    conn.execute(
+        "INSERT INTO prs (pr, digest, host, repo, number, host_state, head_sha, head_ref,"
+        " head_repo, is_fork, base_ref, created_at, updated_at, base_agent) VALUES"
+        " (?, 'd', 'git.example.test', 'git.example.test/org/repo', 7, 'open', 'a', 'feat/x',"
+        " NULL, 0, 'main', 't', 't', ?)",
+        (PR_UP, OLD_AG),
+    )
+    conn.execute(
+        "INSERT INTO rounds (id, pr, number, state, trigger_kind, created_at, ended_at,"
+        " cancel_reason, base_agent_id, agent_id) VALUES (?, ?, 1, 'canceled', 'check', 5, 6,"
+        " 'stopped', ?, ?)",
+        (ROUND_ID, PR_UP, OLD_AG, ROUND_AG),
+    )
+    return conn
+
+
+def test_the_v0_14_schema_upgrades_to_forks_keeping_its_rows() -> None:
+    conn = v7_with_data()
+    assert migrate(conn, MIGRATIONS) == SCHEMA_VERSION == 8
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert conn.execute("SELECT pr, base_agent, agent_busy FROM prs").fetchall() == [
+        (PR_UP, OLD_AG, 0)
+    ]
+    assert conn.execute("SELECT id, pr, agent_id, base_agent_id FROM rounds").fetchall() == [
+        (ROUND_ID, PR_UP, ROUND_AG, OLD_AG)
+    ]
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'forks'").fetchone()
+
+
+def test_the_upgrade_backfills_a_fork_row_for_each_forked_round() -> None:
+    conn = v7_with_data()
+    migrate(conn, MIGRATIONS)
+    assert conn.execute("SELECT agent_id, pr, round, source, state FROM forks").fetchall() == [
+        (ROUND_AG, PR_UP, ROUND_ID, OLD_AG, "round")
+    ]
+
+
+def test_the_upgrade_does_not_backfill_a_pr_base_or_a_round_without_an_agent() -> None:
+    conn = v7_with_data()
+    conn.execute("UPDATE prs SET base_agent = ?", (ROUND_AG,))
+    conn.execute(
+        "INSERT INTO rounds (id, pr, number, state, trigger_kind, created_at, ended_at,"
+        " cancel_reason) VALUES ('rd-bbbbbbbb', ?, 2, 'canceled', 'check', 7, 8, 'stopped')",
+        (PR_UP,),
+    )
+    migrate(conn, MIGRATIONS)
+    assert conn.execute("SELECT count(*) FROM forks").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "assignment", ["source = 'ag-cccccccc'", "source = NULL", "agent_id = 'ag-cccccccc'",
+                   "round = 'rd-bbbbbbbb'", "pr = 'other'"],
+)  # fmt: skip
+def test_a_fork_keeps_its_origin(assignment: str) -> None:
+    conn = v7_with_data()
+    migrate(conn, MIGRATIONS)
+    with pytest.raises(sqlite3.DatabaseError):
+        conn.execute(f"UPDATE forks SET {assignment}")
+
+
+def test_a_fork_still_moves_forward_and_counts_passes() -> None:
+    conn = v7_with_data()
+    migrate(conn, MIGRATIONS)
+    conn.execute("UPDATE forks SET state = 'teardown_pending', failed_passes = 1, rev = rev + 1")
+    assert conn.execute("SELECT state FROM forks").fetchone()[0] == "teardown_pending"
+
+
 def test_failed_migration_rolls_back_the_whole_step() -> None:
     broken = (
         *TEST_MIGRATIONS[:1],

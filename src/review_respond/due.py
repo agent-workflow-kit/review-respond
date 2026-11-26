@@ -24,7 +24,8 @@ Seams owned by later issues (``RoundFacts`` carries them, all defaulting to "non
 - ``queued``, ``running``, ``counted`` and (until #29) ``record_open`` come from the rounds table
   (``rounds.round_facts``).
 - TODO(#29): ``record_open`` (a record pending, pushing or pushed) comes from the records table.
-- TODO(#19): ``agent_busy`` and the writer of ``prs.base_agent`` (``resolve_base``).
+- ``agent_busy`` is ``prs.agent_busy``, the last observation of the base agent; its writer, and
+  the writer of ``prs.base_agent``, is ``lineage.resolve_base`` (#19).
 - TODO(#37): ``post-attention`` ``round_limit`` fires once when ``apply`` reports ``new_block``.
 - TODO(#25): ``respond`` calls ``clear_block`` with ``human_respond`` or ``human_force``.
 """
