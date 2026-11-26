@@ -276,6 +276,24 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         BEGIN SELECT RAISE(ABORT, 'a fork state only moves forward'); END""",
         "ALTER TABLE prs ADD COLUMN agent_busy INTEGER NOT NULL DEFAULT 0"
         " CHECK (agent_busy IN (0, 1))",
+        # A database from before this migration may hold rounds that already forked: each such
+        # agent becomes a row in state `round` (`source` is the round's base agent when it is a
+        # well-formed id, else null). An agent that is a PR's base, or a repeated id, is skipped.
+        """INSERT OR IGNORE INTO forks (agent_id, pr, round, source, state, created_at, updated_at)
+        SELECT r.agent_id, r.pr, r.id,
+            CASE WHEN length(r.base_agent_id) = 11 AND r.base_agent_id GLOB
+                'ag-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]'
+                AND r.base_agent_id != r.agent_id THEN r.base_agent_id END,
+            'round', r.created_at, r.created_at
+        FROM rounds r
+        WHERE r.agent_id IS NOT NULL AND length(r.agent_id) = 11 AND r.agent_id GLOB
+            'ag-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]'
+            AND NOT EXISTS (SELECT 1 FROM prs p WHERE p.base_agent = r.agent_id)""",
+        # What a fork row says about its origin never changes.
+        """CREATE TRIGGER forks_origin_is_immutable BEFORE UPDATE ON forks
+        WHEN NEW.agent_id != OLD.agent_id OR NEW.pr != OLD.pr OR NEW.round != OLD.round
+            OR NEW.source IS NOT OLD.source
+        BEGIN SELECT RAISE(ABORT, 'a fork keeps its agent, PR, round and source'); END""",
     ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)

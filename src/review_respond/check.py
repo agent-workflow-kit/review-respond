@@ -198,7 +198,10 @@ class _Pass:
             return True
         try:
             base = lineage.resolve_base(pr_lease, self.spawn, self.wtctl, self.settings, stored.pr)
-        except GatewayError:
+        except GatewayError as exc:
+            lineage.mark_unreadable(pr_lease, stored.pr)
+            if self.ctx.log is not None:
+                self.ctx.log.warning("lower_failed", key=str(exc), pr=stored.pr)
             return False
         if self.ctx.log is not None:
             for code in base.warnings:
@@ -209,7 +212,9 @@ class _Pass:
         """Tear down the forks marked for it (the pass lease); a refusal is logged."""
         try:
             done = lineage.teardown_pass(self.lease, self.spawn)
-        except GatewayError:
+        except GatewayError as exc:
+            if self.ctx.log is not None:
+                self.ctx.log.warning("teardown_unavailable", key=str(exc))
             return
         if self.ctx.log is not None:
             for item in done:

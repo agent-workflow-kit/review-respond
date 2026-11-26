@@ -208,7 +208,13 @@ def round_facts(conn: sqlite3.Connection, pr: str) -> due.RoundFacts:
         " FROM rounds WHERE pr = ?",
         (pr,),
     ).fetchone()
-    busy = conn.execute("SELECT agent_busy FROM prs WHERE pr = ?", (pr,)).fetchone()
+    # A read-only open of a database older than the column never migrates: no observation, not busy.
+    has_busy = any(r[1] == "agent_busy" for r in conn.execute("PRAGMA table_info(prs)"))
+    busy = (
+        conn.execute("SELECT agent_busy FROM prs WHERE pr = ?", (pr,)).fetchone()
+        if has_busy
+        else None
+    )
     return due.RoundFacts(
         queued=queued > 0,
         running=running > 0,

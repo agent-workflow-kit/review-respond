@@ -392,13 +392,32 @@ def test_teardown_exit_0_or_10_means_torn_down(
     assert states(env) == {FORK1: "torn_down"}
 
 
+def test_only_a_live_refusal_stops_the_agent(env: Env, gateway: Any, fakes: Any) -> None:
+    from tests.harness.spawn_run import error_doc
+
+    pending_teardown(env, FORK1)
+    fakes.script(
+        "agent-spawn", "teardown", json=error_doc("refused", reason="tainted"), exit=20,
+        schema=False,
+    )  # fmt: skip
+    done = lineage.teardown_pass(pass_lease(env), spawn(gateway))
+    assert [d.outcome for d in done] == ["retry"]
+    assert [c.command for c in fakes.calls("agent-spawn")] == ["teardown"]
+    fork = lineage.get_fork(env.store.conn, FORK1)
+    assert fork is not None and fork.state == "teardown_pending" and fork.failed_passes == 1
+
+
 def test_a_live_fork_is_stopped_first_and_retried_next_pass(
     env: Env, gateway: Any, fakes: Any
 ) -> None:
     from tests.harness.agents import original
+    from tests.harness.spawn_run import error_doc
 
     pending_teardown(env, FORK1)
-    script_teardown(fakes, FORK1, 20)
+    fakes.script(
+        "agent-spawn", "teardown", json=error_doc("refused", reason="live"), exit=20,
+        schema=False,
+    )  # fmt: skip
     fakes.script(
         "agent-spawn", "stop",
         json={"agent": original(FORK1, "x"), "action": "no_op", "removed": False,

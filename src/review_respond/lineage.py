@@ -47,8 +47,9 @@ from .store import Lease, cas_update, pass_lease_key, pr_digest, pr_lease_key
 ACTOR: Final = "auto:review-respond"
 FORK_STATES: Final = ("round", "base", "teardown_pending", "torn_down")
 TEARDOWN_REFUSED_AFTER: Final = 3
-# Kinds that read third-party text: an agent that ran in one is not a PR's original agent.
-THIRD_PARTY_KINDS: Final = frozenset({"respond"})
+# Kinds that read third-party text (architecture 5.3 kinds table; an unknown kind name gets the
+# review profile): an agent that ran in one is not a PR's original agent.
+THIRD_PARTY_KINDS: Final = frozenset({"review", "gate-check", "respond"})
 BUSY_STATUSES: Final = frozenset({"launching", "live", "tearing_down"})
 AGENT_STATUSES: Final = BUSY_STATUSES | {"parked", "torn_down"}
 SWITCHABLE_ROUND_STATES: Final = ("pending", "confirmed")
@@ -226,11 +227,18 @@ class Teardown:
     refused: bool = False  # the third failed pass: post-attention teardown_refused fires once
 
 
+def _reason(result: Result) -> str | None:
+    doc = result.json
+    err = doc.get("error") if isinstance(doc, dict) else None
+    reason = err.get("reason") if isinstance(err, dict) else None  # pyright: ignore[reportUnknownMemberType]
+    return reason if isinstance(reason, str) else None
+
+
 def teardown_pass(lease: Lease, spawn: AgentSpawn) -> list[Teardown]:
     """Tear down every fork marked ``teardown_pending`` (under the pass lease): exit 0 or 10 ends
-    it ``torn_down``; exit 20 (live) stops the agent and retries next pass; anything else is a
-    failed pass. The third failed pass sets ``refused_at`` and reports ``refused`` once; later
-    passes keep retrying. Only rows of the forks table are ever passed to agent-spawn, and the
+    it ``torn_down``; exit 20 with reason ``live`` stops the agent and retries next pass; anything
+    else is a failed pass. The third failed pass sets ``refused_at`` and reports ``refused`` once;
+    later passes keep retrying. Only rows of the forks table are ever passed to agent-spawn, and the
     PR's base never is."""
     if lease.key != pass_lease_key():
         raise ValueError("the teardown pass runs under the pass lease")
@@ -244,7 +252,8 @@ def teardown_pass(lease: Lease, spawn: AgentSpawn) -> list[Teardown]:
         lease.renew()
         now = store.clock.now().timestamp()
         gone = not result.timed_out and result.returncode in (0, 10)
-        if not gone and not result.timed_out and result.returncode == 20:
+        live = not result.timed_out and result.returncode == 20 and _reason(result) == "live"
+        if not gone and live:
             spawn.stop(fork.agent_id, actor=ACTOR)
             lease.renew()
         with lease.transaction() as conn:
@@ -335,19 +344,22 @@ def _candidate_ok(c: object, pr: str, repo: str, conn: sqlite3.Connection) -> bo
         and labels.has_label(agent_labels, "pr", pr)
         and not labels.has_label(agent_labels, "owner", labels.OWNER)
         and agent.get("run_kind") not in THIRD_PARTY_KINDS
-        and agent.get("tainted") is not True
         and (forked_from is None or not is_recorded(conn, forked_from))
     )
 
 
-def _worktree_matches(wt: Wtctl, record_id: str, head_ref: str, repo: str) -> bool:
-    """``wtctl show`` of the candidate's worktree names the PR's branch in the PR's repo."""
+def _worktree_matches(wt: Wtctl, record_id: str, head_ref: str, repo: str) -> bool | None:
+    """``wtctl show`` of the candidate's worktree names the PR's branch in the PR's repo.
+    True: it does. False: no such worktree (exit 10) or it is another branch or repo. None: the
+    answer is unreadable (timeout, another exit, overflow, not JSON): nothing is decided."""
     result = wt.show(record_id)
+    if result.returncode == 10 and not result.timed_out and not result.overflow:
+        return False
     doc = result.json
+    if not result.ok or not isinstance(doc, dict):
+        return None
     return (
-        result.ok
-        and isinstance(doc, dict)
-        and doc.get("id") == record_id  # pyright: ignore[reportUnknownMemberType]
+        doc.get("id") == record_id  # pyright: ignore[reportUnknownMemberType]
         and doc.get("branch") == head_ref  # pyright: ignore[reportUnknownMemberType]
         and doc.get("repo") == repo  # pyright: ignore[reportUnknownMemberType]
     )
@@ -372,6 +384,15 @@ def _store(
         )
 
 
+def mark_unreadable(lease: Lease, pr: str) -> None:
+    """A sibling could not be asked at all (``GatewayError``): store ``agent_busy`` = 1 and keep the
+    stored base, as for any unreadable agent-spawn answer."""
+    _require_lease(lease, pr)
+    row = lease.store.conn.execute("SELECT base_agent FROM prs WHERE pr = ?", (pr,)).fetchone()
+    if row is not None:
+        _store(lease, pr, row[0], row[0], True)
+
+
 def resolve_base(lease: Lease, spawn: AgentSpawn, wt: Wtctl, config: Config, pr: str) -> Base:
     """The base agent of ``pr`` (see the module docstring), stored with the busy observation.
 
@@ -379,7 +400,9 @@ def resolve_base(lease: Lease, spawn: AgentSpawn, wt: Wtctl, config: Config, pr:
     or torn down resets it (warning ``base_lost``) and the search runs; an unreadable answer
     decides nothing (``unknown``, busy). The search lists agents labeled ``pr=<pr>``, drops every
     candidate that fails the checks of ``_candidate_ok``, prefers ``prefer_owner``, then the most
-    recent (ties: the larger id), and takes the first whose worktree is on the PR's branch.
+    recent (ties: the larger id), and takes the first whose worktree is on the PR's branch. A
+    worktree answer that cannot be read (not exit 10, not a record) on a candidate no earlier one
+    beat makes the result ``unknown``.
     """
     _require_lease(lease, pr)
     conn = lease.store.conn
@@ -428,7 +451,11 @@ def resolve_base(lease: Lease, spawn: AgentSpawn, wt: Wtctl, config: Config, pr:
         reverse=True,
     )
     for c in found:
-        if _worktree_matches(wt, c["worktree"]["record_id"], head_ref, repo):
+        matched = _worktree_matches(wt, c["worktree"]["record_id"], head_ref, repo)
+        if matched is None:  # this candidate could win: decide nothing (as an unreadable agent)
+            _store(lease, pr, None, None, True)
+            return Base("unknown", None, True, tuple(warnings))
+        if matched:
             busy = agent_busy(c)
             if not _store(lease, pr, None, c["agent_id"], busy):
                 return Base("unknown", None, True, tuple(warnings))

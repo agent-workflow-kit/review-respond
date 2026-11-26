@@ -189,25 +189,26 @@ def test_the_next_candidate_is_tried_when_the_best_is_on_another_branch(
 
 # ---- forged labels and unrecorded ids ----------------------------------------------------------
 
-# (name, override of the candidate, reaches the wtctl check)
-REJECTED: list[tuple[str, dict[str, Any], bool]] = [
-    ("another_repo", {"repo": "git.example.test/other/repo"}, False),
-    ("no_repo", {"repo": None}, False),
-    ("no_worktree", {"worktree": None}, False),
-    ("third_party_kind", {"run_kind": "respond"}, False),
-    ("tainted", {"tainted": True}, False),
-    ("torn_down", {"status": "torn_down", "torn_down_at": T_NEW}, False),
-    ("no_pr_label", {"labels": ["owner=ticket-work"]}, False),
-    ("another_pr_label", {"labels": ["pr=git.example.test/org/repo#999"]}, False),
-    ("our_owner_label", {"labels": ["pr=@PR@", "owner=review-respond"]}, False),
-    ("forked_from_our_fork", {"forked_from": FORK1}, False),
-    ("a_recorded_fork", {"agent_id": FORK1}, False),
+# (name, override of the candidate)
+REJECTED: list[tuple[str, dict[str, Any]]] = [
+    ("another_repo", {"repo": "git.example.test/other/repo"}),
+    ("no_repo", {"repo": None}),
+    ("no_worktree", {"worktree": None}),
+    ("third_party_kind", {"run_kind": "respond"}),
+    ("review_kind", {"run_kind": "review"}),
+    ("gate_check_kind", {"run_kind": "gate-check"}),
+    ("torn_down", {"status": "torn_down", "torn_down_at": T_NEW}),
+    ("no_pr_label", {"labels": ["owner=ticket-work"]}),
+    ("another_pr_label", {"labels": ["pr=git.example.test/org/repo#999"]}),
+    ("our_owner_label", {"labels": ["pr=@PR@", "owner=review-respond"]}),
+    ("forked_from_our_fork", {"forked_from": FORK1}),
+    ("a_recorded_fork", {"agent_id": FORK1}),
 ]
 
 
-@pytest.mark.parametrize(("name", "over", "reaches"), REJECTED, ids=[r[0] for r in REJECTED])
+@pytest.mark.parametrize(("name", "over"), REJECTED, ids=[r[0] for r in REJECTED])
 def test_a_forged_or_foreign_candidate_is_never_the_base(
-    env: Env, tools: Tools, fakes: Fakes, name: str, over: dict[str, Any], reaches: bool
+    env: Env, tools: Tools, fakes: Fakes, name: str, over: dict[str, Any]
 ) -> None:
     round_with_fork(env, FORK1, "running")  # FORK1 is one of ours
     over = {
@@ -219,6 +220,14 @@ def test_a_forged_or_foreign_candidate_is_never_the_base(
     assert (got.kind, got.agent_id) == ("none", None)
     assert stored(env) == (None, 0)
     assert fakes.calls("wtctl") == []
+
+
+def test_a_tainted_original_is_accepted_taint_is_not_a_filter(
+    env: Env, tools: Tools, fakes: Fakes
+) -> None:
+    script_list(fakes, cand(C1, env, tainted=True))
+    script_wt(fakes, WT1)
+    assert resolve(env, tools).agent_id == C1
 
 
 def test_the_original_of_the_round_is_not_rejected_by_being_a_base_source(
@@ -256,7 +265,7 @@ def test_a_worktree_record_that_wtctl_does_not_know_is_not_a_match(
     assert resolve(env, tools).kind == "none"
 
 
-def test_a_failing_wtctl_is_not_a_match_and_does_not_hide_the_next_one(
+def test_an_unreadable_wtctl_on_a_candidate_that_could_win_is_unknown(
     env: Env, tools: Tools, fakes: Fakes
 ) -> None:
     script_list(fakes, cand(C1, env, WT1, created=T_NEW), cand(C2, env, WT2, created=T_OLD))
@@ -264,8 +273,44 @@ def test_a_failing_wtctl_is_not_a_match_and_does_not_hide_the_next_one(
         "wtctl", "show", json=error_doc("lower_failed"), exit=12, schema=False,
         match={"positionals": {"selector": WT1}},
     )  # fmt: skip
-    script_wt(fakes, WT2)
-    assert resolve(env, tools).agent_id == C2
+    got = resolve(env, tools)
+    assert (got.kind, got.agent_id, got.busy) == ("unknown", None, True)
+    assert stored(env) == (None, 1)
+
+
+def test_a_candidate_that_matched_first_wins_over_an_unreadable_later_one(
+    env: Env, tools: Tools, fakes: Fakes
+) -> None:
+    script_list(fakes, cand(C1, env, WT1, created=T_NEW), cand(C2, env, WT2, created=T_OLD))
+    script_wt(fakes, WT1)
+    assert resolve(env, tools).agent_id == C1
+
+
+def test_a_candidate_on_another_branch_does_not_stop_the_search_before_an_unreadable_one(
+    env: Env, tools: Tools, fakes: Fakes
+) -> None:
+    script_list(fakes, cand(C1, env, WT1, created=T_NEW), cand(C2, env, WT2, created=T_OLD))
+    script_wt(fakes, WT1, "feat/other")
+    fakes.script("wtctl", "show", stdout="not json", schema=False,
+                 match={"positionals": {"selector": WT2}})  # fmt: skip
+    assert resolve(env, tools).kind == "unknown"
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+@pytest.mark.parametrize("how", ["exit_12", "not_json", "exit_2"])
+def test_a_lone_candidate_with_an_unreadable_wtctl_is_unknown_not_none_or_fresh(
+    env: Env, tools: Tools, fakes: Fakes, how: str, fresh: bool
+) -> None:
+    script_list(fakes, cand(C1, env))
+    if how == "exit_12":
+        fakes.script("wtctl", "show", json=error_doc("lower_failed"), exit=12, schema=False)
+    elif how == "exit_2":
+        fakes.script("wtctl", "show", json=error_doc("usage"), exit=2, schema=False)
+    else:
+        fakes.script("wtctl", "show", stdout="not json", schema=False)
+    got = resolve(env, tools, fresh_cfg() if fresh else None)
+    assert (got.kind, got.busy) == ("unknown", True)
+    assert stored(env) == (None, 1)
 
 
 def test_one_bad_candidate_does_not_hide_a_good_one(env: Env, tools: Tools, fakes: Fakes) -> None:
@@ -417,6 +462,8 @@ def test_the_base_of_a_confirmed_round_is_resolved_not_researched(
 def test_a_second_round_forks_the_first_fork_with_no_extra_flags(
     env: Env, tools: Tools, fakes: Fakes, tmp_path: Path
 ) -> None:
+    """todo(#24): acceptance criterion 4's end-to-end process test (a real job forking the base
+    through the second round) belongs to #24; this one covers the argv of the resume only."""
     from tests.harness.spawn_run import started_doc
 
     set_stored(env, C1)

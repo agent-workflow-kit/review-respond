@@ -175,3 +175,40 @@ def test_dry_run_calls_no_agent_spawn(
 
 
 _ = Fakes
+
+
+def test_a_gateway_error_on_the_agent_search_stores_busy_and_logs_lower_failed(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_respond.gateway import AgentSpawn, GatewayError
+
+    def refuse(self: AgentSpawn, **_: Any) -> Any:
+        raise GatewayError("refused before starting")
+
+    monkeypatch.setattr(AgentSpawn, "list", refuse)
+    code, doc = pass_with(world, capsys, config)
+    assert code == 0 and pr_of(doc, PR7)["errors"] == ["lower_failed"]
+    assert sql(world, "SELECT agent_busy FROM prs") == [(1,)]
+    assert [e for e in log_events(world) if e.get("code") == "lower_failed"]
+
+
+def test_a_gateway_error_on_teardown_is_logged(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_respond.gateway import AgentSpawn, GatewayError
+
+    script_prs(world.fakes, [pr_item(7)])
+    script_comments(world.fakes, PR7, [])
+    run(capsys, "check", config=config)
+    insert_fork(world, "ag-fffffff2", "teardown_pending")
+
+    def refuse(self: AgentSpawn, *_: Any, **__: Any) -> Any:
+        raise GatewayError("refused before starting")
+
+    monkeypatch.setattr(AgentSpawn, "teardown", refuse)
+    script_prs(world.fakes, [pr_item(7)])
+    script_comments(world.fakes, PR7, [])
+    code, _, _ = run(capsys, "check", config=config)
+    assert code == 0
+    assert [e for e in log_events(world) if e.get("code") == "teardown_unavailable"]
+    assert sql(world, "SELECT state FROM forks") == [("teardown_pending",)]
