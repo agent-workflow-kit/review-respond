@@ -163,7 +163,7 @@ def one_pr_pass(world: World, capsys: pytest.CaptureFixture[str], config: Path, 
 # ---- check: the pass ---------------------------------------------------------------------------
 
 
-def test_a_pass_reports_the_due_pr_and_starts_nothing(
+def test_a_pass_starts_a_round_for_the_due_pr(
     world: World, capsys: pytest.CaptureFixture[str], config: Path, golden: Any
 ) -> None:
     code, doc, _ = one_pr_pass(world, capsys, config)
@@ -172,33 +172,67 @@ def test_a_pass_reports_the_due_pr_and_starts_nothing(
     assert pr_of(doc, PR7)["state"] == "waiting"
     assert sql(world, "SELECT json_extract(block, '$.reason') FROM prs") == [("no_agent",)]
     set_agent(world)
+    world.drop_tool("jobsctl")  # no jobsctl: the job runs detached (recorded, not started)
     script_prs(world.fakes, [pr_item(7)])
     script_comments(world.fakes, PR7, one_comment())
     code, doc, _ = run(capsys, "check", config=config)
     assert code == 0
     valid("check", doc)
-    # the block is cleared by the agent being found; the PR is due: waiting for capacity
+    # the block is cleared by the agent being found; the PR is due and capacity remains
+    (found,) = sql(world, "SELECT id, state, base_agent_id FROM rounds")
+    assert found[1:] == ("queued", AGENT)
+    assert pr_of(doc, PR7) == {
+        "pr": PR7, "state": "queued", "started_round": found[0], "lease_held": False, "errors": [],
+    }  # fmt: skip
+    assert sql(world, "SELECT block FROM prs") == [(None,)]
+    gold(golden, "check-started", json.loads(json.dumps(doc).replace(found[0], "rd-abcdefgh")))
+    # agent-spawn was only read (show); no other sibling was called
+    assert {c.command for c in world.fakes.calls("agent-spawn")} <= {"show", "list"}
+    for tool in ("wtctl", "pr-comment", "claude-session"):
+        assert world.fakes.calls(tool) == []
+    (placed,) = world.detached
+    assert placed["argv"][-2:] == ["_job", found[0]]
+
+
+def test_a_due_pr_over_the_cap_waits_for_capacity(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path, golden: Any
+) -> None:
+    """``jobs.max_running`` is 1: of two due PRs the one that became unhandled first starts."""
+    world.drop_tool("jobsctl")
+    script_prs(world.fakes, [pr_item(7), pr_item(8)])
+    script_comments(world.fakes, PR7, one_comment())
+    script_comments(world.fakes, PR8, one_comment("gh:rc:c8"))
+    run(capsys, "check", config=config)
+    set_agent(world, PR7)
+    set_agent(world, PR8)
+    sql(world, "UPDATE comments SET unhandled_since = ? WHERE pr = ?", OLD + 100, PR7)
+    sql(world, "UPDATE comments SET unhandled_since = ? WHERE pr = ?", OLD, PR8)
+    script_prs(world.fakes, [pr_item(7), pr_item(8)])
+    script_comments(world.fakes, PR7, one_comment())
+    script_comments(world.fakes, PR8, one_comment("gh:rc:c8"))
+    code, doc, _ = run(capsys, "check", config=config)
+    assert code == 0
+    assert pr_of(doc, PR8)["started_round"] is not None
+    assert pr_of(doc, PR8)["state"] == "queued"
     assert pr_of(doc, PR7) == {
         "pr": PR7, "state": "waiting", "started_round": None, "lease_held": False, "errors": [],
     }  # fmt: skip
-    assert sql(world, "SELECT block FROM prs") == [(None,)]
-    gold(golden, "check-due", doc)
-    # nothing was started: agent-spawn was only read (show), no other sibling was called
-    assert {c.command for c in world.fakes.calls("agent-spawn")} <= {"show", "list"}
-    for tool in ("wtctl", "pr-comment", "jobsctl", "claude-session"):
-        assert world.fakes.calls(tool) == []
+    gold(golden, "check-due", json.loads(json.dumps(doc).replace(
+        pr_of(doc, PR8)["started_round"], "rd-abcdefgh")))  # fmt: skip
+    assert len(world.detached) == 1
 
 
-def test_the_human_output_names_the_due_pr(
+def test_the_human_output_names_the_started_round_and_the_due_pr(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
+    world.drop_tool("jobsctl")
     one_pr_pass(world, capsys, config)
     set_agent(world)
     script_prs(world.fakes, [pr_item(7)])
     script_comments(world.fakes, PR7, one_comment())
     assert main(["check", "--config", str(config)]) == 0
     out = capsys.readouterr().out
-    assert f"{PR7} waiting DUE" in out and "1 PRs, 1 due" in out
+    assert f"{PR7} queued started rd-" in out and "1 PRs, 1 rounds started, 0 due" in out
 
 
 def test_a_pr_inside_the_settle_window_is_settling(

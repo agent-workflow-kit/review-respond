@@ -54,6 +54,7 @@ from .gateway import AgentSpawn, Gateway, GatewayError, Result
 from .handled import HandledSet, body_digest
 from .outcomes import STOP_REASONS, RunEnd, map_run_end
 from .output import Context, Outcome
+from .placement import remove_output
 from .prompt import (
     BuiltPrompt,
     PromptComment,
@@ -345,7 +346,8 @@ class Job:
     def cleanup_files(self) -> None:
         """Remove the prompt and profile of the round once nothing needs them: the round ended,
         or the job never launched an agent, or the agent's run ended. A live agent left to the
-        finalizer keeps them (TODO(#24): the finalizer removes them when it ends the round)."""
+        finalizer keeps them (the finalizer removes them when it ends the round or finds the
+        agent's run over)."""
         try:
             row = get_round(self.store.conn, self.rid)
         except Exception:  # the database is unreadable: leave the files for the cleanup
@@ -356,6 +358,8 @@ class Job:
                     remove(self.state, self.rid)
                 except (OSError, CliError):
                     self._warn("temp_file_left")
+            if row is not None and row.state in TERMINAL_STATES:
+                remove_output(self.state, self.rid, self.log)  # a detached job's output file
 
     # -- queued ----------------------------------------------------------------------------
 

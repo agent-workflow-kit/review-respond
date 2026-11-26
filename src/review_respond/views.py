@@ -3,18 +3,25 @@
 Both are read-only commands: no lease, no audit or log writer, and they work on a state database
 newer than this binary. The state they print is derived from the stored rows (`due.derive_state`).
 
-`show <round id>` and the rounds of a PR come from the rounds table. TODO(#24): `finalize` (the
-finalizer runs in `show`) stays null; TODO(#29): `show <pending id>` and the pending id of a PR.
-Until that table exists an `rp-` id matches nothing (exit 10).
+`show <round id>` and the rounds of a PR come from the rounds table. `show <round id>` of a
+`running` round runs the finalizer (finalizer.py), which writes round state: it opens the audit and
+log writers itself, since `show` has none. `finalize` is then `done` (the round was looked at under
+a lease taken from a verified-gone holder; the printed row is the one after) or `busy` (a live
+process holds the round: the stored row is printed), and null for a round that is not running or a
+database newer than this binary (never written). TODO(#29): `show <pending id>` and the pending id
+of a PR. Until that table exists an `rp-` id matches nothing (exit 10).
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import re
 from typing import Any, Final
 
 from . import prstate, rounds
+from .audit import AuditLog, LogWriter, open_jsonl_files
+from .finalizer import Finalizer
 from .errors import CliError
 from .output import Context, Outcome, sanitize_line
 from .prref import REPO_ID_RE, parse_pr
@@ -81,21 +88,44 @@ def _round_line(item: dict[str, Any]) -> str:
     return sanitize_line(f"  round {item['id']} #{item['number']} {item['state']}")
 
 
+def _finalize(ctx: Context, store: Store, row: rounds.RoundRow) -> str | None:
+    """Run the finalizer for a running round: ``done``, ``busy`` or None (not run)."""
+    state = store.source
+    if row.state != "running" or ctx.settings is None or state is None or store.read_only:
+        return None
+    files = open_jsonl_files(state)
+    try:
+        audit = AuditLog(
+            files[0],
+            actor=ctx.actor,
+            decision_ids=ctx.decision_ids,
+            config_sha256=ctx.settings.sha256(),
+            override_escalation=ctx.override_escalation,
+        )
+        writers = dataclasses.replace(ctx, log=LogWriter(files[1]), audit=audit)
+        return Finalizer(writers, ctx.settings, store).finalize(row.id)
+    finally:
+        for file in files:
+            file.close()
+
+
 def _show_round(ctx: Context, store: Store, round_id: str) -> Outcome:
     row = rounds.get_round(store.conn, round_id)
     if row is None:
         raise CliError("not_found", "no round matches")
+    finalize = _finalize(ctx, store, row)
+    if finalize is not None:
+        row = rounds.get_round(store.conn, round_id) or row
     item = prstate.round_object(store.conn, row)
     comments = [
         prstate.comment_object(store, r)
         for r in prstate.comment_records(store, row.pr)
         if r.id in row.comment_ids
     ]
-    # TODO(#24): the finalizer runs here for a running round whose holder is gone; null until then
     payload: dict[str, Any] = {
         "object_type": "round",
         "round": item,
-        "finalize": None,
+        "finalize": finalize,
         "comments": comments,
     }
     lines = [_round_line(item) + f"  pr={item['pr']} counted={str(item['counted']).lower()}"]

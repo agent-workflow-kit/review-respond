@@ -45,7 +45,7 @@ pythonVersion = "3.12"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: needs real models/hosts/credentials; never run in CI", "provokes_guard: the test triggers the isolation guard on purpose", "fakes_may_remain: the test scripts answers it does not consume"]
+markers = ["live: needs real models/hosts/credentials; never run in CI", "provokes_guard: the test triggers the isolation guard on purpose", "fakes_may_remain: the test scripts answers it does not consume", "real_detached: the test starts the detached job as a real process"]
 addopts = "-m 'not live'"
 
 [tool.semantic_release]

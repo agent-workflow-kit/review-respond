@@ -52,8 +52,8 @@ _OVERRIDE_COMMANDS = frozenset({"respond", "confirm"})
 _ALIASES = {"approve": "confirm"}
 # Commands that never write state.db: they still work on a schema newer than this binary knows
 # (interface: Upgrades). `cron` edits the crontab only.
-# todo(#24): `show` runs the finalizer, which writes round state, yet it is read-only here so it
-# has no audit/log writers; the finalizer must open them lazily (open_jsonl_files) when it acts.
+# `show` runs the finalizer for a running round, which writes round state, yet it is read-only here
+# so it has no audit/log writers: the finalizer path opens them lazily (views._finalize).
 READ_ONLY_COMMANDS = frozenset({"list", "show", "pending", "export", "validate", "cron"})
 
 

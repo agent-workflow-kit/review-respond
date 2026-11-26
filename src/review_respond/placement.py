@@ -96,6 +96,15 @@ def job_env(environ: Mapping[str, str], pass_env: list[str]) -> dict[str, str]:
     return env
 
 
+def remove_output(state: StateDir, round_id: str, log: LogWriter | None = None) -> None:
+    """Remove the output file of a detached job once its round ended (best effort)."""
+    try:
+        state.remove_private_file(JOBS_DIR, f"{round_id}.log")
+    except (OSError, CliError, ValueError):
+        if log is not None:
+            log.warning("temp_file_left", round=round_id)
+
+
 def _seconds(text: str) -> int:
     return max(1, int(parse_duration(text, flag="jobs.kill_grace").total_seconds()))
 
@@ -208,10 +217,3 @@ class Placement:
             os.close(fd)
         rounds.record_job(row.id, detached_at=rounds.lease.store.clock.now().timestamp())
         return Submitted("detached")
-
-    def remove_output(self, round_id: str) -> None:
-        """Remove the output file of a detached job once its round ended (best effort)."""
-        try:
-            self.state.remove_private_file(JOBS_DIR, f"{round_id}.log")
-        except (OSError, CliError, ValueError):
-            self._warn("temp_file_left", round_id)

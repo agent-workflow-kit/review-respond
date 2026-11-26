@@ -35,7 +35,7 @@ from .gateway import AgentSpawn, Gateway, GatewayError, Jobsctl, Result, Wtctl
 from .job import Job, end_of_last_run, parse_show
 from .outcomes import RunEnd
 from .output import Context
-from .placement import SUBMIT_GRACE_SECONDS, Placement
+from .placement import SUBMIT_GRACE_SECONDS, Placement, remove_output
 from .rounds import RoundRow, Rounds, Transition, get_round
 from .store import Lease, Store, holder_gone, round_lease_key
 
@@ -103,8 +103,9 @@ class Finalizer:
     def _round_ended(self, row: RoundRow) -> None:
         """Remove what belongs to a round that ended without its own job: its detached job's
         output and its prompt and profile files."""
-        if self.placement is not None:
-            self.placement.remove_output(row.id)
+        state = self.store.source
+        if state is not None:
+            remove_output(state, row.id, self.log)
         try:
             from .prompt import remove_prompt_file
             from .settings import remove_profile_file
@@ -310,8 +311,9 @@ class Finalizer:
         # the prompt and the profile go once the round ended or its agent's run is over
         job.agent_done = True
         job.cleanup_files()
-        if self.placement is not None and self._state(row.id) not in ("running", "queued"):
-            self.placement.remove_output(row.id)
+        state = self.store.source
+        if state is not None and self._state(row.id) not in ("running", "queued"):
+            remove_output(state, row.id, self.log)
 
     def _throwaway_root(self, row: RoundRow) -> str | None:
         """The round throwaway's root from its wtctl record (None when it cannot be read)."""
