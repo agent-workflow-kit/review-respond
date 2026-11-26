@@ -96,6 +96,20 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         ) WITHOUT ROWID""",
         "CREATE INDEX prs_by_host ON prs (host, host_state)",
     ),
+    (
+        # The access cache (#14): one `forgectl access` answer per (repo, author id), kept for
+        # `access_cache_ttl`. `write_access` NULL is the unknown answer (cached too); a failed
+        # lookup is never stored. `login` is the login the answer was asked for: a row is used
+        # only for a comment carrying that login. Times are epoch seconds.
+        """CREATE TABLE access_cache (
+            repo TEXT NOT NULL,
+            author_id TEXT NOT NULL,
+            login TEXT NOT NULL,
+            write_access INTEGER CHECK (write_access IN (0, 1)),
+            fetched_at REAL NOT NULL,
+            PRIMARY KEY (repo, author_id)
+        ) WITHOUT ROWID""",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 

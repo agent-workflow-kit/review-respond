@@ -58,7 +58,12 @@ def lease(store: Store) -> Iterator[Lease]:
 def settings(
     *, hosts: list[str] | None = None, budget: int | None = None, accounts: bool = True
 ) -> Config:
-    doc: dict[str, Any] = {"hosts_to_check": hosts if hosts is not None else [HOST]}
+    # the fixtures' reviewer is a listed reviewer, so reads here make no access lookup (#14 tests
+    # them in test_eligibility.py)
+    doc: dict[str, Any] = {
+        "hosts_to_check": hosts if hosts is not None else [HOST],
+        "reviewers": [f"{HOST}:{builders.REVIEWER['id']}"],
+    }
     if accounts:
         doc["me"] = {"accounts": ACCOUNTS}
     if budget is not None:

@@ -7,7 +7,9 @@ listing) or its read (comments) and changes nothing. forgectl is only ever read 
 
 Owned by later issues, left as seams:
 
-- TODO(#14): eligibility, the access cache and the 2-per-lookup budget cost (`Budget.spend`).
+- Eligibility (`eligibility.py`) and the access cache are done here: `Detection.read_comments`
+  returns one `Verdict` per comment (`CommentRead.verdicts`), and each uncached `forgectl access`
+  lookup is charged `LOOKUP_COST` to the host's `Budget`, the one the reads are charged to.
 - TODO(#15): the comment records and the handled set; `Detection(on_read=...)` receives each good
   read, and `absent_comment_ids` is the only rule about deletion (never from an incomplete read).
 - TODO(#16): the due rule, settle and the PR block (columns arrive with their migration).
@@ -19,13 +21,16 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final
 
 from . import deps
+from . import eligibility as rules
 from .audit import LogWriter
 from .config import Config
+from .durations import duration_ms
+from .eligibility import LOOKUP_COST, Verdict
 from .errors import CliError
 from .gateway import Gateway, GatewayError, Result
 from .store import Lease, cas_update, pr_digest
@@ -518,6 +523,8 @@ class CommentRead:
     head_sha: str
     complete: bool  # False: part of the PR could not be read; nothing may be marked deleted
     comments: tuple[ReadComment, ...]
+    # comment id -> eligibility (Eligibility); empty on a read that was not judged yet
+    verdicts: Mapping[str, Verdict] = field(default_factory=dict[str, Verdict])
 
 
 _THREAD_KEYS: Final = (
@@ -584,6 +591,28 @@ def _parse_comments(result: Result, pr: str) -> CommentRead:
     return CommentRead(pr, head_sha, complete, tuple(out))
 
 
+_ACCESS_KEYS: Final = ("repo", "user", "write_access", "level", "source", "reason")
+_LEVELS: Final = ("admin", "maintain", "write", "triage", "read", "none", None)
+_ACCESS_SOURCES: Final = ("collaborator_permission", "project_member")
+
+
+def _parse_access(result: Result, repo: str) -> bool | None:
+    """`write_access` of a `forgectl access` answer (null: unknown), checked against its pinned
+    schema: exactly its members, the repo that was asked, a login-shaped `user`, enums, and a
+    `reason` exactly when the answer is null."""
+    doc = _exact(result.json, _ACCESS_KEYS, "access")
+    if _match(doc.get("repo"), _REPO_RE, "access.repo") != repo:
+        raise _Bad("the answer is for another repo")
+    _match(doc.get("user"), rules.LOGIN_RE, "access.user")
+    answer = _opt_bool(doc.get("write_access"), "access.write_access")
+    _enum(doc.get("level"), _LEVELS, "access.level")
+    _enum(doc.get("source"), _ACCESS_SOURCES, "access.source")
+    reason = _enum(doc.get("reason"), ("no_permission_to_read", None), "access.reason")
+    if (answer is None) != (reason is not None):
+        raise _Bad("access.reason is set exactly when write_access is null")
+    return answer
+
+
 def absent_comment_ids(stored: Collection[str], read: CommentRead) -> set[str]:
     """The stored comment ids a read proves gone. Only a complete read proves anything: with
     ``complete: false`` the answer is empty and nothing may be marked deleted."""
@@ -603,6 +632,21 @@ def read_cost(stored_comments: int) -> int:
 def listing_cost(items: int) -> int:
     """The estimated cost of a listing: 1 per 100 items, at least 1."""
     return max(1, -(-items // 100))
+
+
+class Budget:
+    """One host's request budget for one pass: listing, shows, reads and access lookups are all
+    charged here (``limits.requests_per_host``). The costs are estimates."""
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.spent = 0
+
+    def fits(self, cost: int) -> bool:
+        return self.spent + cost <= self.limit
+
+    def spend(self, cost: int) -> None:
+        self.spent += cost
 
 
 # ---- stored PRs ---------------------------------------------------------------------------
@@ -752,6 +796,7 @@ class Detection:
         self.started_at = started_at or gateway.clock.now()
         self._checked = False
         self._whoami: _Whoami | CliError | None = None
+        self._budgets: dict[str, Budget] = {}
 
     # -- plumbing ---------------------------------------------------------------------------
 
@@ -830,6 +875,12 @@ class Detection:
             (who.accounts.get(host), None) if who.accounts.get(host) else (None, "identity_unknown")
         )
 
+    def budget(self, host: str) -> Budget:
+        """The host's budget of this pass (a read outside a host pass gets its own)."""
+        if host not in self._budgets:
+            self._budgets[host] = Budget(self.settings.limits.requests_per_host)
+        return self._budgets[host]
+
     def account_id(self, host: str) -> str | None:
         """Your account id on ``host`` (the comparison key of eligibility, #14)."""
         return self._resolve_account(host)[0]
@@ -869,8 +920,8 @@ class Detection:
             facts, complete = _parse_listing(listing, host, account)
         except _HostFailed as failure:
             return self._fail(host, failure.code)
-        budget = self.settings.limits.requests_per_host
-        spent = listing_cost(len(facts))
+        budget = self._budgets[host] = Budget(self.settings.limits.requests_per_host)
+        budget.spend(listing_cost(len(facts)))
         now = self._now()
         with self.lease.transaction() as conn:
             for item in facts:
@@ -882,10 +933,10 @@ class Detection:
             for pr in self._unlisted_open(host, set(listed)):
                 # like the first read, the first show of a pass always goes ahead: with a budget
                 # the listing used up, no closure would ever be learned otherwise
-                if shown and spent + 1 > budget:
+                if shown and not budget.fits(1):
                     break  # the rest is learned next pass
                 shown += 1
-                spent += 1
+                budget.spend(1)
                 if self._learn_closed(pr):
                     closed.append(pr)
         attempted: list[str] = []
@@ -897,10 +948,10 @@ class Detection:
             cost = read_cost(count)
             # the first read of a pass always goes ahead: a PR whose estimate exceeds the whole
             # budget (or a budget the listing used up) would otherwise never be read
-            if attempted and spent + cost > budget:
+            if attempted and not budget.fits(cost):
                 deferred = [p for p, _ in work[index:]]
                 break
-            spent += cost
+            budget.spend(cost)
             attempted.append(pr)
             try:
                 self.read_comments(pr)
@@ -919,7 +970,7 @@ class Detection:
             read=tuple(read),
             failed=tuple(failed),
             deferred=tuple(deferred),
-            spent=spent,
+            spent=budget.spent,
         )
 
     def _unlisted_open(self, host: str, listed: set[str]) -> list[str]:
@@ -1041,6 +1092,7 @@ class Detection:
         if row.host_state != "open":
             raise CliError("refused", "the PR is closed or merged", reason="pr_closed")
         self._require()
+        account = self._account_for_judging(row.host)
         self._ensure_installed_at()
         with self.lease.transaction() as conn:
             conn.execute(
@@ -1079,9 +1131,99 @@ class Detection:
                     (len(read.comments), pr),
                 )
             stored = get_pr(conn, pr)
+        read = replace(read, verdicts=self._judge(row, read, account))
         if self.on_read is not None and stored is not None:
             self.on_read(stored, read)
         return read
+
+    # -- eligibility ------------------------------------------------------------------------
+
+    def _account_for_judging(self, host: str) -> str:
+        """Your account id: without it `own` cannot be told, so the read fails (nothing changes)."""
+        account, why = self._resolve_account(host)
+        if account is None:
+            code = why or "identity_unknown"
+            raise CliError(
+                "lower_failed",
+                f"your account id on {host} is unknown ({code})",
+                lower={"code": code, "message": "your account id is unknown"},
+            )
+        return account
+
+    def _judge(self, pr: StoredPr, read: CommentRead, account: str) -> dict[str, Verdict]:
+        """One verdict per comment of a read (Eligibility). The PR itself is open, yours and not a
+        fork here: `read_comments` refuses any other before it reads."""
+        repo_settings = self.settings.repo_settings(pr.repo)
+        reviewers = rules.entry_ids(repo_settings.reviewers, pr.host)
+        bot_ids = rules.entry_ids(self.settings.bot_authors, pr.host)
+        prefix = self.settings.respond_to_own_comments_prefix
+        asked: dict[tuple[str, str], bool | None] = {}  # one lookup per author and login
+        out: dict[str, Verdict] = {}
+        for comment in read.comments:
+            verdict = rules.prejudge(
+                author_id=comment.author_id,
+                is_bot=comment.author_is_bot,
+                body=comment.body,
+                resolved=comment.thread_resolved,
+                minimized=comment.minimized,
+                account_id=account,
+                bot_ids=bot_ids,
+                own_prefix=prefix,
+            )
+            if verdict is None:
+                verdict = self._write_access(pr, comment, reviewers, asked)
+            out[comment.id] = verdict
+        return out
+
+    def _write_access(
+        self,
+        pr: StoredPr,
+        comment: ReadComment,
+        reviewers: frozenset[str],
+        asked: dict[tuple[str, str], bool | None],
+    ) -> Verdict:
+        author_id, login = comment.author_id, comment.author_login
+        if author_id is None:  # cannot happen after `prejudge`; kept for the type
+            return rules.ineligible("unknown_author")
+        if author_id in reviewers:
+            return rules.ELIGIBLE
+        # a login that is not shaped like one is never passed to forgectl (it would be argv)
+        if login is None or rules.LOGIN_RE.fullmatch(login) is None:
+            return rules.ineligible("unknown_access")
+        key = (author_id, login)
+        if key not in asked:
+            asked[key] = self._lookup_access(pr, author_id, login)
+        answer = asked[key]
+        if answer is None:
+            return rules.ineligible("unknown_access")
+        return rules.ELIGIBLE if answer else rules.ineligible("no_access")
+
+    def _lookup_access(self, pr: StoredPr, author_id: str, login: str) -> bool | None:
+        """`write_access` of an author: from the cache, else from `forgectl access` (charged
+        `LOOKUP_COST` to the host's budget, whether or not it works). None is the unknown answer:
+        a null answer, a failed or misfit lookup, or no budget left. Only an answer that fits its
+        schema is cached."""
+        ttl = duration_ms(self.settings.access_cache_ttl) / 1000
+        now = self._now()
+        hit, cached = rules.cache_get(
+            self.lease.store.conn, pr.repo, author_id, login, now=now, ttl=ttl
+        )
+        if hit:
+            return cached
+        budget = self.budget(pr.host)
+        if not budget.fits(LOOKUP_COST):
+            return None
+        budget.spend(LOOKUP_COST)
+        outcome = self._run(lambda: self.gateway.forgectl.access(pr.repo, login))
+        if isinstance(outcome, str) or _failure_code(outcome) is not None:
+            return None
+        try:
+            answer = _parse_access(outcome, pr.repo)
+        except _Bad:
+            return None
+        with self.lease.transaction() as conn:
+            rules.cache_put(conn, pr.repo, author_id, login, answer, now=now)
+        return answer
 
     def _read_failed(self, pr: str) -> None:
         with self.lease.transaction() as conn:
