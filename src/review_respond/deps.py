@@ -7,6 +7,7 @@ one; any other command calls ``require`` and exits 12 ``tool_missing`` or ``tool
 
 from __future__ import annotations
 
+import os
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,9 +17,6 @@ from .errors import CliError
 from .gateway import Gateway, GatewayError, Result, parse_version
 
 _ORG_URL: Final = "https://github.com/agent-workflow-kit"
-# A version line is short; reading only its start keeps a hostile output from costing anything
-# (and keeps ``int()`` away from a many-thousand-digit run).
-_MAX_VERSION_TEXT: Final = 1024
 _MAX_FOUND_CHARS: Final = 64  # schemas/cli/validate.json
 
 
@@ -27,6 +25,11 @@ class Dependency:
     tool: str
     minimum: str  # as written in the Dependencies table
     install: str
+    reinstall: str | None = None  # the command that upgrades it; defaults to ``install``
+
+    @property
+    def upgrade(self) -> str:
+        return self.reinstall or self.install
 
     @property
     def floor(self) -> tuple[int, int, int]:
@@ -35,19 +38,29 @@ class Dependency:
         return parts[0], parts[1], parts[2]
 
 
-def _uv(tool: str) -> str:
-    return f"uv tool install git+{_ORG_URL}/{tool}"
+def _uv(tool: str, minimum: str, *, link_copy: bool = False) -> Dependency:
+    """A uv tool; claude-session needs ``--link-mode=copy`` (its sandboxed kinds refuse to launch
+    from a linked install)."""
+    flags = " --link-mode=copy" if link_copy else ""
+    source = f"git+{_ORG_URL}/{tool}"
+    install = f"uv tool install{flags} {source}"
+    return Dependency(tool, minimum, install, f"uv tool install --reinstall{flags} {source}")
+
+
+def safe_path(path: str | None) -> str:
+    """``path`` without empty and relative entries (they resolve against the working directory)."""
+    return os.pathsep.join(d for d in (path or "").split(os.pathsep) if os.path.isabs(d))
 
 
 # The Minimum column of docs/interface.md, in its order (the order `validate` reports).
 DEPENDENCIES: Final = (
-    Dependency("forgectl", "0.55.2", _uv("forgectl")),
-    Dependency("agent-spawn", "0.34.0", _uv("agent-spawn")),
-    Dependency("pr-comment", "0.33.0", _uv("pr-comment")),
-    Dependency("wtctl", "0.31.0", _uv("wtctl")),
-    Dependency("claude-session", "0.45.2", _uv("claude-session")),
+    _uv("forgectl", "0.55.2"),
+    _uv("agent-spawn", "0.34.0"),
+    _uv("pr-comment", "0.33.0"),
+    _uv("wtctl", "0.31.0"),
+    _uv("claude-session", "0.45.2", link_copy=True),
     Dependency("git", "2.34", "install git 2.34 or newer with your package manager"),
-    Dependency("jobsctl", "0.32.1", _uv("jobsctl")),
+    _uv("jobsctl", "0.32.1"),
 )
 BY_TOOL: Final = {dep.tool: dep for dep in DEPENDENCIES}
 # Required whatever the config says; claude-session depends on `sandbox`, jobsctl is optional.
@@ -86,18 +99,17 @@ def probe(gateway: Gateway, dep: Dependency, *, required: bool) -> DepStatus:
     "unreadable": it passes with a warning. An optional program that is absent passes.
     """
     # Resolve first: an absent program is "missing" without trying to start it.
-    if shutil.which(dep.tool, path=gateway.env.get("PATH")) is None:
+    if shutil.which(dep.tool, path=safe_path(gateway.env.get("PATH"))) is None:
         return _absent(dep, required)
     try:
         result = _versions(gateway)[dep.tool]()
     except GatewayError:
-        return _absent(dep, required)
+        return _absent(dep, required, on_path=True)
+    if result.overflow:  # a hostile or broken program flooded its output: unreadable, not missing
+        return DepStatus(dep.tool, required, dep.minimum, None, True, None, True, "")
     if not result.ok:
-        return _absent(dep, required)
-    try:
-        triple = parse_version(result.stdout[:_MAX_VERSION_TEXT])
-    except ValueError:
-        triple = None
+        return _absent(dep, required, on_path=True)
+    triple = _read_version(result.stdout) or _read_version(result.stderr)
     if triple is None or triple == (0, 0, 0):
         found = "0.0.0" if triple == (0, 0, 0) else None
         return DepStatus(dep.tool, required, dep.minimum, found, True, None, True, "")
@@ -106,7 +118,7 @@ def probe(gateway: Gateway, dep: Dependency, *, required: bool) -> DepStatus:
         return DepStatus(dep.tool, required, dep.minimum, None, True, None, True, "")
     if triple < dep.floor:
         message = (
-            f"{dep.tool} {found} is older than the minimum {dep.minimum}; upgrade: {dep.install}"
+            f"{dep.tool} {found} is older than the minimum {dep.minimum}; upgrade: {dep.upgrade}"
         )
         return DepStatus(
             dep.tool, required, dep.minimum, found, False, "tool_too_old", False, message
@@ -114,9 +126,17 @@ def probe(gateway: Gateway, dep: Dependency, *, required: bool) -> DepStatus:
     return DepStatus(dep.tool, required, dep.minimum, found, True, None, False, "")
 
 
-def _absent(dep: Dependency, required: bool) -> DepStatus:
+def _read_version(text: str) -> tuple[int, int, int] | None:
+    try:
+        return parse_version(text)
+    except ValueError:  # a many-thousand-digit number: int() refuses it
+        return None
+
+
+def _absent(dep: Dependency, required: bool, *, on_path: bool = False) -> DepStatus:
+    """An optional program passes; one that is on the PATH but does not answer is a warning."""
     if not required:
-        return DepStatus(dep.tool, required, dep.minimum, None, True, None, False, "")
+        return DepStatus(dep.tool, required, dep.minimum, None, True, None, on_path, "")
     message = f"{dep.tool} is not installed or does not run; install it: {dep.install}"
     return DepStatus(dep.tool, required, dep.minimum, None, False, "tool_missing", False, message)
 
@@ -125,5 +145,7 @@ def require(gateway: Gateway, *tools: str) -> None:
     """Exit 12 ``tool_missing`` or ``tool_too_old`` for the first of ``tools`` that fails."""
     for tool in tools:
         status = probe(gateway, BY_TOOL[tool], required=True)
-        if not status.ok and status.code is not None:
-            raise CliError(status.code, status.message)
+        if status.ok:
+            continue
+        # a failed status always carries its code; anything else is a bug here
+        raise CliError(status.code or "internal", status.message)

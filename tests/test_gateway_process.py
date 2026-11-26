@@ -212,3 +212,33 @@ def test_jobsctl_env_values_travel_on_argv_so_they_must_not_be_secret(
     (call,) = fakes.calls("jobsctl")
     assert "XDG_CONFIG_HOME=/visible/in/ps" in call.argv  # a value is on argv: never a secret
     assert "SECRET_NAME" in call.argv and not any("SECRET_NAME=" in t for t in call.argv)
+
+
+def test_max_output_stops_a_flooding_program(gateway: Gateway) -> None:
+    began = time.monotonic()
+    result = gateway.run(
+        ["bash", "-c", "head -c 5000000 /dev/zero; sleep 30"], timeout=20, max_output=4096
+    )
+    assert result.overflow and not result.ok
+    assert len(result.stdout) <= 4096
+    assert time.monotonic() - began < 10
+
+
+def test_max_output_keeps_a_small_output_whole(gateway: Gateway) -> None:
+    result = gateway.run(["bash", "-c", "echo out; echo err >&2"], max_output=4096)
+    assert result.ok and (result.stdout, result.stderr) == ("out\n", "err\n")
+
+
+def test_max_output_still_times_out(gateway: Gateway, quick: None) -> None:
+    result = gateway.run(["bash", "-c", "echo hi; sleep 30"], timeout=0.5, max_output=4096)
+    assert result.timed_out and not result.ok and result.stdout == "hi\n"
+
+
+def test_max_output_refuses_stdin(gateway: Gateway) -> None:
+    with pytest.raises(GatewayError):
+        gateway.run(["cat"], stdin="x", max_output=10)
+
+
+def test_deeply_nested_json_output_does_not_raise(gateway: Gateway) -> None:
+    result = gateway.run(["bash", "-c", "head -c 100000 /dev/zero | tr '\\0' '['"])
+    assert result.json is None and result.json_error is not None

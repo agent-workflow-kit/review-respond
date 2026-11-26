@@ -44,8 +44,8 @@ All commands support `--json`. Free text comes from files or stdin. The full con
 - `pr-comment` (posts replies; binding A): `uv tool install git+https://github.com/agent-workflow-kit/pr-comment`
 - `wtctl` (throwaway checkouts and file extraction; binding A): `uv tool install git+https://github.com/agent-workflow-kit/wtctl`
 - `git` 2.34 or newer (hardened commit and push; binding A)
-- `claude-session` and Claude Code, through agent-spawn, with `bubblewrap` and `socat` on Linux and WSL (the respond kind needs the sandbox)
-- `jobsctl` (optional, binding A): without it a detached job runs under an internal cap
+- `claude-session` and Claude Code, through agent-spawn, with `bubblewrap` and `socat` on Linux and WSL (the respond kind needs the sandbox): `uv tool install --link-mode=copy git+https://github.com/agent-workflow-kit/claude-session` (the copy mode is required: the sandboxed kind refuses to launch from a linked install)
+- `jobsctl` (optional, binding A): `uv tool install git+https://github.com/agent-workflow-kit/jobsctl`; without it a detached job runs under an internal cap
 
 A missing or too-old sibling stops the command with a message naming its install command. The minimum versions are in the interface's Dependencies table.
 

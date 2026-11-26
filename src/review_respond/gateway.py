@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import selectors
 import signal
 import subprocess
 import time
@@ -38,7 +39,9 @@ from typing import Any, Literal, Protocol
 PathLike = str | os.PathLike[str]
 Timeout = float | None | Literal["default"]  # None: no limit; "default": the gateway default
 
-_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+# The lookbehind keeps a long run of digits from being rescanned from every position.
+_VERSION = re.compile(r"(?<!\d)(\d+)\.(\d+)\.(\d+)")
+VERSION_OUTPUT_CAP = 64 * 1024  # bytes read per stream of a ``--version`` probe
 _TERM_GRACE = 2.0  # how long a group gets to exit after SIGTERM
 _KILL_WAIT = 2.0  # how long to wait for the pipes after SIGKILL (a member may have escaped)
 
@@ -84,10 +87,11 @@ class Result:
     json: Any = None
     json_error: str | None = None
     timed_out: bool = False
+    overflow: bool = False  # a stream passed ``max_output``: the program was stopped
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and not self.timed_out
+        return self.returncode == 0 and not self.timed_out and not self.overflow
 
 
 def parse_version(text: str) -> tuple[int, int, int] | None:
@@ -183,8 +187,13 @@ class Gateway:
         cwd: PathLike | None = None,
         timeout: Timeout = "default",
         env: Mapping[str, str] | None = None,
+        max_output: int | None = None,
     ) -> Result:
         """Run ``argv`` without a shell. ``stdin`` is closed (not inherited) when None.
+
+        With ``max_output`` each output stream is read incrementally and at most that many bytes
+        are kept: a stream that passes it stops the whole process group (``Result.overflow``).
+        It needs ``stdin=None``.
 
         Everything is validated before a process starts (``GatewayError``); a refusal by the
         operating system is a ``SpawnError``. Once started, the whole process group is stopped
@@ -192,6 +201,8 @@ class Gateway:
         in ``on_spawn``).
         """
         tokens = self._validate(argv, stdin, cwd, env)
+        if max_output is not None and (stdin is not None or max_output < 1):
+            raise GatewayError("max_output needs a positive size and no stdin")
         limit = self._timeout(timeout)
         child_env = dict(self.env if env is None else env)
         data = stdin.encode("utf-8", "surrogateescape") if stdin is not None else None
@@ -209,18 +220,65 @@ class Gateway:
             raise SpawnError(f"cannot start {tokens[0]!r}: {exc}") from exc
         # start_new_session makes the child its own group leader: pgid == pid.
         timed_out = False
+        overflow = False
         try:
             if self._on_spawn is not None:
                 self._on_spawn(proc.pid)
-            try:
-                out, err = proc.communicate(data, timeout=limit)
-            except subprocess.TimeoutExpired:
-                timed_out = True
-                out, err = self._stop_group(proc)
+            if max_output is not None:
+                out, err, timed_out, overflow = self._read_bounded(proc, limit, max_output)
+            else:
+                try:
+                    out, err = proc.communicate(data, timeout=limit)
+                except subprocess.TimeoutExpired:
+                    timed_out = True
+                    out, err = self._stop_group(proc)
         except BaseException:
             self._stop_group(proc)
             raise
-        return self._result(tokens, proc.returncode, out, err, timed_out)
+        return self._result(tokens, proc.returncode, out, err, timed_out, overflow)
+
+    def _read_bounded(
+        self, proc: subprocess.Popen[bytes], limit: float | None, cap: int
+    ) -> tuple[bytes, bytes, bool, bool]:
+        """Read both pipes in chunks, keeping at most ``cap`` bytes of each.
+
+        Returns ``(stdout, stderr, timed_out, overflow)``; on a timeout or an overflow the process
+        group is stopped and reaped.
+        """
+        deadline = None if limit is None else time.monotonic() + limit
+        streams = {"out": bytearray(), "err": bytearray()}
+        sel = selectors.DefaultSelector()
+        assert proc.stdout is not None and proc.stderr is not None
+        sel.register(proc.stdout, selectors.EVENT_READ, "out")
+        sel.register(proc.stderr, selectors.EVENT_READ, "err")
+        timed_out = overflow = False
+        try:
+            while sel.get_map() and not (timed_out or overflow):
+                wait = None if deadline is None else deadline - time.monotonic()
+                if wait is not None and wait <= 0:
+                    timed_out = True
+                    break
+                for key, _ in sel.select(wait):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        sel.unregister(key.fileobj)
+                        continue
+                    buf = streams[key.data]
+                    room = cap - len(buf)
+                    buf += chunk[:room]
+                    if len(chunk) > room:
+                        overflow = True
+                        break
+                if not sel.get_map() and not (timed_out or overflow):
+                    try:
+                        proc.wait(timeout=None if deadline is None else deadline - time.monotonic())
+                    except (subprocess.TimeoutExpired, ValueError):
+                        timed_out = True
+        finally:
+            sel.close()
+        if timed_out or overflow:
+            self._stop_group(proc)
+        return bytes(streams["out"]), bytes(streams["err"]), timed_out, overflow
 
     def _timeout(self, timeout: Timeout) -> float | None:
         limit = self.default_timeout if timeout == "default" else timeout
@@ -297,7 +355,12 @@ class Gateway:
 
     @staticmethod
     def _result(
-        argv: tuple[str, ...], code: int, out: bytes, err: bytes, timed_out: bool
+        argv: tuple[str, ...],
+        code: int,
+        out: bytes,
+        err: bytes,
+        timed_out: bool,
+        overflow: bool = False,
     ) -> Result:
         stdout, stderr = _decode(out), _decode(err)
         doc: Any = None
@@ -307,11 +370,13 @@ class Gateway:
                 doc = json.loads(stdout)
             except ValueError as exc:
                 problem = str(exc)
-        return Result(argv, code, stdout, stderr, doc, problem, timed_out)
+            except RecursionError:
+                problem = "JSON nested too deeply"
+        return Result(argv, code, stdout, stderr, doc, problem, timed_out, overflow)
 
     def version(self, tool: str) -> tuple[int, int, int] | None:
         """``<tool> --version`` parsed to a triple, or None when it does not print one."""
-        result = self.run([tool, "--version"], timeout=15.0)
+        result = self.run([tool, "--version"], timeout=15.0, max_output=VERSION_OUTPUT_CAP)
         return parse_version(result.stdout) if result.ok else None
 
 
@@ -332,7 +397,9 @@ class _Tool:
         return self.gateway.run([self.prog, *args], stdin=stdin, cwd=cwd, timeout=timeout)
 
     def version(self) -> Result:
-        return self._run(["--version"], timeout=15.0)
+        return self.gateway.run(
+            [self.prog, "--version"], timeout=15.0, max_output=VERSION_OUTPUT_CAP
+        )
 
 
 class Forgectl(_Tool):

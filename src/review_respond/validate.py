@@ -14,24 +14,32 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
 from .config import Config, ConfigError, ConfigWarning, load_config
-from .deps import ALWAYS_REQUIRED, DEPENDENCIES, DepStatus, probe
+from .deps import ALWAYS_REQUIRED, DEPENDENCIES, DepStatus, probe, safe_path
 from .errors import EXIT_FAILED, EXIT_OK, CliError
 from .gateway import Gateway
 from .output import Context, Outcome, sanitize_line
 from .store import open_state_dir, state_dir_path
 
 # What a child program may see of this process's environment (the gateway builds nothing else).
-_CHILD_ENV: Final = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ")
+_CHILD_ENV: Final = (
+    "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TZ",
+    "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR",
+)  # fmt: skip
 
 
-def child_env(environ: Mapping[str, str]) -> dict[str, str]:
-    return {k: v for k, v in environ.items() if k in _CHILD_ENV or k.startswith("XDG_")}
+def child_env(environ: Mapping[str, str], token_envs: Collection[str] = ()) -> dict[str, str]:
+    """The allow-listed variables, never a configured ``token_env`` and a PATH of absolute
+    directories only (an empty or relative entry would resolve against the working directory)."""
+    env = {k: v for k, v in environ.items() if k in _CHILD_ENV and k not in token_envs}
+    if "PATH" in env:
+        env["PATH"] = safe_path(env["PATH"])
+    return env
 
 
 @dataclass
@@ -68,12 +76,19 @@ def _check_state() -> _Check:
     """The state directory, read-only: a missing one is fine (the first command creates it)."""
     check = _Check("state")
     path = state_dir_path()
-    if not os.path.lexists(path):
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return check
+    except OSError as exc:  # EACCES and the rest: unknown is not absent
+        check.fail("state_unsafe", f"cannot examine the state path {path} ({exc.strerror})")
         return check
     try:
         open_state_dir(path, create=False).close()
     except CliError as exc:
         check.fail(exc.code, exc.message)
+    except OSError as exc:
+        check.fail("state_unsafe", f"cannot open the state path {path} ({exc.strerror})")
     return check
 
 
@@ -89,10 +104,11 @@ def _check_dependencies(gateway: Gateway, config: Config | None) -> tuple[_Check
         )
         status = probe(gateway, dep, required=required)
         statuses.append(status)
-        if not status.ok and status.code is not None:
+        if not status.ok:
+            code = status.code or "internal"
             # a missing program outranks one that is too old
-            if check.code is None or status.code == "tool_missing":
-                check.code = status.code
+            if check.code is None or code == "tool_missing":
+                check.code = code
             check.ok = False
             check.lines.append(status.message)
     return check, statuses
@@ -104,13 +120,15 @@ def _check_credentials(config: Config | None, environ: Mapping[str, str]) -> _Ch
     if config is None:
         check.skipped = True
         return check
-    path = environ.get("PATH")
+    path = safe_path(environ.get("PATH"))
     for host, credential in config.hosts.items():
         if credential.token_env is not None and not environ.get(credential.token_env):
             check.fail("token_env_unset", f"{host}: {credential.token_env} is not set or is empty")
         if credential.token_command is not None:
             program = credential.token_command[0]
-            if shutil.which(program, path=path) is None:
+            # a name with a slash must be absolute: a relative one would resolve against the cwd
+            relative = "/" in program and not os.path.isabs(program)
+            if relative or shutil.which(program, path=path) is None:
                 check.fail(
                     "token_command_unresolvable",
                     f"{host}: token_command {program} does not resolve to an executable",
@@ -119,10 +137,12 @@ def _check_credentials(config: Config | None, environ: Mapping[str, str]) -> _Ch
 
 
 def run_checks(
-    ctx: Context, gateway: Gateway, environ: Mapping[str, str]
+    ctx: Context, environ: Mapping[str, str]
 ) -> tuple[list[_Check], list[DepStatus], list[str]]:
     config_check, config, config_warnings = _check_config(ctx.config)
     state_check = _check_state()
+    token_envs = {c.token_env for c in config.hosts.values() if c.token_env} if config else set()
+    gateway = Gateway(child_env(environ, token_envs))
     dep_check, statuses = _check_dependencies(gateway, config)
     credentials = _check_credentials(config, environ)
     warnings = [w.code for w in config_warnings]
@@ -138,10 +158,11 @@ def _human(checks: list[_Check], statuses: list[DepStatus], warnings: list[str])
             state = "ok" if check.ok else f"FAIL {check.code}"
             out.append(f"{check.name}: {state}")
             for s in statuses:
+                if not s.ok:  # the message names the program, the problem and the install command
+                    out.append(f"  {s.message}")
+                    continue
                 found = s.found if s.found is not None else "not found"
-                note = "" if s.ok else f" ({s.code})"
-                out.append(f"  {s.tool} {found} (minimum {s.minimum}){note}")
-            out.extend(f"  {line}" for line in check.lines)
+                out.append(f"  {s.tool} {found} (minimum {s.minimum})")
             continue
         if check.skipped:
             out.append(f"{check.name}: skipped")
@@ -157,8 +178,7 @@ def _human(checks: list[_Check], statuses: list[DepStatus], warnings: list[str])
 def handle(ctx: Context, _args: argparse.Namespace) -> Outcome:
     """Run every check; exit 12 with the document when any fails, 0 otherwise."""
     environ = dict(os.environ)
-    gateway = Gateway(child_env(environ))
-    checks, statuses, warnings = run_checks(ctx, gateway, environ)
+    checks, statuses, warnings = run_checks(ctx, environ)
     ok = all(check.ok for check in checks)
     payload: dict[str, Any] = {
         "ok": ok,

@@ -221,11 +221,182 @@ def test_a_tool_that_fails_to_run_counts_as_missing(
 def test_hostile_version_output_is_bounded(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    stub(world, "wtctl", "printf 'wtctl 99999999999999999999999.1.1 \\033[31m\\n'")
+    digits = "9" * 5000
+    stub(world, "wtctl", f"printf 'wtctl {digits}.1.1 \\033[31m\\n'")
     code, doc, out, _ = run(capsys)
-    assert len(dep_of(doc, "wtctl")["found"] or "") <= 64
+    assert code == 0 and dep_of(doc, "wtctl")["found"] is None
+    assert doc["warnings"] == ["wtctl_version_unreadable"]
     assert "\x1b" not in out
-    assert code in (0, 12)
+
+
+def test_a_version_after_a_long_banner_is_found(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub(world, "wtctl", "head -c 3000 /dev/zero | tr '\\0' 'x'; echo; echo 'wtctl 0.31.0'")
+    code, doc, _, _ = run(capsys)
+    assert code == 0 and dep_of(doc, "wtctl")["found"] == "0.31.0"
+    assert doc["warnings"] == []
+
+
+def test_flooding_version_output_is_cut_off_and_unreadable(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub(world, "wtctl", "head -c 3000000 /dev/zero | tr '\\0' 'x'; echo 'wtctl 0.31.0'")
+    code, doc, _, _ = run(capsys)
+    assert code == 0
+    assert dep_of(doc, "wtctl")["found"] is None
+    assert doc["warnings"] == ["wtctl_version_unreadable"]
+
+
+def test_deeply_nested_json_version_output_is_unreadable_not_an_internal_error(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub(world, "wtctl", "head -c 40000 /dev/zero | tr '\\0' '['; echo")
+    code, doc, _, _ = run(capsys)
+    assert code == 0 and doc["warnings"] == ["wtctl_version_unreadable"]
+
+
+def test_version_is_read_from_stderr_when_stdout_has_none(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub(world, "wtctl", "echo 'no version here'; echo 'wtctl 0.31.0' >&2")
+    code, doc, _, _ = run(capsys)
+    assert code == 0 and dep_of(doc, "wtctl")["found"] == "0.31.0"
+    assert doc["warnings"] == []
+
+
+def test_optional_jobsctl_on_the_path_that_fails_is_a_warning(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_version(world, "jobsctl", "jobsctl 9.9.9", code=3)
+    code, doc, _, _ = run(capsys)
+    assert code == 0 and dep_of(doc, "jobsctl")["ok"] is True
+    assert doc["warnings"] == ["jobsctl_version_unreadable"]
+    schemas.validate("review-respond/cli/validate.json", doc)
+
+
+def test_missing_after_too_old_still_gives_tool_missing(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_version(world, "forgectl", "forgectl 0.1.0")  # earlier in the order, too old
+    (world.fakes.bin_dir / "wtctl").unlink()  # later, missing
+    _, doc, _, _ = run(capsys)
+    assert check_of(doc, "dependencies")["code"] == "tool_missing"
+
+
+def test_claude_session_too_old_fails_even_when_the_sandbox_is_not_required(
+    world: World, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stub_version(world, "claude-session", "claude-session 0.1.0")
+    path = config(tmp_path, "sandbox: preferred\n")
+    code, doc, _, _ = run(capsys, "--config", str(path))
+    assert code == 12 and check_of(doc, "dependencies")["code"] == "tool_too_old"
+
+
+CS = "git+https://github.com/agent-workflow-kit/claude-session"
+
+
+def test_claude_session_install_hint_copies_links(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (world.fakes.bin_dir / "claude-session").unlink()
+    assert main(["validate"]) == 12
+    assert f"uv tool install --link-mode=copy {CS}" in capsys.readouterr().out
+
+
+def test_too_old_hint_reinstalls(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+    stub_version(world, "wtctl", "wtctl 0.1.0")
+    stub_version(world, "claude-session", "claude-session 0.1.0")
+    assert main(["validate"]) == 12
+    out = capsys.readouterr().out
+    assert "uv tool install --reinstall git+https://github.com/agent-workflow-kit/wtctl" in out
+    assert f"uv tool install --reinstall --link-mode=copy {CS}" in out
+
+
+def test_each_dependency_problem_is_printed_once(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (world.fakes.bin_dir / "wtctl").unlink()
+    stub_version(world, "pr-comment", "pr-comment 0.1.0")
+    assert main(["validate"]) == 12
+    out = capsys.readouterr().out
+    assert out.count("agent-workflow-kit/wtctl") == 1
+    assert out.count("agent-workflow-kit/pr-comment") == 1
+    assert "dependencies: FAIL tool_missing" in out
+    assert "  forgectl 9.9.9" not in out and "forgectl" in out  # healthy ones keep their line
+
+
+def test_child_env_is_an_explicit_list(world: World) -> None:
+    from review_respond.validate import child_env
+
+    environ = {
+        "PATH": "/usr/bin",
+        "XDG_CONFIG_HOME": "/c",
+        "XDG_X": "canary",
+        "XDG_STATE_HOME": "/s",
+        "HOME": "/h",
+        "SECRET_X": "canary",
+    }
+    assert child_env(environ) == {
+        "PATH": "/usr/bin", "XDG_CONFIG_HOME": "/c", "XDG_STATE_HOME": "/s", "HOME": "/h",
+    }  # fmt: skip
+    assert "HOME" not in child_env(environ, {"HOME"})
+
+
+def test_a_token_env_never_reaches_a_child(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    dump = tmp_path / "env.txt"
+    stub(world, "wtctl", f"env > {dump}; echo 'wtctl 0.31.0'")
+    monkeypatch.setenv("XDG_RR_TOKEN", SECRET)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    path = hosts_config(tmp_path, "  github.com:\n    token_env: XDG_RR_TOKEN\n")
+    code, _, _, _ = run(capsys, "--config", str(path))
+    assert code == 0
+    seen = dump.read_text()
+    assert SECRET not in seen and "XDG_RR_TOKEN" not in seen
+    assert "XDG_CACHE_HOME=" in seen
+
+
+def planted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str) -> Path:
+    """An executable named ``name`` in a directory that is the working directory."""
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    marker = tmp_path / "planted-ran"
+    script = cwd / name
+    script.write_text(f"#!/bin/sh\ntouch {marker}\necho '{name} 99.0.0'\n")
+    script.chmod(0o755)
+    monkeypatch.chdir(cwd)
+    return marker
+
+
+def test_empty_and_relative_path_entries_are_ignored_for_dependencies(
+    world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    (world.fakes.bin_dir / "forgectl").unlink()
+    marker = planted(tmp_path, monkeypatch, "forgectl")
+    bin_dir = str(world.fakes.bin_dir)
+    monkeypatch.setenv("PATH", f"::.:{bin_dir}:rel/dir:/nonexistent")
+    code, doc, _, _ = run(capsys)
+    assert code == 12 and check_of(doc, "dependencies")["code"] == "tool_missing"
+    assert dep_of(doc, "forgectl")["found"] is None
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("command", ["rr-planted", "./rr-planted", "rr-planted/../rr-planted"])
+def test_token_command_never_resolves_against_the_working_directory(
+    command: str, world: World, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:  # fmt: skip
+    marker = planted(tmp_path, monkeypatch, "rr-planted")
+    monkeypatch.setenv("PATH", f"{world.fakes.bin_dir}::.")
+    path = hosts_config(tmp_path, f"  github.com:\n    token_command: ['{command}']\n")
+    code, doc, _, _ = run(capsys, "--config", str(path))
+    assert code == 12
+    assert check_of(doc, "credentials")["code"] == "token_command_unresolvable"
+    assert not marker.exists()
 
 
 # ---- require() for the other commands ------------------------------------------------------
@@ -419,6 +590,9 @@ def test_every_host_is_checked_and_the_first_failure_names_the_code(
         "  b.example:\n    token_env: RR_BAD\n"
         "  c.example:\n    token_command: [rr-no-such-helper]\n",
     )
+    assert main(["validate", "--json", "--config", str(path)]) == 12
+    out = capsys.readouterr().out
+    assert check_of(json.loads(out), "credentials")["code"] == "token_env_unset"  # host order
     assert main(["validate", "--config", str(path)]) == 12
     text = capsys.readouterr().out
     assert "b.example" in text and "c.example" in text and "RR_BAD" in text
@@ -500,3 +674,21 @@ def test_state_file_instead_of_directory_fails(
     path.write_text("x")
     code, doc, _, _ = run(capsys)
     assert code == 12 and check_of(doc, "state")["code"] == "state_unsafe"
+
+
+def test_unreadable_state_parent_is_a_failed_check_not_absent(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads everything")
+    path = state_path(world)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.chmod(0)
+    try:
+        code, doc, _, err = run(capsys)
+    finally:
+        path.parent.chmod(0o700)
+    assert code == 12 and check_of(doc, "state") == {
+        "name": "state", "ok": False, "code": "state_unsafe",
+    }  # fmt: skip
+    assert err == ""
