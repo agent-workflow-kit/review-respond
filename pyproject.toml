@@ -1,6 +1,6 @@
 [project]
 name = "review-respond"
-version = "0.10.0"
+version = "0.11.0"
 description = "Respond to review comments on your own pull requests, with fixes and replies you confirm."
 readme = "README.md"
 requires-python = ">=3.12"
