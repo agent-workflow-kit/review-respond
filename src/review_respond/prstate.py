@@ -18,7 +18,7 @@ from .config import Config
 from .detect import StoredPr, get_pr
 from .errors import CliError
 from .handled import CommentRecord, parse_instant, read_records, stored_body
-from .output import sanitize_line
+from .prompt import sanitize
 from .store import Store
 
 MAX_BODY_CHARS: Final = 65536  # schemas/defs.json comment_record.body
@@ -106,15 +106,7 @@ def _untrusted(text: str | None) -> str | None:
     characters, never inside a ``<U+XXXX>`` marker."""
     if text is None:
         return None
-    out: list[str] = []
-    size = 0
-    for ch in text:
-        piece = ch if ch == "\n" else sanitize_line(ch)
-        if size + len(piece) > MAX_UNTRUSTED_CHARS:
-            break
-        out.append(piece)
-        size += len(piece)
-    return "".join(out)
+    return sanitize(text, newlines=True, max_chars=MAX_UNTRUSTED_CHARS)
 
 
 def round_object(conn: sqlite3.Connection, row: rounds.RoundRow) -> dict[str, Any]:
@@ -169,7 +161,7 @@ def comment_object(store: Store, record: CommentRecord) -> dict[str, Any]:
     if record.body_file is None:
         raise _tampered("a comment without its stored text")
     body = stored_body(store, record.pr, record.id)
-    path = None if record.path is None else sanitize_line(record.path)[:MAX_PATH_CHARS]
+    path = None if record.path is None else sanitize(record.path, max_chars=MAX_PATH_CHARS)
     return {
         "id": record.id,
         "author_id": record.author_id,

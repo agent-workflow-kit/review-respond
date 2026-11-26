@@ -31,7 +31,8 @@ from typing import Final
 
 from .errors import CliError
 from .gateway import Clock, SystemClock
-from .output import PROG, sanitize_line, warn
+from .output import PROG, warn
+from .prompt import sanitize
 from .store import EventCallback, StateDir
 
 AUDIT_NAME: Final = "audit.jsonl"
@@ -160,15 +161,7 @@ def _free_key(value: object) -> object:
 def clean_text(text: str, limit: int) -> str:
     """The text through the one sanitizer (control, format and separator characters become
     ``<U+XXXX>`` markers), cut to at most ``limit`` characters without splitting a marker."""
-    out: list[str] = []
-    size = 0
-    for ch in text:
-        token = sanitize_line(ch)
-        if size + len(token) > limit:
-            break
-        out.append(token)
-        size += len(token)
-    return "".join(out)
+    return sanitize(text, max_chars=limit)
 
 
 def format_ts(moment: datetime) -> str:

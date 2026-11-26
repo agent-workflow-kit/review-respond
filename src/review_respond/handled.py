@@ -18,7 +18,7 @@ Seams owned by later issues:
 - TODO(#18), TODO(#23): the round code calls ``deliver`` (the job selecting comments into a
   prompt), ``mark_handled`` (the round becoming pending), ``release`` (failed, canceled,
   escalated) and ``redo`` (``reject --redo``).
-- TODO(#20): the one sanitizer; ``body`` uses the line sanitizer of ``output.py`` meanwhile.
+- ``body`` goes through the one sanitizer (``prompt.sanitize``).
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from typing import Any, Final
 
 from .detect import CommentRead, ReadComment, StoredPr, absent_comment_ids
 from .errors import CliError
-from .output import sanitize_line
+from .prompt import sanitize
 from .store import Lease, StateDir, Store, cas_update
 
 MAX_STORED_BODY_BYTES: Final = 64 * 1024
@@ -181,7 +181,7 @@ def stored_body(store: Store, pr: str, comment_id: str) -> StoredBody:
     if record.body_file is None or stored_pr is None:
         raise CliError("internal", "no stored text for this comment")
     raw = stored.get_file(stored_pr[0], record.body_file)
-    text = "\n".join(sanitize_line(part) for part in raw.decode("utf-8", "replace").split("\n"))
+    text = sanitize(raw.decode("utf-8", "replace"), newlines=True)
     return StoredBody(text, record.body_bytes > len(raw), record.body_bytes)
 
 
