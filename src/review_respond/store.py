@@ -418,7 +418,13 @@ class StateDir:
         try:
             if self._exists(dfd, digest):
                 self._read(dfd, owner, digest)  # a differing file is state_unsafe
-                return digest
+                # Refresh the mtime so a reused orphan is not pruned (grace period) before the
+                # caller's rows reference it. Never follows a symlink.
+                try:
+                    os.utime(digest, dir_fd=dfd, follow_symlinks=False)
+                    return digest
+                except FileNotFoundError:
+                    pass  # pruned meanwhile: write it again below
             fd = os.open(
                 tmp,
                 os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,

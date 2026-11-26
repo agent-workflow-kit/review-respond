@@ -1157,3 +1157,17 @@ def test_deliver_skips_a_comment_edited_since_the_caller_saw_it(env: Env) -> Non
 def test_deliver_without_expected_hashes_has_nothing_stale(env: Env) -> None:
     env.read(rc())
     assert env.hs.deliver(env.ref, [CID], round_id="r-1").stale == []
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError("disk gone"), CliError("state_unsafe", "owner dir altered")]
+)
+def test_a_failing_cleanup_does_not_fail_the_recorded_read(
+    env: Env, store: Store, monkeypatch: pytest.MonkeyPatch, failure: Exception
+) -> None:
+    def boom(*args: Any, **kwargs: Any) -> None:
+        raise failure
+
+    monkeypatch.setattr(HandledSet, "_prune", boom)
+    env.read(rc())
+    assert len(table_rows(store)) == 1

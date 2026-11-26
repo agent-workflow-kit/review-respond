@@ -233,7 +233,10 @@ class HandledSet:
                     self._apply(conn, pr, read, files)
             except _Retry:
                 continue
-            self._prune(stored, pr)
+            # The rows are already committed: a cleanup failure (I/O, or an owner directory that
+            # turned unsafe) must not fail the recorded read. Orphans are pruned on a later read.
+            with contextlib.suppress(OSError, CliError):
+                self._prune(stored, pr)
             return
         raise CliError("internal", "the comment rows kept changing while they were recorded")
 

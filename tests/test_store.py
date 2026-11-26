@@ -1048,3 +1048,14 @@ def test_directories_are_fsynced_after_creation_and_rename(
     monkeypatch.setattr(store_mod.os, "fsync", spy)
     state.put_file("rp-a", b"data")
     assert len(dirs) >= 3  # state dir (files/ created), files/ (owner created), owner (rename)
+
+
+def test_put_refreshes_the_mtime_of_a_reused_file_so_pruning_keeps_it(sdir: Path) -> None:
+    state = open_state_dir(sdir)
+    digest = state.put_file("rp-a", b"orphan")
+    path = sdir / "files" / "rp-a" / digest
+    old = time.time() - 10_000
+    os.utime(path, (old, old))
+    assert state.put_file("rp-a", b"orphan") == digest
+    assert state.prune_owner_files("rp-a", set(), min_age=3600) == 0
+    assert path.exists()
