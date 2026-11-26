@@ -230,7 +230,7 @@ review-respond stores, per comment id (the full forgectl id, for example `gh:rc:
 | `handled` (by round R) | its thread is resolved | `handled` (no change: no `handled_reason` is added, so `reject --redo` of R still returns it) |
 | any but `deleted` | absent from a read with `complete: true` | `deleted` (terminal) |
 
-Notes. A comment cut from a prompt by the budget is never `delivered`. A `delivered` comment that is edited, resolved or deleted during its round keeps `delivered`; the round's end moves it, and the next read applies the other rows. `installed_at` is the local time at the start of the first command that read comments (any `check`, or `respond`); a comment first stored with a host `created_at` before it is `seen` (installing review-respond never answers old comments), any later comment is `unhandled`; `list` shows the `seen` count. A host clock that is off by seconds can classify a comment posted in those seconds either way; that is accepted. A thread that someone un-resolves after review-respond recorded it `resolved` stays `handled`, and a comment edited while its thread was resolved becomes `unhandled` (`edited: true`) at the first read that finds the thread unresolved, because `handled_sha256` was fixed when the thread was resolved; review-respond answers new and edited comments only, and never un-resolves a thread. A changed `updated_at` with an equal hash does nothing. A deleted comment drops out of prompts and is never retried; a pending reply to it is skipped (Replies). A thread resolved by someone else removes its comments from prompts and a pending reply to it is skipped. **Settle timestamp:** `settle_ts(c)` is the local time review-respond first stored the comment's current body hash (an edit restarts it), so host clock skew does not matter. A comment edited while its round is running or its record is open keeps `delivered` or `handled`; the edit is acted on after the record ends (the `handled` to `unhandled` row), and `confirm` skips its pending reply (Replies).
+Notes. A comment cut from a prompt by the budget is never `delivered`. A `delivered` comment that is edited, resolved or deleted during its round keeps `delivered`; the round's end moves it, and the next read applies the other rows. `installed_at` is the local time at the start of the first command that read comments (any `check`, or `respond`); a comment first stored with a host `created_at` before it is `seen` (installing review-respond never answers old comments), any later comment is `unhandled`; `list` shows the `seen` count. A host clock that is off by seconds can classify a comment posted in those seconds either way; that is accepted. A thread that someone un-resolves after review-respond recorded it `resolved` stays `handled`, and a comment edited while its thread was resolved becomes `unhandled` (`edited: true`) at the first read that finds the thread unresolved, because `handled_sha256` was fixed when the thread was resolved; review-respond answers new and edited comments only, and never un-resolves a thread. A changed `updated_at` with an equal hash does nothing. A deleted comment drops out of prompts and is never retried; a pending reply to it is skipped (Replies). A thread resolved by someone else removes its comments from prompts and a pending reply to it is skipped. **Settle timestamp:** `settle_ts(c)` is the local time review-respond first stored the comment's current body hash (an edit restarts it), so host clock skew does not matter. The one-hour ceiling of the due rule counts from `first_seen_at(c)`, the local time the comment was first stored, which an edit never moves, so edits cannot hold a PR in settling beyond an hour; a comment first stored in the future (the clock went backwards) is never old. A comment edited while its round is running or its record is open keeps `delivered` or `handled`; the edit is acted on after the record ends (the `handled` to `unhandled` row), and `confirm` skips its pending reply (Replies).
 
 ### Settle and round start
 
@@ -247,7 +247,7 @@ due(pr):
   and resolve_base(pr) is an agent or a fresh-session opt-in (repos.<id>.respond_fresh)   # else set block no_agent
   and not agent_busy(pr)
   and (now - max(settle_ts(c) for c in eligible_unhandled(pr)) >= settle
-       or now - min(settle_ts(c) for c in eligible_unhandled(pr)) >= 1h)      # the second bound is a constant: edits cannot hold a PR in settling
+       or now - min(first_seen_at(c) for c in eligible_unhandled(pr)) >= 1h)  # the second bound is a constant and counts from first_seen_at: edits cannot hold a PR in settling
 ```
 
 `agent_busy(pr)`: the base agent or the PR's base fork has status `launching`, `live` or `tearing_down`, or a promotion pending.
@@ -265,10 +265,18 @@ due(pr):
 | `stopped` | a round ended `canceled` with `cancel_reason: stopped` | a human `respond` |
 | `round_limit` | a due check finds the limit reached | a human `respond --force`, or `max_rounds` raised above the count |
 | `no_agent` | the due rule finds no agent and no fresh-session opt-in | `check` finds an agent again (`resolve_base`), or a human `respond` |
-| `hook_vetoed` | a `pre-round` hook vetoed | a human `respond`, or the set of eligible unhandled comment ids differs from `comment_set_sha256` (a new or edited comment) |
+| `hook_vetoed` | a `pre-round` hook vetoed | a human `respond`, or the set of eligible unhandled comment ids differs from `comment_set_sha256` (a new comment), or an eligible unhandled comment was edited after the block was set (its `settle_ts` is newer than `set_at`) |
 | `hook_escalated` | a `pre-round` hook escalated | a human `respond`; the hook runs again unless `--override-escalation` is given |
 
 A failed round sets block `failed`; a human `respond` starts a new round. There is no automatic retry.
+
+Notes on the stored block and the due rule:
+
+- A PR whose comment records are not current is never due and has no block set or cleared. The records are current from the end of the transaction that applies a complete comment read until the next complete read is stored; the state shown by `list` and `show` is still derived from the records as they are.
+- A fork PR derives `idle`: the documented waiting reasons have none for it and it never gets a round in 0.x.
+- `block.set_at` is stored as epoch seconds; `list` and `show` print it as RFC 3339 like every other timestamp.
+- A human `respond` cannot clear `round_limit`: only `respond --force` or a raised `max_rounds` does.
+- An edit is detected by time: a comment that existed when the block was set has a `settle_ts` at or before `set_at`, and an edit gives it a newer one, which clears `hook_vetoed`.
 
 **PR state** (derived, the first matching row wins; `list` and `show` print it):
 

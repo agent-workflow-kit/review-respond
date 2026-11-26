@@ -3,8 +3,10 @@
 
 ``decide`` and ``derive_state`` are pure functions of ``DueInputs``, a snapshot that ``load_inputs``
 reads from the state database. The settle clock only ever sees ``Candidate.settle_ts``, the local
-time review-respond first stored a comment's current body hash (``comments.body_seen_at``); no
-forge timestamp can reach it.
+time review-respond first stored a comment's current body hash (``comments.body_seen_at``, an edit
+restarts it), and ``Candidate.first_seen_at``, the local time the comment was first stored
+(``comments.first_seen_at``, an edit never moves it; the one-hour ceiling counts from it, so edits
+cannot hold a PR in settling); no forge timestamp can reach either.
 
 ``prs.block`` is written only here, under a lease and through ``cas_update``: ``set_block`` (only
 when the PR has no block) and ``clear_block`` (only by the causes the interface documents for the
@@ -24,7 +26,9 @@ Seams owned by later issues (``RoundFacts`` carries them, all defaulting to "non
 - TODO(#19): ``agent_busy`` and the writer of ``prs.base_agent`` (``resolve_base``).
 - TODO(#37): ``post-attention`` ``round_limit`` fires once when ``apply`` reports ``new_block``.
 - TODO(#17): ``check`` calls ``load_inputs`` and ``apply`` per PR under the PR lease, and
-  ``list`` and ``show`` print ``derive_state``.
+  ``list`` and ``show`` print ``derive_state``. ``Block.set_at`` is stored as epoch seconds while
+  schemas/defs.json types ``block.set_at`` as ``ts`` (RFC 3339): ``list`` and ``show`` must print
+  it through ``audit.format_ts``.
 - TODO(#25): ``respond`` calls ``clear_block`` with ``human_respond`` or ``human_force``.
 """
 
@@ -41,7 +45,7 @@ from typing import Final
 from .config import Config
 from .durations import duration_ms
 from .errors import CliError
-from .store import Lease, cas_update
+from .store import Lease, cas_update, pass_lease_key, pr_digest, pr_lease_key
 
 BLOCK_REASONS: Final = (
     "escalated",
@@ -78,11 +82,17 @@ class Block:
 
 @dataclass(frozen=True)
 class Candidate:
-    """An eligible unhandled comment: its id and its settle timestamp (local first-stored time of
-    its current body hash, epoch seconds)."""
+    """An eligible unhandled comment: its id, its settle timestamp (local first-stored time of its
+    current body hash, epoch seconds) and the local time the comment was first stored. Without
+    ``first_seen_at`` the comment counts as never edited (first seen at ``settle_ts``)."""
 
     id: str
     settle_ts: float
+    first_seen_at: float | None = None
+
+    @property
+    def first_seen(self) -> float:
+        return self.settle_ts if self.first_seen_at is None else self.first_seen_at
 
 
 @dataclass(frozen=True)
@@ -149,14 +159,15 @@ def _check_host_state(state: str) -> bool:
 
 
 def _bounds_passed(i: DueInputs) -> bool:
-    """Either settle bound has passed. The first: the newest eligible comment is at least
-    ``settle`` old. The second, a constant: the oldest is at least an hour old. A negative settle
+    """Either settle bound has passed. The first: the newest eligible comment (by ``settle_ts``) is
+    at least ``settle`` old. The second, a constant: the first-seen time of the oldest is at least
+    an hour ago; an edit restarts ``settle_ts`` but never ``first_seen_at``. A negative settle
     counts as 0; a comment first stored in the future (the clock went backwards) is never old."""
     if math.isnan(i.settle_seconds):
         raise ValueError("settle is not a number")
     settle = max(0.0, i.settle_seconds)
     newest = max(c.settle_ts for c in i.eligible)
-    oldest = min(c.settle_ts for c in i.eligible)
+    oldest = min(c.first_seen for c in i.eligible)
     return i.now - newest >= settle or i.now - oldest >= SETTLE_CEILING_SECONDS
 
 
@@ -176,8 +187,10 @@ def decide(i: DueInputs) -> Decision:
     block = i.block
     clear: str | None = None
     if block is not None:
-        if block.reason == "hook_vetoed" and block.comment_set_sha256 != comment_set_sha256(
-            c.id for c in i.eligible
+        if block.reason == "hook_vetoed" and (
+            block.comment_set_sha256 != comment_set_sha256(c.id for c in i.eligible)
+            # an edit restarts settle_ts, so an edited comment is newer than the block
+            or any(c.settle_ts > block.set_at for c in i.eligible)
         ):
             clear = "comments_changed"
         elif block.reason == "round_limit" and i.facts.counted < i.max_rounds:
@@ -254,11 +267,18 @@ def get_block(conn: sqlite3.Connection, pr: str) -> Block | None:
     return None if row is None else _parse_block(row[0])
 
 
+def _require_lease(lease: Lease, pr: str) -> None:
+    """The block of a PR is written under that PR's lease or the pass lease, never another's."""
+    if lease.key not in (pass_lease_key(), pr_lease_key(pr_digest(pr))):
+        raise ValueError("the lease is not the pass lease or the lease of this PR")
+
+
 def set_block(lease: Lease, pr: str, reason: str, comment_ids: Iterable[str]) -> bool:
     """Store a block when the PR has none. False when it has one (an episode fires once and a
     block is never replaced) or is unknown. ``lease_lost`` and nothing written without the lease."""
     if reason not in BLOCK_REASONS:
         raise ValueError("reason is not a block reason")
+    _require_lease(lease, pr)
     with lease.transaction() as conn:
         row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
         if row is None or row[1] is not None:
@@ -279,6 +299,7 @@ def clear_block(lease: Lease, pr: str, cause: str, *, expect: str | None = None)
     that one. False when there is no block."""
     if cause not in _ALL_CAUSES:
         raise ValueError("cause is not a documented cause")
+    _require_lease(lease, pr)
     with lease.transaction() as conn:
         row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
         stored = None if row is None else _parse_block(row[1])
@@ -290,18 +311,29 @@ def clear_block(lease: Lease, pr: str, cause: str, *, expect: str | None = None)
 
 
 def apply(lease: Lease, pr: str, i: DueInputs) -> Applied:
-    """``decide`` plus its automatic block transitions, in one lease-checked transaction. When
-    the stored block is no longer the one ``i`` was built from, nothing is written and the PR is
-    reported as blocked (the caller reads again at the next pass)."""
+    """``decide`` plus its automatic block transitions, in one lease-checked transaction. Inside
+    it the facts the writes rest on are read again: when the stored block is no longer the one
+    ``i`` was built from the answer is ``block_changed``, when the records are no longer current
+    ``stale_records`` and when the eligible unhandled ids differ ``stale``; nothing is written in
+    any of these cases and the caller reads again at the next pass."""
+    _require_lease(lease, pr)
     decision = decide(i)
     with lease.transaction() as conn:
-        row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
-        if row is None or _parse_block(row[1]) != i.block:
-            return Applied(False, "blocked")
+        row = conn.execute(
+            "SELECT rev, block, records_current FROM prs WHERE pr = ?", (pr,)
+        ).fetchone()
+        if row is None:
+            raise CliError("internal", "the PR is not stored")
+        if not row[2]:
+            return Applied(False, "stale_records")
+        if _parse_block(row[1]) != i.block:
+            return Applied(False, "block_changed")
+        if [cid for cid, *_ in _eligible_rows(conn, pr)] != [c.id for c in i.eligible]:
+            return Applied(False, "stale")
         rev = row[0]
         if decision.clear is not None:
             if not cas_update(conn, "prs", "pr", pr, rev, {"block": None}):
-                return Applied(False, "blocked")
+                return Applied(False, "stale")
             rev += 1
         new_block: str | None = None
         if decision.set_block is not None:
@@ -313,12 +345,22 @@ def apply(lease: Lease, pr: str, i: DueInputs) -> Applied:
             if not cas_update(
                 conn, "prs", "pr", pr, rev, {"block": json.dumps(doc, separators=(",", ":"))}
             ):
-                return Applied(False, "blocked")
+                return Applied(False, "stale")
             new_block = decision.set_block
     return Applied(decision.due, decision.why, new_block, decision.clear)
 
 
 # ---- from the stored rows ------------------------------------------------------------------------
+
+
+def _eligible_rows(conn: sqlite3.Connection, pr: str) -> list[tuple[str, float, float]]:
+    """(id, settle_ts, first_seen_at) of the eligible unhandled comments, oldest settle first."""
+    rows = conn.execute(
+        "SELECT comment_id, body_seen_at, first_seen_at FROM comments"
+        " WHERE pr = ? AND state = 'unhandled' AND eligible = 1 ORDER BY body_seen_at, comment_id",
+        (pr,),
+    ).fetchall()
+    return [(r[0], r[1], r[2]) for r in rows]
 
 
 def load_inputs(
@@ -331,11 +373,6 @@ def load_inputs(
         raise CliError("internal", "the PR is not stored")
     repo, host_state, is_fork, base_agent, records_current = row
     settings = config.repo_settings(repo)
-    eligible = conn.execute(
-        "SELECT comment_id, body_seen_at FROM comments"
-        " WHERE pr = ? AND state = 'unhandled' AND eligible = 1 ORDER BY body_seen_at, comment_id",
-        (pr,),
-    ).fetchall()
     return DueInputs(
         host_state=host_state,
         is_fork=bool(is_fork),
@@ -346,6 +383,6 @@ def load_inputs(
         max_rounds=settings.max_rounds,
         settle_seconds=settle_seconds(settings.settle),
         now=now,
-        eligible=tuple(Candidate(cid, ts) for cid, ts in eligible),
+        eligible=tuple(Candidate(cid, ts, first) for cid, ts, first in _eligible_rows(conn, pr)),
         facts=facts,
     )

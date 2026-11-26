@@ -168,6 +168,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
                 'round_limit', 'no_agent', 'hook_vetoed', 'hook_escalated'), 0)
                 AND coalesce(json_type(block, '$.set_at') IN ('integer', 'real'), 0)
                 AND coalesce(json_type(block, '$.comment_set_sha256') = 'text', 0)
+                AND json_remove(block, '$.reason', '$.set_at', '$.comment_set_sha256') = '{}'
             ELSE 0 END)""",
         "ALTER TABLE prs ADD COLUMN base_agent TEXT",
         "ALTER TABLE prs ADD COLUMN records_current INTEGER NOT NULL DEFAULT 0"

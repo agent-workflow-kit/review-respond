@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -16,14 +17,23 @@ import pytest
 from review_respond import due
 from review_respond.config import Config
 from review_respond.detect import CommentRead, get_pr
-from review_respond.due import Candidate, Decision, DueInputs, RoundFacts
+from review_respond.due import Applied, Candidate, Decision, DueInputs, RoundFacts
 from review_respond.eligibility import ELIGIBLE, ineligible
 from review_respond.errors import CliError
 from review_respond.gateway import Gateway
 from review_respond.handled import HandledSet
-from review_respond.store import Lease, Store, cas_update, open_state_dir, pass_lease_key
+from review_respond.store import (
+    Lease,
+    Store,
+    cas_update,
+    open_state_dir,
+    pass_lease_key,
+    pr_digest,
+    pr_lease_key,
+)
 from tests.harness import builders
-from tests.test_detect import insert_pr
+from tests.harness.fakes import Fakes
+from tests.test_detect import insert_pr, make, script_comments
 from tests.test_handled import INSTALLED, rc
 
 NOW = 100_000.0
@@ -51,7 +61,7 @@ def inputs(**over: Any) -> DueInputs:
     return replace(base, **over)
 
 
-def block(reason: str, ids: tuple[str, ...] = ("gh:rc:c1",), at: float = 1.0) -> due.Block:
+def block(reason: str, ids: tuple[str, ...] = ("gh:rc:c1",), at: float = NOW) -> due.Block:
     return due.Block(reason, at, due.comment_set_sha256(ids))
 
 
@@ -71,15 +81,18 @@ NOT_DUE: list[tuple[str, dict[str, Any], str]] = [
     ("record_open", {"facts": RoundFacts(record_open=True)}, "record_open"),
     ("agent_busy", {"facts": RoundFacts(agent_busy=True)}, "agent_busy"),
     ("settling", {"eligible": (Candidate("c", NOW - 299.0),)}, "settling"),
+    ("blocked", {"block": block("failed")}, "blocked"),
+    ("round_limit", {"facts": RoundFacts(counted=3)}, "round_limit"),
+    ("no_agent", {"base_agent": None}, "no_agent"),
 ]
+# the rows that store a block as they refuse
+SETS_BLOCK = {"round_limit": "round_limit", "no_agent": "no_agent"}
 
 
-@pytest.mark.parametrize(
-    ("mutation", "why"), [(m, w) for _, m, w in NOT_DUE], ids=[i for i, *_ in NOT_DUE]
-)
-def test_not_due_rows(mutation: dict[str, Any], why: str) -> None:
+@pytest.mark.parametrize(("name", "mutation", "why"), NOT_DUE, ids=[i for i, *_ in NOT_DUE])
+def test_not_due_rows(name: str, mutation: dict[str, Any], why: str) -> None:
     decision = due.decide(inputs(**mutation))
-    assert decision == Decision(False, why)
+    assert decision == Decision(False, why, set_block=SETS_BLOCK.get(name))
 
 
 @pytest.mark.parametrize("reason", due.BLOCK_REASONS)
@@ -162,7 +175,25 @@ def test_hook_vetoed_clears_when_the_eligible_set_differs() -> None:
     assert due.decide(gone).clear == "comments_changed"
 
 
-def test_hook_vetoed_set_ignores_order_and_duplicates_in_the_id_set() -> None:
+def test_hook_vetoed_clears_when_an_unchanged_set_has_an_edited_comment() -> None:
+    # the same ids, but one comment's body changed after the block was set (an edit restarts
+    # settle_ts, so it is newer than set_at)
+    held = block("hook_vetoed", ("gh:rc:c1",), at=NOW - 300)
+    edited = inputs(block=held, eligible=(Candidate("gh:rc:c1", NOW - 100, NOW - 900),))
+    assert due.decide(edited).clear == "comments_changed"
+    untouched = inputs(block=held, eligible=(Candidate("gh:rc:c1", NOW - 300, NOW - 900),))
+    assert due.decide(untouched).clear is None  # at exactly set_at: not newer
+    older = inputs(block=held, eligible=(Candidate("gh:rc:c1", NOW - 301),))
+    assert due.decide(older).clear is None
+
+
+def test_an_edit_does_not_clear_the_other_block_reasons() -> None:
+    held = block("failed", ("gh:rc:c1",), at=NOW - 300)
+    got = due.decide(inputs(block=held, eligible=(Candidate("gh:rc:c1", NOW - 100),)))
+    assert got.clear is None and got.why == "blocked"
+
+
+def test_hook_vetoed_set_ignores_order_in_the_id_set() -> None:
     held = block("hook_vetoed", ("b", "a"))
     same = inputs(block=held, eligible=(Candidate("a", NOW - 600), Candidate("b", NOW - 600)))
     assert due.decide(same).clear is None
@@ -217,6 +248,23 @@ def test_settle_bounds(ages: tuple[float, ...], settle: float, due_expected: boo
     got = due.decide(inputs(eligible=eligible, settle_seconds=settle))
     assert got.due is due_expected
     assert got.why == ("due" if due_expected else "settling")
+
+
+def test_an_edited_comment_cannot_hold_a_pr_in_settling_beyond_one_hour_from_first_seen() -> None:
+    # settle_ts keeps restarting with every edit; the ceiling counts from first_seen_at
+    def edited(first_seen_age: float) -> DueInputs:
+        return inputs(eligible=(Candidate("c", NOW - 10, NOW - first_seen_age),))
+
+    assert due.decide(edited(HOUR - 1)) == Decision(False, "settling")
+    assert due.derive_state(edited(HOUR - 1)) == ("settling", None)
+    assert due.decide(edited(HOUR)) == Decision(True, "due")
+    assert due.derive_state(edited(HOUR)) == ("waiting", "capacity")
+
+
+def test_a_first_seen_in_the_future_is_never_old() -> None:
+    future = inputs(eligible=(Candidate("c", NOW - 10, NOW + 50),), settle_seconds=99999.0)
+    assert due.decide(future) == Decision(False, "settling")
+    assert due.derive_state(future) == ("settling", None)
 
 
 def test_a_nan_settle_is_refused() -> None:
@@ -315,7 +363,8 @@ def test_comment_set_sha256_is_the_sorted_ids_joined_by_newline() -> None:
     expected = hashlib.sha256(b"a\nb\nc").hexdigest()
     assert due.comment_set_sha256(["c", "a", "b"]) == expected
     assert due.comment_set_sha256([]) == hashlib.sha256(b"").hexdigest()
-    assert due.comment_set_sha256(["a\nb"]) != due.comment_set_sha256(["a", "b"]) or True
+    # by the definition (ids joined by a newline) these hash equal; comment ids never contain one
+    assert due.comment_set_sha256(["a\nb"]) == due.comment_set_sha256(["a", "b"])
 
 
 def test_comment_set_sha256_handles_unicode_and_hostile_ids() -> None:
@@ -374,6 +423,7 @@ def test_the_migration_adds_block_base_agent_and_records_current(store: Store, p
         "[]",
         '"escalated"',
         "{}",
+        '{"reason": "failed", "set_at": 1, "comment_set_sha256": "x", "extra": 1}',
     ],
 )
 def test_the_table_refuses_a_block_that_is_not_documented(store: Store, pr: str, bad: str) -> None:
@@ -567,10 +617,20 @@ def test_get_block_refuses_a_corrupt_stored_block(store: Store, pr: str) -> None
 # -- apply: the due check writes only documented transitions --------------------
 
 
+def seeded(
+    store: Store, handled: HandledSet, ref: str, gateway: Gateway, *ids: str, **over: Any
+) -> DueInputs:
+    """Real comment rows for ``ids`` (default: one), settled for 10 minutes, then the inputs."""
+    names = ids or ("gh:rc:c1",)
+    read(store, handled, ref, *[rc(n, created="2026-01-01T12:00:01Z") for n in names])
+    advance(gateway, 600)
+    return replace(load(store, ref, gateway), **over)
+
+
 def test_apply_sets_round_limit_once_and_reports_the_new_block(
-    store: Store, lease: Lease, pr: str
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
 ) -> None:
-    probe = inputs(facts=RoundFacts(counted=3), eligible=(Candidate("gh:rc:c1", NOW - 600),))
+    probe = seeded(store, handled, pr, gateway, facts=RoundFacts(counted=3))
     first = due.apply(lease, pr, probe)
     assert first.due is False and first.new_block == "round_limit"
     held = due.get_block(store.conn, pr)
@@ -581,49 +641,155 @@ def test_apply_sets_round_limit_once_and_reports_the_new_block(
 
 
 def test_apply_sets_no_agent_then_clears_it_when_an_agent_is_found(
-    store: Store, lease: Lease, pr: str
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
 ) -> None:
-    assert due.apply(lease, pr, inputs(base_agent=None)).new_block == "no_agent"
+    base = seeded(store, handled, pr, gateway, base_agent=None)
+    assert due.apply(lease, pr, base).new_block == "no_agent"
     held = due.get_block(store.conn, pr)
     assert held is not None
-    got = due.apply(lease, pr, inputs(block=held, base_agent="agent-9"))
+    got = due.apply(lease, pr, replace(base, block=held, base_agent="agent-9"))
     assert got.due is True and got.cleared == "agent_found"
     assert due.get_block(store.conn, pr) is None
 
 
 def test_apply_clears_hook_vetoed_when_the_comment_set_changes(
-    store: Store, lease: Lease, pr: str
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
 ) -> None:
     due.set_block(lease, pr, "hook_vetoed", ["gh:rc:c1"])
     held = due.get_block(store.conn, pr)
     got = due.apply(
-        lease,
-        pr,
-        inputs(block=held, eligible=(Candidate("gh:rc:c1", NOW - 600), Candidate("gh:rc:c2", NOW))),
+        lease, pr, seeded(store, handled, pr, gateway, "gh:rc:c1", "gh:rc:c2", block=held)
     )
     assert got.cleared == "comments_changed"
     assert due.get_block(store.conn, pr) is None
 
 
-def test_apply_reports_a_block_that_changed_under_it_as_not_due(
-    store: Store, lease: Lease, pr: str
+def test_apply_clears_hook_vetoed_when_a_vetoed_comment_is_edited(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    seeded(store, handled, pr, gateway)
+    due.set_block(lease, pr, "hook_vetoed", ["gh:rc:c1"])
+    advance(gateway, 60)
+    read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body="edited"))
+    got = due.apply(lease, pr, load(store, pr, gateway))
+    assert got.cleared == "comments_changed"
+    assert due.get_block(store.conn, pr) is None
+
+
+def test_apply_keeps_hook_vetoed_when_nothing_changed(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    seeded(store, handled, pr, gateway)
+    due.set_block(lease, pr, "hook_vetoed", ["gh:rc:c1"])
+    advance(gateway, 60)
+    read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z"))
+    got = due.apply(lease, pr, load(store, pr, gateway))
+    assert got == Applied(False, "blocked")
+
+
+def test_apply_reports_a_block_that_changed_under_it_as_block_changed(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
 ) -> None:
     # the caller read no block; a human-respond path set one meanwhile, so nothing is set over it
+    probe = seeded(store, handled, pr, gateway, base_agent=None)
     due.set_block(lease, pr, "failed", [])
-    got = due.apply(lease, pr, inputs(base_agent=None))
-    assert got.due is False
-    assert got.new_block is None
+    got = due.apply(lease, pr, probe)
+    assert got == Applied(False, "block_changed")
     block_ = due.get_block(store.conn, pr)
     assert block_ is not None and block_.reason == "failed"
 
 
-def test_apply_writes_nothing_for_a_plain_due_or_not_due_pr(
-    store: Store, lease: Lease, pr: str
+def test_apply_reports_a_block_cleared_underneath_as_block_changed(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
 ) -> None:
+    due.set_block(lease, pr, "failed", ["gh:rc:c1"])
+    probe = seeded(store, handled, pr, gateway, block=due.get_block(store.conn, pr))
+    assert due.clear_block(lease, pr, "human_respond") is True
     rev = rev_of(store, pr)
-    assert due.apply(lease, pr, inputs()).due is True
-    assert due.apply(lease, pr, inputs(eligible=())).due is False
+    assert due.apply(lease, pr, probe) == Applied(False, "block_changed")
+    assert due.get_block(store.conn, pr) is None
     assert rev_of(store, pr) == rev
+
+
+def test_apply_writes_nothing_when_the_records_went_stale_after_the_read(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    probe = seeded(store, handled, pr, gateway, base_agent=None)
+    with lease.transaction() as conn:  # a new comment read stamped records_current = 0
+        conn.execute("UPDATE prs SET records_current = 0, rev = rev + 1 WHERE pr = ?", (pr,))
+    rev = rev_of(store, pr)
+    assert due.apply(lease, pr, probe) == Applied(False, "stale_records")
+    assert stored_block(store, pr) is None
+    assert rev_of(store, pr) == rev
+
+
+def test_apply_writes_nothing_when_a_comment_was_handled_after_the_read(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    probe = seeded(store, handled, pr, gateway, "gh:rc:c1", "gh:rc:c2", base_agent=None)
+    handled.deliver(pr, ["gh:rc:c2"], round_id="r-1")
+    handled.mark_handled(pr, "r-1")
+    rev = rev_of(store, pr)
+    assert due.apply(lease, pr, probe) == Applied(False, "stale")
+    assert stored_block(store, pr) is None
+    assert rev_of(store, pr) == rev
+
+
+def test_apply_writes_nothing_when_a_comment_arrived_after_the_read(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    probe = seeded(store, handled, pr, gateway, base_agent=None)
+    read(
+        store, handled, pr,
+        rc("gh:rc:c1", created="2026-01-01T12:00:01Z"),
+        rc("gh:rc:c2", created="2026-01-01T12:00:02Z"),
+    )  # fmt: skip
+    assert due.apply(lease, pr, probe) == Applied(False, "stale")
+    assert stored_block(store, pr) is None
+
+
+def test_apply_of_an_unknown_pr_is_an_internal_error(lease: Lease) -> None:
+    with pytest.raises(CliError) as err:
+        due.apply(lease, "forge.test:org/repo#404", inputs())
+    assert err.value.code == "internal"
+
+
+def test_apply_writes_nothing_for_a_plain_due_or_not_due_pr(
+    store: Store, lease: Lease, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    probe = seeded(store, handled, pr, gateway)
+    rev = rev_of(store, pr)
+    assert due.apply(lease, pr, probe).due is True
+    assert due.apply(lease, pr, replace(probe, facts=RoundFacts(queued=True))).due is False
+    assert rev_of(store, pr) == rev
+
+
+# -- the lease must be this PR's (or the pass lease) --------------------------------
+
+
+def test_the_block_writers_refuse_a_lease_of_another_pr(store: Store, pr: str) -> None:
+    other = store.try_acquire(pr_lease_key(pr_digest("forge.test:org/repo#999")), heartbeat=None)
+    assert other is not None
+    try:
+        with pytest.raises(ValueError, match="lease"):
+            due.set_block(other, pr, "failed", [])
+        with pytest.raises(ValueError, match="lease"):
+            due.clear_block(other, pr, "human_respond")
+        with pytest.raises(ValueError, match="lease"):
+            due.apply(other, pr, inputs(base_agent=None))
+    finally:
+        other.release()
+    assert stored_block(store, pr) is None
+
+
+def test_the_block_writers_accept_the_pr_lease_and_the_pass_lease(store: Store, pr: str) -> None:
+    own = store.try_acquire(pr_lease_key(pr_digest(pr)), heartbeat=None)
+    assert own is not None
+    try:
+        assert due.set_block(own, pr, "failed", []) is True
+        assert due.clear_block(own, pr, "human_respond") is True
+    finally:
+        own.release()
 
 
 # ---- from the stored rows ----------------------------------------------------------------------
@@ -799,3 +965,79 @@ def test_hostile_comment_ids_do_not_reach_sql(
     read(store, handled, pr, rc(hostile, created="2026-01-01T12:00:01Z"))
     assert [c.id for c in load(store, pr, gateway).eligible] == [hostile]
     assert store.conn.execute("SELECT count(*) FROM prs").fetchone()[0] == 1
+
+
+def test_a_comment_re_edited_every_few_minutes_is_due_one_hour_after_first_seen(
+    store: Store, handled: HandledSet, pr: str, gateway: Gateway
+) -> None:
+    read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body="v0"))
+    first = load(store, pr, gateway).eligible[0].first_seen
+    for step in range(1, 17):  # an edit every 4 minutes: settle_ts keeps restarting
+        advance(gateway, 240)
+        read(store, handled, pr, rc("gh:rc:c1", created="2026-01-01T12:00:01Z", body=f"v{step}"))
+        seen = load(store, pr, gateway)
+        assert seen.eligible[0].first_seen == first  # first_seen_at is not restarted by an edit
+        elapsed = 240 * step
+        assert due.decide(seen).due is (elapsed >= HOUR), step
+        expected = ("waiting", "capacity") if elapsed >= HOUR else ("settling", None)
+        assert due.derive_state(seen) == expected, step
+
+
+# ---- the detect handshake: records_current is cleared by the stamp ---------------------------
+
+
+@pytest.fixture
+def current_pr(store: Store, pr: str) -> str:
+    with store.transaction() as conn:
+        conn.execute("UPDATE prs SET records_current = 1 WHERE pr = ?", (pr,))
+    return pr
+
+
+def records_current(store: Store, ref: str) -> int:
+    return store.conn.execute("SELECT records_current FROM prs WHERE pr = ?", (ref,)).fetchone()[0]
+
+
+def test_a_complete_read_clears_records_current_even_without_a_hook(
+    store: Store, lease: Lease, fakes: Fakes, gateway: Gateway, current_pr: str
+) -> None:
+    script_comments(fakes, current_pr, builders.real_shape_comments(current_pr))
+    make(gateway, lease, on_read=None).read_comments(current_pr)
+    stamped = store.conn.execute(
+        "SELECT last_comments_read_at FROM prs WHERE pr = ?", (current_pr,)
+    ).fetchone()[0]
+    assert stamped == gateway.clock.now().timestamp()
+    assert records_current(store, current_pr) == 0
+
+
+def test_a_complete_read_whose_hook_raises_leaves_records_not_current(
+    store: Store, lease: Lease, fakes: Fakes, gateway: Gateway, current_pr: str
+) -> None:
+    def boom(*_: Any) -> None:
+        raise RuntimeError("the hook failed")
+
+    script_comments(fakes, current_pr, builders.real_shape_comments(current_pr))
+    with pytest.raises(RuntimeError):
+        make(gateway, lease, on_read=boom).read_comments(current_pr)
+    assert records_current(store, current_pr) == 0
+
+
+def test_a_complete_read_with_the_records_hook_ends_current(
+    store: Store, lease: Lease, fakes: Fakes, gateway: Gateway, current_pr: str
+) -> None:
+    script_comments(fakes, current_pr, builders.real_shape_comments(current_pr))
+    hook = HandledSet(lease).record_read
+    make(gateway, lease, on_read=hook).read_comments(current_pr)
+    assert records_current(store, current_pr) == 1
+
+
+def test_every_writer_of_last_comments_read_at_also_clears_records_current() -> None:
+    src = Path(__file__).resolve().parent.parent / "src" / "review_respond"
+    found = 0
+    for path in sorted(src.glob("*.py")):
+        text = path.read_text(encoding="utf-8")
+        for literal in re.findall(r'"(?:[^"\\]|\\.)*"(?:\s*"(?:[^"\\]|\\.)*")*', text):
+            sql = " ".join(re.findall(r'"((?:[^"\\]|\\.)*)"', literal))
+            if re.search(r"UPDATE prs SET\b.*\blast_comments_read_at\s*=", sql, re.S):
+                found += 1
+                assert "records_current = 0" in sql, f"{path.name}: {sql}"
+    assert found >= 1  # the scan finds the writer in detect.py
