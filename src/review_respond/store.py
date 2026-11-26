@@ -4,27 +4,33 @@ docs/interface.md: Files and state, Upgrades. Every command opens the state dire
 refuses (exit 12 ``state_unsafe``) when it is not private. A schema newer than this binary knows
 is readable and not writable (exit 12 ``version_skew``).
 
-Leases and compare-and-set transitions belong to #10, the audit and log writers to #11, and the
-tables of each feature to the issue that needs them; this module only gives them the connection,
-a transaction helper and the migration list to append to.
+Leases and compare-and-set transitions live at the end of this module (docs/interface.md:
+Concurrency, decision D-19). The audit and log writers belong to #11, and the tables of each
+feature to the issue that needs them; this module gives them the connection, a transaction helper,
+the migration list to append to, and the lease-checked compare-and-set writes.
 """
 
 from __future__ import annotations
 
 import contextlib
 import hashlib
+import math
 import os
 import re
+import secrets
 import sqlite3
 import stat
+import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
-from typing import Final
+from typing import Final, Literal
 
 from .errors import CliError
+from .gateway import Clock, SystemClock
 
 APP_DIR: Final = "review-respond"
 DB_NAME: Final = "state.db"
@@ -43,8 +49,30 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
         f"PRAGMA application_id = {APPLICATION_ID}",
     ),
+    (
+        # One row per lease key (`pass`, `pr:<digest>`, `round:<id>`). `token` names one
+        # acquisition (two holders in one process, or a pid taken over, never share it); the pid,
+        # its start time and the boot id are the holder's identity for the takeover rule.
+        """CREATE TABLE leases (
+            key TEXT PRIMARY KEY,
+            token TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            pid_start TEXT NOT NULL,
+            boot_id TEXT NOT NULL,
+            acquired_at REAL NOT NULL,
+            renewed_at REAL NOT NULL,
+            expires_at REAL NOT NULL,
+            rev INTEGER NOT NULL DEFAULT 0
+        ) WITHOUT ROWID""",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
+
+HEARTBEAT_SECONDS: Final = 60
+LEASE_TTL_SECONDS: Final = 300
+BUSY_WAIT_SECONDS: Final = 30  # respond, stop, confirm, reject, edit, drop-reply: then exit 20
+JOB_PR_WAIT_SECONDS: Final = 60  # _job on a pr: lease: then exit 1 lease_timeout
+POLL_SECONDS: Final = 0.05
 
 _OWNER_RE: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 _SHA256_RE: Final = re.compile(r"[0-9a-f]{64}")
@@ -446,8 +474,12 @@ def _busy(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
+class _BusyError(CliError):
+    """The state database is busy; a marker type so callers never compare message text."""
+
+
 def _busy_error() -> CliError:
-    return CliError("internal", "the state database is busy (another command holds it)")
+    return _BusyError("internal", "the state database is busy (another command holds it)")
 
 
 def _arm(conn: sqlite3.Connection, deadline: float | None) -> None:
@@ -606,11 +638,20 @@ class Store:
         *,
         read_only: bool,
         state: StateDir | None = None,
+        source: StateDir | None = None,
     ) -> None:
         self.conn = conn
         self.schema_version = schema_version
         self.read_only = read_only
         self._state = state
+        self.source = source  # the state directory (not owned): the heartbeat reopens from it
+        self.clock: Clock = SystemClock()  # lease times and waits; tests substitute a manual one
+
+    @property
+    def state_path(self) -> Path:
+        if self.source is None:
+            raise CliError("internal", "this store was not opened from a state directory")
+        return self.source.path
 
     @classmethod
     def open(
@@ -714,7 +755,7 @@ class Store:
         except BaseException:
             conn.close()
             raise
-        return cls(conn, version, read_only=read_only)
+        return cls(conn, version, read_only=read_only, source=state)
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -746,6 +787,34 @@ class Store:
             with contextlib.suppress(sqlite3.Error):
                 self.conn.execute("ROLLBACK")
             raise
+
+    def try_acquire(
+        self,
+        key: str,
+        *,
+        heartbeat: float | None = HEARTBEAT_SECONDS,
+        on_event: EventCallback | None = None,
+    ) -> Lease | None:
+        """Take a lease without waiting; None when a live holder has it (see ``_try_acquire``)."""
+        return _try_acquire(self, key, heartbeat=heartbeat, on_event=on_event)
+
+    def acquire(
+        self,
+        key: str,
+        *,
+        wait: float,
+        contended: Literal["busy", "lease_timeout"],
+        heartbeat: float | None = HEARTBEAT_SECONDS,
+        on_event: EventCallback | None = None,
+    ) -> Lease:
+        """Take a lease, waiting up to ``wait`` seconds (see ``_acquire``)."""
+        return _acquire(
+            self, key, wait=wait, contended=contended, heartbeat=heartbeat, on_event=on_event
+        )
+
+    def read_lease(self, key: str) -> LeaseRow | None:
+        _check_key(key)
+        return _read_lease(self.conn, key)
 
     def close(self) -> None:
         self.conn.close()
@@ -782,3 +851,449 @@ def _enable_wal(conn: sqlite3.Connection, deadline: float) -> None:
         if mode != "wal":
             raise CliError("internal", f"cannot enable WAL on the state database ({mode})")
         return
+
+
+# ---- process identity --------------------------------------------------------------------
+
+_PROC: Final = Path("/proc")
+
+
+def _stat_fields(pid: int) -> list[str] | None:
+    """The fields of ``/proc/<pid>/stat`` after the command name (state first), or None."""
+    try:
+        raw = (_PROC / str(pid) / "stat").read_bytes()
+    except (OSError, ValueError):
+        return None
+    # The name may hold any bytes (even a ")"): split at the last ")" and never fail to decode.
+    _, sep, rest = raw.decode("utf-8", errors="replace").rpartition(")")
+    return rest.split() if sep else None
+
+
+def process_state(pid: int) -> str | None:
+    """The one-letter state of a process (``Z`` zombie), or None when it does not exist."""
+    fields = _stat_fields(pid)
+    return None if not fields else fields[0]
+
+
+def process_start(pid: int) -> str | None:
+    """The start time of a process in clock ticks since boot (stat field 22), or None."""
+    fields = _stat_fields(pid)
+    return None if not fields or len(fields) < 20 else fields[19]
+
+
+def boot_id() -> str:
+    """The kernel's boot id; empty where the platform has none."""
+    try:
+        return (_PROC / "sys" / "kernel" / "random" / "boot_id").read_text().strip()
+    except OSError:
+        return ""
+
+
+def holder_gone(pid: int, pid_start: str, holder_boot_id: str) -> bool:
+    """True only when the holder is verified gone: another boot, no such process, a zombie (it can
+    never run again) or a process with another start time (the pid was reused).
+
+    The caller holds the database write lock, so no other command can take the row meanwhile.
+    Without ``/proc`` only the pid is probed (``kill(pid, 0)``): a gap, a live pid is never
+    called gone.
+    """
+    if holder_boot_id != boot_id() or pid <= 0:
+        return True
+    fields = _stat_fields(pid) if (_PROC / "self" / "stat").exists() else None
+    if fields is not None and len(fields) >= 20:
+        return fields[0] in ("Z", "X") or fields[19] != pid_start
+    # No /proc, or its stat for this pid is missing or unparseable: only an absent pid is gone.
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, OverflowError):
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+# ---- leases ------------------------------------------------------------------------------
+
+
+_PASS_KEY: Final = "pass"
+_PR_DIGEST_RE: Final = re.compile(r"[0-9a-f]{20}")
+_KEY_RE: Final = re.compile(r"pass|pr:[0-9a-f]{20}|round:[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
+_IDENT_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+EventCallback = Callable[[str, str], None]
+# TODO(#11): wire the event callback to the `lease` event of log.jsonl (`stalled`, `taken_over`).
+# The callback must be thread-safe: the heartbeat thread may call it (the `lost` event).
+
+
+def pass_lease_key() -> str:
+    return _PASS_KEY
+
+
+def pr_lease_key(pr_digest: str) -> str:
+    if not isinstance(pr_digest, str) or not _PR_DIGEST_RE.fullmatch(pr_digest):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise ValueError("a PR digest is 20 lowercase hex characters")
+    return f"pr:{pr_digest}"
+
+
+def round_lease_key(round_id: str) -> str:
+    key = f"round:{round_id}"
+    if not isinstance(round_id, str) or not _KEY_RE.fullmatch(key):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise ValueError("invalid round id")
+    return key
+
+
+def _check_key(key: str) -> None:
+    if not isinstance(key, str) or not _KEY_RE.fullmatch(key):  # pyright: ignore[reportUnnecessaryIsInstance]
+        raise ValueError("invalid lease key")
+
+
+@dataclass(frozen=True)
+class LeaseRow:
+    key: str
+    token: str
+    pid: int
+    pid_start: str
+    boot_id: str
+    acquired_at: float
+    renewed_at: float
+    expires_at: float
+    rev: int
+
+
+_ROW_COLUMNS: Final = (
+    "key, token, pid, pid_start, boot_id, acquired_at, renewed_at, expires_at, rev"
+)
+
+
+def cas_update(
+    conn: sqlite3.Connection,
+    table: str,
+    key_column: str,
+    key: object,
+    rev: int,
+    changes: Mapping[str, object],
+) -> bool:
+    """Set ``changes`` on the row ``key_column = key`` only while its ``rev`` is still ``rev``, and
+    bump the ``rev``. True when this call made the transition, False when the row is missing or
+    another writer got there first (the caller decides what that means for its table).
+
+    Must run inside a transaction. Names are checked as plain identifiers; values are parameters.
+    ``rev`` itself cannot be set through ``changes``.
+    """
+    names = [table, key_column, *changes]
+    if not changes or any(
+        not isinstance(n, str) or not _IDENT_RE.fullmatch(n)  # pyright: ignore[reportUnnecessaryIsInstance]
+        for n in names
+    ):
+        raise ValueError("invalid table, column or empty change set")
+    if key_column.lower() == "rev" or any(name.lower() == "rev" for name in changes):
+        raise ValueError("rev is managed by the compare-and-set")  # SQLite names are case-blind
+    assignments = ", ".join(f"{name} = ?" for name in changes)
+    cursor = conn.execute(
+        f"UPDATE {table} SET {assignments}, rev = rev + 1 WHERE {key_column} = ? AND rev = ?",
+        (*changes.values(), key, rev),
+    )
+    if cursor.rowcount > 1:
+        raise CliError(
+            "internal", f"{table}.{key_column} is not unique: compare-and-set matched several rows"
+        )
+    return cursor.rowcount == 1
+
+
+def _is_busy_error(error: CliError) -> bool:
+    return isinstance(error, _BusyError)
+
+
+def _lease_lost(key: str) -> CliError:
+    return CliError("lease_lost", f"the {key} lease was lost; this command stops without writing")
+
+
+def _contended(kind: Literal["busy", "lease_timeout"], key: str, wait: float) -> CliError:
+    if kind == "lease_timeout":
+        return CliError("lease_timeout", f"timed out after {wait:g}s waiting for the {key} lease")
+    return CliError(
+        "refused",
+        f"another command holds {key}; retry later",
+        reason="busy",
+        details={"lease": key},
+    )
+
+
+RELEASE_ATTEMPTS: Final = 3
+
+
+class Lease:
+    """One held lease. Release it (or use it as a context manager); renewal runs in a heartbeat."""
+
+    def __init__(
+        self,
+        store: Store,
+        key: str,
+        token: str,
+        *,
+        taken_over: bool,
+        on_event: EventCallback | None = None,
+    ) -> None:
+        self.store = store
+        self.key = key
+        self.token = token
+        self.taken_over = taken_over
+        self._on_event = on_event
+        self._pid = os.getpid()  # a forked child must never touch its parent's row
+        self._lost = threading.Event()
+        self._lost_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    @property
+    def lost(self) -> bool:
+        """True once the heartbeat saw the lease gone (``transaction()`` is the authority)."""
+        return self._lost.is_set()
+
+    def _mark_lost(self) -> None:
+        """Note the loss and report ``lost`` to ``on_event`` once per lease."""
+        with self._lost_lock:
+            first = not self._lost.is_set()
+            self._lost.set()
+        if first and self._on_event is not None:
+            # a failing log must not hide the lease_lost the caller is about to raise
+            with contextlib.suppress(Exception):
+                self._on_event("lost", self.key)
+
+    def _lose(self) -> CliError:
+        self._mark_lost()
+        return _lease_lost(self.key)
+
+    def _renew_on(self, store: Store) -> None:
+        if os.getpid() != self._pid:
+            raise _lease_lost(self.key)  # a forked child: not a loss, the parent still holds it
+        now = store.clock.now().timestamp()
+        with store.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE leases SET renewed_at = ?, expires_at = ?, rev = rev + 1"
+                " WHERE key = ? AND token = ?",
+                (now, now + LEASE_TTL_SECONDS, self.key, self.token),
+            )
+            if cursor.rowcount != 1:
+                raise self._lose()
+
+    def renew(self) -> None:
+        """Push the expiry out; ``lease_lost`` when the row is no longer this holder's."""
+        self._renew_on(self.store)
+
+    def start_heartbeat(self, interval: float = HEARTBEAT_SECONDS) -> None:
+        """Renew every ``interval`` seconds from a thread with its own connection."""
+        if self._thread is not None or self.store.source is None:
+            return
+        thread = threading.Thread(
+            target=self._beat, args=(interval,), name=f"lease-{self.key}", daemon=True
+        )
+        self._thread = thread
+        thread.start()
+
+    def _beat(self, interval: float) -> None:
+        source = self.store.source
+        assert source is not None
+        try:
+            beat = Store.open(source, write=True)
+        except CliError:
+            return  # the next write finds out through its own lease check
+        beat.clock = self.store.clock
+        try:
+            while not self._stop.wait(interval):
+                try:
+                    self._renew_on(beat)
+                except CliError as error:
+                    if error.code == "lease_lost":
+                        self._mark_lost()
+                        return
+                    # a busy or unavailable database: try again at the next beat
+                except sqlite3.Error:
+                    pass
+        finally:
+            beat.close()
+
+    def release(self) -> None:
+        """Stop the heartbeat and delete the row if it is still this holder's. Idempotent."""
+        if os.getpid() != self._pid:
+            return  # a forked child: the row is the parent's
+        self._stop.set()
+        thread, self._thread = self._thread, None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=10)
+        for _attempt in range(RELEASE_ATTEMPTS):
+            try:
+                with self.store.transaction() as conn:
+                    conn.execute(
+                        "DELETE FROM leases WHERE key = ? AND token = ?", (self.key, self.token)
+                    )
+                return
+            except sqlite3.Error:
+                return  # the row is taken over later: its holder is gone
+            except CliError as error:
+                if not _is_busy_error(error):
+                    raise
+                # busy: try again, then give up (the row is taken over later)
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """A write transaction that first checks, under the write lock, that this holder still
+        owns the row: ``lease_lost`` (exit 1) otherwise, and nothing is written."""
+        if os.getpid() != self._pid:
+            raise _lease_lost(self.key)  # a forked child: not a loss, the parent still holds it
+        with self.store.transaction() as conn:
+            held = conn.execute(
+                "SELECT 1 FROM leases WHERE key = ? AND token = ?", (self.key, self.token)
+            ).fetchone()
+            if held is None:
+                raise self._lose()
+            yield conn
+
+    def compare_and_set(
+        self, table: str, key_column: str, key: object, rev: int, changes: Mapping[str, object]
+    ) -> bool:
+        """One ``cas_update`` in a lease-checked transaction."""
+        with self.transaction() as conn:
+            return cas_update(conn, table, key_column, key, rev, changes)
+
+    def __enter__(self) -> Lease:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        if exc_type is None:
+            self.release()
+        else:
+            with contextlib.suppress(Exception):  # never mask the in-flight exception
+                self.release()
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool)
+
+
+def _read_lease(conn: sqlite3.Connection, key: str) -> LeaseRow | None:
+    row = conn.execute(f"SELECT {_ROW_COLUMNS} FROM leases WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        return None
+    k, token, pid, pid_start, boot, acquired, renewed, expires, rev = row
+    sane = (
+        isinstance(token, str)
+        and isinstance(pid, int)
+        and isinstance(pid_start, str)
+        and isinstance(boot, str)
+        and _is_number(acquired)
+        and _is_number(renewed)
+        and _is_number(expires)
+        and isinstance(rev, int)
+    )
+    if not sane:
+        # a damaged row: no live holder can own it, so it reads as a holder verified gone (pid 0)
+        return LeaseRow(key, "", 0, "", "", 0.0, 0.0, 0.0, 0)
+    return LeaseRow(
+        k, token, pid, pid_start, boot, float(acquired), float(renewed), float(expires), rev
+    )
+
+
+def _claim(store: Store, key: str, on_event: EventCallback | None) -> tuple[Lease | None, bool]:
+    """One attempt: (lease, False) when taken, (None, stalled) when a live holder has it.
+
+    A busy database (another command holds the write lock) counts as a live holder: (None, False).
+    """
+    pid = os.getpid()
+    token = secrets.token_hex(16)
+    me = (pid, process_start(pid) or "", boot_id())
+    now = store.clock.now().timestamp()
+    try:
+        with store.transaction() as conn:
+            row = _read_lease(conn, key)
+            taken_over = row is not None and holder_gone(row.pid, row.pid_start, row.boot_id)
+            if row is None:
+                conn.execute(
+                    f"INSERT INTO leases ({_ROW_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                    (key, token, *me, now, now, now + LEASE_TTL_SECONDS),
+                )
+            elif taken_over:
+                conn.execute(
+                    "UPDATE leases SET token = ?, pid = ?, pid_start = ?, boot_id = ?,"
+                    " acquired_at = ?, renewed_at = ?, expires_at = ?, rev = rev + 1"
+                    " WHERE key = ?",
+                    (token, *me, now, now, now + LEASE_TTL_SECONDS, key),
+                )
+            else:
+                return None, row.expires_at <= now  # alive: never taken over, even when expired
+    except CliError as error:
+        if _is_busy_error(error):
+            return None, False
+        raise
+    lease = Lease(store, key, token, taken_over=taken_over, on_event=on_event)
+    if taken_over and on_event is not None:
+        try:
+            on_event("taken_over", key)
+        except BaseException:
+            with contextlib.suppress(Exception):
+                lease.release()  # the row is committed: never leave it held
+            raise
+    return lease, False
+
+
+def _try_acquire(
+    self: Store,
+    key: str,
+    *,
+    heartbeat: float | None = HEARTBEAT_SECONDS,
+    on_event: EventCallback | None = None,
+) -> Lease | None:
+    """Take the lease without waiting; None when a live holder has it.
+
+    A missing row, or a holder verified gone (whether or not expired), is taken at once. An
+    expired lease whose holder is alive is left alone and reported as ``stalled`` to ``on_event``.
+    ``heartbeat`` is the renewal interval in seconds (None: no heartbeat, for tests).
+    """
+    _check_key(key)
+    lease, stalled = _claim(self, key, on_event)
+    if lease is None:
+        if stalled and on_event is not None:
+            on_event("stalled", key)
+        return None
+    if heartbeat is not None:
+        lease.start_heartbeat(heartbeat)
+    return lease
+
+
+def _acquire(
+    self: Store,
+    key: str,
+    *,
+    wait: float,
+    contended: Literal["busy", "lease_timeout"],
+    heartbeat: float | None = HEARTBEAT_SECONDS,
+    on_event: EventCallback | None = None,
+) -> Lease:
+    """Take the lease, waiting up to ``wait`` seconds (the store's clock) for a live holder.
+
+    Contended after the wait: ``refused`` with reason ``busy`` (exit 20) or ``lease_timeout``
+    (exit 1), as the caller's row of the Concurrency table says. ``stalled`` is reported once.
+    """
+    _check_key(key)
+    if not math.isfinite(wait):
+        raise ValueError("wait must be a finite number of seconds")
+    deadline = self.clock.monotonic() + wait
+    reported = False
+    while True:
+        lease, stalled = _claim(self, key, on_event)
+        if lease is not None:
+            if heartbeat is not None:
+                lease.start_heartbeat(heartbeat)
+            return lease
+        if stalled and not reported and on_event is not None:
+            on_event("stalled", key)
+            reported = True
+        left = deadline - self.clock.monotonic()
+        if left <= 0:
+            raise _contended(contended, key, wait)
+        self.clock.sleep(min(POLL_SECONDS, left))

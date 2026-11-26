@@ -754,7 +754,10 @@ def test_subprocess_result_file_and_unimplemented(tmp_path: Path) -> None:
 
 # ---- every error code has a producer here or a tracked owner ---------------------------------
 
-PRODUCED_HERE = {  # config: test_config.py; state_unsafe, version_skew: test_store.py
+# config: test_config.py; state_unsafe, version_skew: test_store.py; lease_*: test_leases.py
+PRODUCED_HERE = {
+    "lease_lost",
+    "lease_timeout",
     "internal",
     "usage",
     "human_only",
@@ -764,8 +767,6 @@ PRODUCED_HERE = {  # config: test_config.py; state_unsafe, version_skew: test_st
 }
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
-    "lease_lost": 10,
-    "lease_timeout": 10,
     "not_found": 17,
     "vetoed": 37,
     "tool_missing": 12,
