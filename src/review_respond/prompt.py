@@ -139,7 +139,7 @@ PromptStatus = Literal["ok", "over_limit"]
 def neutralize_fence(text: str) -> str:
     """Replace the ``<`` of every ``<untrusted`` and ``</untrusted`` (any case) with a visible
     marker, so untrusted text cannot open or close a fence."""
-    return _FENCE_TAG_RE.sub(lambda m: f"<U+003C>{m.group(1)}untrusted", text)
+    return _FENCE_TAG_RE.sub(lambda m: "<U+003C>" + m.group(0)[1:], text)
 
 
 def new_nonce() -> str:
@@ -348,7 +348,7 @@ def _assemble(
     if note is not None and nonce in note.lower():
         return None
     text = trusted + "\n" + _fence(nonce, inner)
-    if text.count(nonce) != 2:  # exactly the header line and the fence's two tags
+    if text.count(nonce) != 3:  # exactly the header line and the fence's two tags
         return None
     assert _size(text) <= limit
     return BuiltPrompt(

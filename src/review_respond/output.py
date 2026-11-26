@@ -12,15 +12,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import Config
-from .prompt import sanitize_line
+from .prompt import sanitize_line as sanitize_line
 from .store import Store
 
 if TYPE_CHECKING:
     from .audit import AuditLog, LogWriter
 
 PROG = "review-respond"
-
-__all__ = ["PROG", "Context", "Outcome", "dump_json", "emit", "sanitize_line", "warn", "write_atomic"]
 
 
 @dataclass(frozen=True)
