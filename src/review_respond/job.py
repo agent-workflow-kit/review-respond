@@ -681,7 +681,7 @@ class Job:
             code, status = None, "failed"
         audit.outcome(attempt, "stop", self.pr, {"status": status, "exit_code": code})
 
-    def _wait(self, agent_id: str) -> Result | None:
+    def _wait(self, agent_id: str, *, stopped: bool = False) -> Result | None:
         """``agent-spawn wait`` in a thread, so a SIGTERM (or the flag of ``stop``) is acted on
         while it blocks. None: the wait did not return in the budget after a SIGTERM."""
         box: list[Result | BaseException] = []
@@ -694,8 +694,9 @@ class Job:
 
         thread = threading.Thread(target=target, name="wait", daemon=True)
         thread.start()
-        stopped = False
         deadline: float | None = None
+        if stopped:
+            deadline = self.spawn_gw.clock.monotonic() + self.wait_budget
         clock = self.spawn_gw.clock
         while thread.is_alive():
             thread.join(WAIT_TICK)
@@ -714,9 +715,10 @@ class Job:
         return got
 
     def _wait_and_finish(self, agent_id: str) -> int:
-        if self._row().cancel_requested_at is not None:
-            self._stop(agent_id)  # a `stop` before the agent existed
-        res = self._wait(agent_id)
+        early = self.terminated or self._row().cancel_requested_at is not None
+        if early:
+            self._stop(agent_id)  # a `stop` or a SIGTERM before the agent was recorded
+        res = self._wait(agent_id, stopped=early)
         if self.terminated:
             return self._finish(RunEnd("sigterm", started=self.started))
         if res is None:
