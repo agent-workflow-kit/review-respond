@@ -295,9 +295,7 @@ def set_block(lease: Lease, pr: str, reason: str, comment_ids: Iterable[str]) ->
         raise ValueError("reason is not a block reason")
     _require_lease(lease, pr)
     with lease.transaction() as conn:
-        return set_block_in(
-            conn, pr, reason, comment_ids, now=lease.store.clock.now().timestamp()
-        )
+        return set_block_in(conn, pr, reason, comment_ids, now=lease.store.clock.now().timestamp())
 
 
 def clear_block(lease: Lease, pr: str, cause: str, *, expect: str | None = None) -> bool:

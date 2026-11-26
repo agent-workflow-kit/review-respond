@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from . import due
+from . import due, rounds
 from .audit import format_ts
 from .config import Config
 from .detect import StoredPr, get_pr
@@ -52,9 +52,9 @@ class Derived:
 
 
 def derive(conn: sqlite3.Connection, config: Config, pr: str, now: float) -> Derived:
-    """The derived state of a stored PR. TODO(#18) TODO(#29): `RoundFacts` carries the queued and
-    running rounds, the counted rounds and the open record; TODO(#19): `agent_busy`."""
-    inputs = due.load_inputs(conn, config, pr, now=now, facts=due.RoundFacts())
+    """The derived state of a stored PR. `RoundFacts` come from the rounds table; TODO(#29): the
+    open record comes from the records table; TODO(#19): `agent_busy`."""
+    inputs = due.load_inputs(conn, config, pr, now=now, facts=rounds.round_facts(conn, pr))
     state, reason = due.derive_state(inputs)
     return Derived(state, reason, inputs)
 
@@ -93,10 +93,64 @@ def pr_object(
         "base_ref": stored.base_ref,
         "is_fork": stored.is_fork,
         "base_agent": base or None,
-        "rounds": 0,  # TODO(#18): the rounds table
+        "rounds": rounds.count_rounds(conn, stored.pr),
         **counts(conn, stored.pr),
         "pending_id": None,  # TODO(#29): the records table
         "updated": host_ts(stored.updated_at),
+    }
+
+
+def _untrusted(text: str | None) -> str | None:
+    """Agent-written text, cut and sanitized line by line (a newline stays a newline)."""
+    if text is None:
+        return None
+    return "\n".join(sanitize_line(line) for line in text[:4096].split("\n"))
+
+
+def round_object(conn: sqlite3.Connection, row: rounds.RoundRow) -> dict[str, Any]:
+    """One round (schemas/defs.json round). ``comment_ids`` are the comments the job selected;
+    ``delivered`` those the round holds now (delivered, or handled when it went pending)."""
+    delivered = [
+        r[0]
+        for r in conn.execute(
+            "SELECT comment_id FROM comments WHERE pr = ? AND round = ?"
+            " AND state IN ('delivered', 'handled') ORDER BY comment_id",
+            (row.pr, row.id),
+        )
+    ]
+    escalation = None
+    if row.state == "escalated":
+        escalation = {
+            "reason": _untrusted(row.escalation_reason),
+            "summary": _untrusted(row.escalation_summary),
+        }
+    failure = (
+        None
+        if row.failure_reason is None
+        else {"reason": row.failure_reason, "detail": row.failure_detail}
+    )
+    flagged = row.cancel_requested_at
+    return {
+        "id": row.id,
+        "pr": row.pr,
+        "number": row.number,
+        "state": row.state,
+        "head_sha": row.head_sha,
+        "agent_id": row.agent_id,
+        "job_id": row.job_id,
+        "base_agent_id": row.base_agent_id,
+        "comment_ids": list(row.comment_ids),
+        "delivered": delivered,
+        "counted": row.counted,
+        "cancel_requested_at": None if flagged is None else ts(flagged),
+        "cancel_reason": row.cancel_reason,
+        "note_sha256": row.note_sha256,
+        "include_existing": row.include_existing,
+        "escalation": escalation,
+        "failure": failure,
+        "started": None if row.started_at is None else ts(row.started_at),
+        "ended": None if row.ended_at is None else ts(row.ended_at),
+        "warnings": list(row.warnings),
     }
 
 

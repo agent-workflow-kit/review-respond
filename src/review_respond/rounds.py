@@ -193,9 +193,7 @@ def list_rounds(conn: sqlite3.Connection, pr: str) -> list[RoundRow]:
     """The rounds of a PR, oldest first."""
     return [
         _row(r)
-        for r in conn.execute(
-            f"SELECT {_COLUMNS} FROM rounds WHERE pr = ? ORDER BY number", (pr,)
-        )
+        for r in conn.execute(f"SELECT {_COLUMNS} FROM rounds WHERE pr = ? ORDER BY number", (pr,))
     ]
 
 
@@ -295,9 +293,7 @@ class Rounds:
     def _block(self, conn: sqlite3.Connection, row: RoundRow, reason: str) -> None:
         due.set_block_in(conn, row.pr, reason, due.eligible_ids(conn, row.pr), now=self._now())
 
-    def _end(
-        self, row: RoundRow, to: str, counted: bool, **more: object
-    ) -> dict[str, object]:
+    def _end(self, row: RoundRow, to: str, counted: bool, **more: object) -> dict[str, object]:
         return {
             "state": to,
             "ended_at": self._now(),
@@ -447,9 +443,7 @@ class Rounds:
         return self._run(round_id, frozenset({"queued"}), body)
 
     def _cancel_with(self, round_id: str, reason: str) -> Transition:
-        return self._run(
-            round_id, frozenset({"queued"}), lambda c, r: self._canceled(c, r, reason)
-        )
+        return self._run(round_id, frozenset({"queued"}), lambda c, r: self._canceled(c, r, reason))
 
     def cancel_pr_closed(self, round_id: str) -> Transition:
         return self._cancel_with(round_id, "pr_closed")
@@ -507,7 +501,8 @@ class Rounds:
             if not delivered:
                 return self._canceled(conn, row, "nothing_to_respond")
             conn.execute(
-                "UPDATE prs SET read_failures = 0, rev = rev + 1 WHERE pr = ? AND read_failures != 0",
+                "UPDATE prs SET read_failures = 0, rev = rev + 1"
+                " WHERE pr = ? AND read_failures != 0",
                 (row.pr,),
             )
             return {
@@ -582,9 +577,7 @@ class Rounds:
         """The run ended ``done``, the artifact validated and the stored diff was built: the
         delivered comments are handled and ``extra`` (the pending record's insert) runs in the
         same transaction. TODO(#29), TODO(#37): the record and ``post-pending``."""
-        return self._run(
-            round_id, frozenset({"running"}), lambda c, r: self._pending(c, r, extra)
-        )
+        return self._run(round_id, frozenset({"running"}), lambda c, r: self._pending(c, r, extra))
 
     def to_escalated(
         self,
@@ -634,7 +627,9 @@ class Rounds:
             if mapped.to == "reread":
                 raise ValueError("a signal exit is never an outcome: re-read agent-spawn show")
             if mapped.to == "running":
-                return None if row.counted or not mapped.counted else ({"counted": 1}, "run_started")
+                return (
+                    None if row.counted or not mapped.counted else ({"counted": 1}, "run_started")
+                )
             if mapped.to == "pending":
                 return self._pending(conn, row, None)
             if mapped.to == "escalated":

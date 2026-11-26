@@ -11,8 +11,8 @@ Seams owned by later issues:
   the PR state table derives for it (`waiting`, `capacity`) and listed in the human output.
 - TODO(#19): `prs.base_agent` has no writer yet (`resolve_base`); until then a PR with eligible
   comments and no stored base agent gets the `no_agent` block, as the due rule says.
-- TODO(#18), TODO(#29): `RoundFacts` (rounds, counted, open record) comes from the rounds and
-  records tables; `pending_state` log events belong to #29.
+- `RoundFacts` come from the rounds table (`rounds.round_facts`); TODO(#29): the open record
+  comes from the records table; `pending_state` log events belong to #29.
 - Step 5 (housekeeping) and step 6 (hook delivery) arrive with the issues that own them.
 """
 
@@ -25,7 +25,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import due, prstate
+from . import due, prstate, rounds
 from .audit import format_ts
 from .config import Config
 from .detect import Detection, HostResult, StoredPr, get_pr
@@ -164,7 +164,7 @@ class _Pass:
             return result
         if pr_lease is not None and open_pr.host_state == "open":
             inputs = due.load_inputs(
-                conn, self.settings, pr, now=self.now(), facts=due.RoundFacts()
+                conn, self.settings, pr, now=self.now(), facts=rounds.round_facts(conn, pr)
             )
             applied = due.apply(pr_lease, pr, inputs)
             result.due, result.why = applied.due, applied.why

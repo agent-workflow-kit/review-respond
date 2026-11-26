@@ -52,7 +52,9 @@ def store(tmp_path: Path, gateway: Gateway) -> Iterator[Store]:
     opened = Store.open(open_state_dir(tmp_path / "state" / "rr"), write=True, close_state=True)
     opened.clock = gateway.clock
     with opened.transaction() as conn:
-        conn.execute("INSERT INTO meta (key, value) VALUES ('installed_at', ?)", ("2026-01-01T12:00:00Z",))
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('installed_at', ?)", ("2026-01-01T12:00:00Z",)
+        )
     yield opened
     opened.close()
 
@@ -80,6 +82,12 @@ class Env:
         with store.transaction() as conn:
             conn.execute("UPDATE prs SET records_current = 1")
 
+    def take_again(self) -> Lease:
+        """The PR lease again, after a test gave it up for a child process."""
+        self.lease = self.store.try_acquire(pr_lease_key(pr_digest(self.pr)), heartbeat=None)
+        assert self.lease is not None
+        return self.lease
+
     def row(self, rid: str) -> RoundRow:
         found = get_round(self.store.conn, rid)
         assert found is not None
@@ -91,7 +99,9 @@ class Env:
         return rec.state, rec.round
 
     def block(self) -> dict[str, Any] | None:
-        text = self.store.conn.execute("SELECT block FROM prs WHERE pr = ?", (self.pr,)).fetchone()[0]
+        text = self.store.conn.execute("SELECT block FROM prs WHERE pr = ?", (self.pr,)).fetchone()[
+            0
+        ]
         return None if text is None else json.loads(text)
 
     def queued(self, **kw: Any) -> str:
@@ -155,7 +165,9 @@ def test_a_prefix_of_four_to_eight_characters_resolves_when_unique(env: Env) -> 
         assert resolve_round_id(env.store.conn, rid[: 3 + n]) == rid
 
 
-@pytest.mark.parametrize("text", ["rd-", "rd-abc", "rd-ABCD", "rd-abcd1", "rd-abcdefghi", "rp-abcd", "x"])
+@pytest.mark.parametrize(
+    "text", ["rd-", "rd-abc", "rd-ABCD", "rd-abcd1", "rd-abcdefghi", "rp-abcd", "x"]
+)
 def test_a_malformed_round_id_is_a_usage_error(env: Env, text: str) -> None:
     with pytest.raises(CliError) as err:
         resolve_round_id(env.store.conn, text)
@@ -322,7 +334,9 @@ def test_record_job_is_for_a_queued_round_only(env: Env) -> None:
 # ---- queued -> canceled (four rows) and stop -------------------------------------------------
 
 
-def test_queued_job_finds_the_cancel_flag_and_ends_canceled_with_the_stored_reason(env: Env) -> None:
+def test_queued_job_finds_the_cancel_flag_and_ends_canceled_with_the_stored_reason(
+    env: Env,
+) -> None:
     rid = env.queued()
     assert env.rounds.request_cancel(rid, "pr_closed").changed
     got = env.rounds.cancel_flagged(rid)
@@ -425,7 +439,9 @@ def test_reconcile_of_a_lost_job_fails_the_round_job_lost_and_blocks_failed(env:
     assert block is not None and block["reason"] == "failed"
 
 
-def test_reconcile_of_a_lost_job_with_the_cancel_flag_cancels_with_the_stored_reason(env: Env) -> None:
+def test_reconcile_of_a_lost_job_with_the_cancel_flag_cancels_with_the_stored_reason(
+    env: Env,
+) -> None:
     rid = env.queued()
     env.rounds.request_cancel(rid, "pr_closed")
     env.rounds.reconcile_lost(rid)
@@ -472,7 +488,9 @@ def test_start_skips_a_comment_edited_since_it_was_shown(env: Env) -> None:
     rid = env.queued()
     rec = env.hs.get(env.pr, C1)
     assert rec is not None
-    got = env.rounds.start(rid, (C1, C2), head_sha=HEAD, expected={C1: "0" * 64, C2: rec.body_sha256})
+    got = env.rounds.start(
+        rid, (C1, C2), head_sha=HEAD, expected={C1: "0" * 64, C2: rec.body_sha256}
+    )
     # C2's hash differs from what the stored C2 has, so both are stale: nothing is delivered
     assert got.row.state == "canceled"
     assert env.comment(C1)[0] == "unhandled"
@@ -489,7 +507,9 @@ def test_start_delivers_only_the_comments_whose_shown_hash_still_holds(env: Env)
     assert env.comment(C2)[0] == "unhandled"
 
 
-def test_start_of_an_include_existing_round_also_takes_seen_comments(env: Env, store: Store) -> None:
+def test_start_of_an_include_existing_round_also_takes_seen_comments(
+    env: Env, store: Store
+) -> None:
     with store.transaction() as conn:
         conn.execute("UPDATE comments SET state = 'seen' WHERE comment_id = ?", (C2,))
     rid = env.queued(include_existing=True)
@@ -658,7 +678,12 @@ def test_the_block_records_the_comment_set_released_by_the_round(env: Env) -> No
 
 @pytest.mark.parametrize(
     ("reason", "detail"),
-    [("nope", None), ("agent_failed", "schema"), ("artifact_invalid", "nope"), ("job_lost", "json")],
+    [
+        ("nope", None),
+        ("agent_failed", "schema"),
+        ("artifact_invalid", "nope"),
+        ("job_lost", "json"),
+    ],
 )
 def test_to_failed_refuses_an_open_reason_or_a_misplaced_detail(
     env: Env, reason: str, detail: str | None
@@ -680,7 +705,9 @@ def test_a_running_round_that_the_finalizer_cannot_find_a_job_for_fails_job_lost
 
 def test_finish_run_wait_done_valid_goes_pending(env: Env) -> None:
     rid = env.running()
-    got = env.rounds.finish_run(rid, RunEnd(command="wait", exit=0, phase="session", outcome="done"))
+    got = env.rounds.finish_run(
+        rid, RunEnd(command="wait", exit=0, phase="session", outcome="done")
+    )
     assert got.row.state == "pending" and got.row.counted is True
 
 
@@ -707,7 +734,11 @@ def test_finish_run_launch_exit_13_escalates_uncounted_with_the_hook_cause(env: 
     rid = env.running()
     end = RunEnd(command="launch", exit=13, phase="launch", outcome="escalated")
     got = env.rounds.finish_run(rid, end)
-    assert (got.row.state, got.row.counted, got.row.escalation_cause) == ("escalated", False, "hook")
+    assert (got.row.state, got.row.counted, got.row.escalation_cause) == (
+        "escalated",
+        False,
+        "hook",
+    )
 
 
 def test_finish_run_reads_the_cancel_flag_from_the_row_not_the_caller(env: Env) -> None:
@@ -776,7 +807,9 @@ def test_a_pending_round_follows_its_record_to_a_terminal_state(env: Env, to: st
     assert row.state == to and row.ended_at is not None and row.counted is True
 
 
-@pytest.mark.parametrize("to", ["queued", "running", "pending", "failed", "escalated", "canceled", "x"])
+@pytest.mark.parametrize(
+    "to", ["queued", "running", "pending", "failed", "escalated", "canceled", "x"]
+)
 def test_a_pending_round_cannot_go_to_another_state_by_its_record(env: Env, to: str) -> None:
     rid = env.reach("pending")
     with env.store.transaction() as conn, pytest.raises(ValueError):
@@ -873,7 +906,12 @@ def test_a_terminal_round_never_changes_again(env: Env, state: str) -> None:
 def test_round_facts_follow_the_rounds_of_the_pr(env: Env) -> None:
     conn = env.store.conn
     facts = round_facts(conn, env.pr)
-    assert (facts.queued, facts.running, facts.counted, facts.record_open) == (False, False, 0, False)
+    assert (facts.queued, facts.running, facts.counted, facts.record_open) == (
+        False,
+        False,
+        0,
+        False,
+    )
     rid = env.queued()
     assert round_facts(conn, env.pr).queued is True
     env.rounds.start(rid, (C1,), head_sha=HEAD)

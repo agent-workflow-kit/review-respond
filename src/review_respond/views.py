@@ -3,8 +3,9 @@
 Both are read-only commands: no lease, no audit or log writer, and they work on a state database
 newer than this binary. The state they print is derived from the stored rows (`due.derive_state`).
 
-TODO(#18): `show <round id>` and the rounds of a PR; TODO(#29): `show <pending id>` and the
-pending id of a PR. Until those tables exist such an id matches nothing (exit 10).
+`show <round id>` and the rounds of a PR come from the rounds table. TODO(#24): `finalize` (the
+finalizer runs in `show`) stays null; TODO(#29): `show <pending id>` and the pending id of a PR.
+Until that table exists an `rp-` id matches nothing (exit 10).
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import argparse
 import re
 from typing import Any, Final
 
-from . import prstate
+from . import prstate, rounds
 from .errors import CliError
 from .output import Context, Outcome, sanitize_line
 from .prref import REPO_ID_RE, parse_pr
@@ -76,12 +77,46 @@ def _comment_line(item: dict[str, Any]) -> str:
     return sanitize_line(head) + body
 
 
+def _round_line(item: dict[str, Any]) -> str:
+    return sanitize_line(f"  round {item['id']} #{item['number']} {item['state']}")
+
+
+def _show_round(ctx: Context, store: Store, round_id: str) -> Outcome:
+    row = rounds.get_round(store.conn, round_id)
+    if row is None:
+        raise CliError("not_found", "no round matches")
+    item = prstate.round_object(store.conn, row)
+    comments = [
+        prstate.comment_object(store, r)
+        for r in prstate.comment_records(store, row.pr)
+        if r.id in row.comment_ids and r.body_file is not None
+    ]
+    # TODO(#24): the finalizer runs here for a running round whose holder is gone; null until then
+    payload: dict[str, Any] = {
+        "object_type": "round",
+        "round": item,
+        "finalize": None,
+        "comments": comments,
+    }
+    lines = [_round_line(item) + f"  pr={item['pr']} counted={str(item['counted']).lower()}"]
+    if item["failure"] is not None:
+        lines.append(sanitize_line(f"  failure: {item['failure']['reason']}"))
+    if item["escalation"] is not None:
+        lines.append("  escalation (agent-written, untrusted):")
+        for part in ("reason", "summary"):
+            lines += ["    " + ln for ln in (item["escalation"][part] or "").split("\n")]
+    human = "\n".join(lines) + "\n" + "".join(_comment_line(c) + "\n" for c in comments)
+    return Outcome(payload, human)
+
+
 def handle_show(ctx: Context, args: argparse.Namespace) -> Outcome:
     store = _store(ctx)
     assert ctx.settings is not None
     text: str = args.ref
     if _OBJECT_ID_RE.fullmatch(text):
-        raise CliError("not_found", "no round or pending record matches")  # TODO(#18, #29)
+        if text.startswith("rp-"):
+            raise CliError("not_found", "no round or pending record matches")  # TODO(#29)
+        return _show_round(ctx, store, rounds.resolve_round_id(store.conn, text))
     if text.startswith(("rd-", "rp-")) and "/" not in text and "#" not in text:
         raise CliError("usage", "a round or pending id is rd-/rp- plus 4 to 8 characters")
     pr = _resolve_pr(store, text)
@@ -89,6 +124,19 @@ def handle_show(ctx: Context, args: argparse.Namespace) -> Outcome:
     now = store.clock.now().timestamp()
     item = prstate.pr_object(store.conn, ctx.settings, stored, now)
     comments = [prstate.comment_object(store, r) for r in prstate.comment_records(store, pr)]
-    payload: dict[str, Any] = {"object_type": "pr", "pr": item, "rounds": [], "comments": comments}
-    human = _row(item) + "\n" + "".join(_comment_line(c) + "\n" for c in comments)
+    stored_rounds = [
+        prstate.round_object(store.conn, r) for r in rounds.list_rounds(store.conn, pr)
+    ]
+    payload: dict[str, Any] = {
+        "object_type": "pr",
+        "pr": item,
+        "rounds": stored_rounds,
+        "comments": comments,
+    }
+    human = (
+        _row(item)
+        + "\n"
+        + "".join(_round_line(r) + "\n" for r in stored_rounds)
+        + "".join(_comment_line(c) + "\n" for c in comments)
+    )
     return Outcome(payload, human)

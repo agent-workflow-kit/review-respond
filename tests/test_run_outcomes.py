@@ -164,8 +164,13 @@ ROWS: list[tuple[str, dict[str, Any], str, str | None, bool, int | None]] = [
     ),
     (
         "wait-15-killed-other-reason-with-flag",
-        dict(command="wait", exit=15, outcome="killed", end_reason="signal_kill",
-             cancel_requested=True),
+        dict(
+            command="wait",
+            exit=15,
+            outcome="killed",
+            end_reason="signal_kill",
+            cancel_requested=True,
+        ),
         "failed",
         "agent_failed",
         True,
@@ -245,9 +250,7 @@ def test_a_launch_phase_escalation_carries_the_hook_cause_and_a_session_one_does
 @pytest.mark.parametrize("code", [130, 143])
 def test_a_signal_exit_of_wait_is_never_an_outcome_by_itself(code: int) -> None:
     got = map_run_end(RunEnd(command="wait", exit=code))
-    assert got == Mapped(
-        to="reread", failure_reason=None, counted=False, job_exit=None, cause=None
-    )
+    assert got == Mapped(to="reread", failure_reason=None, counted=False, job_exit=None, cause=None)
 
 
 @pytest.mark.parametrize("command", ["resume", "launch"])
