@@ -818,16 +818,31 @@ def _env_overlay(
     return overlay, origin, warnings
 
 
-def _config_warnings(config: Config) -> list[ConfigWarning]:
-    if config.sandbox == "required":
+def sandbox_warnings(sandbox: str) -> list[ConfigWarning]:
+    """``sandbox_weakened`` for ``preferred`` and ``off`` (also used when a round's settings are built)."""
+    if sandbox == "required":
         return []
     return [
         ConfigWarning(
             "sandbox_weakened",
             "sandbox",
-            f"sandbox is {config.sandbox}: the respond session may run without a sandbox",
+            f"sandbox is {sandbox}: the respond session may run without a sandbox",
         )
     ]
+
+
+def _config_warnings(config: Config) -> list[ConfigWarning]:
+    return sandbox_warnings(config.sandbox)
+
+
+def load_document(path: Path) -> dict[str, Any]:
+    """A YAML or JSON document read like a config file (regular file, owned by you, not group or
+    world writable, size-capped, strict YAML) from a directory others cannot write to.
+    ``ConfigError`` otherwise."""
+    data = _read_file(path)
+    _check_parent(path)
+    _check_symlink_target_dir(path)
+    return _parse(data, _name(path))
 
 
 # --- loading -----------------------------------------------------------------------------------

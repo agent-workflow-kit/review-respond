@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "review-respond/permission-profile.json",
+  "title": "respond permission profile",
+  "description": "The permission profile file review-respond generates for every round (agent-spawn --permission-profile). It holds only configuration values and fixed strings, never text from a pull request. Only the keys claude-session allows an isolated run to set; the tool allow rules are an allowlist (the run's permission mode is dontAsk), the deny list always holds the fixed denies below, the sandbox has no network and no extra writable path (the throwaway is writable through ${CWD}).",
+  "type": "object",
+  "properties": {
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          },
+          "minItems": 1,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "deny": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rule"
+          },
+          "maxItems": 256,
+          "uniqueItems": true,
+          "allOf": [
+            { "contains": { "const": "Bash(git push:*)" } },
+            { "contains": { "const": "Bash(git remote:*)" } },
+            { "contains": { "const": "Bash(git config:*)" } },
+            { "contains": { "const": "Bash(git credential:*)" } },
+            { "contains": { "const": "Bash(gh:*)" } },
+            { "contains": { "const": "Bash(glab:*)" } },
+            { "contains": { "const": "Bash(agent-spawn:*)" } },
+            { "contains": { "const": "Bash(memoctl add:*)" } },
+            { "contains": { "const": "Bash(memoctl delete:*)" } },
+            { "contains": { "const": "Bash(memoctl cron:*)" } },
+            { "contains": { "const": "Bash(notice-route send:*)" } },
+            { "contains": { "const": "WebFetch" } },
+            { "contains": { "const": "WebSearch" } },
+            { "contains": { "const": "mcp__*" } },
+            { "contains": { "const": "Agent" } },
+            { "contains": { "const": "Task" } }
+          ]
+        }
+      },
+      "required": ["allow", "deny"],
+      "additionalProperties": false
+    },
+    "sandbox": {
+      "type": "object",
+      "properties": {
+        "filesystem": {
+          "type": "object",
+          "properties": {
+            "allowRead": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/path" },
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "denyRead": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/path" },
+              "minItems": 2,
+              "maxItems": 64,
+              "uniqueItems": true
+            },
+            "allowWrite": {
+              "type": "array",
+              "maxItems": 0,
+              "description": "Empty: the throwaway is the run's cwd and claude-session makes it writable itself."
+            },
+            "denyWrite": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/path" },
+              "minItems": 2,
+              "maxItems": 64,
+              "uniqueItems": true
+            }
+          },
+          "required": ["allowRead", "denyRead", "allowWrite", "denyWrite"],
+          "additionalProperties": false
+        },
+        "network": {
+          "type": "object",
+          "properties": {
+            "allowedDomains": {
+              "type": "array",
+              "maxItems": 0,
+              "description": "Empty: the respond session has no network."
+            }
+          },
+          "required": ["allowedDomains"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["filesystem", "network"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["permissions", "sandbox"],
+  "additionalProperties": false,
+  "$defs": {
+    "rule": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$"
+    },
+    "path": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 1024,
+      "pattern": "^(?:/|~/)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029*?\\[\\]{}\\\\]*$"
+    }
+  }
+}
