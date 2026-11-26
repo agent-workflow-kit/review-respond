@@ -421,3 +421,180 @@ def test_every_run_outcome_ends_the_round_as_the_table_says(
         assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
     if state == "escalated":
         assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("escalated",)]
+
+
+# ---- before anything runs --------------------------------------------------------------------
+
+
+def set_flag(sc: Scene, reason: str = "stopped") -> None:
+    sc.sql(
+        "UPDATE rounds SET cancel_requested_at = 1700000000, cancel_reason = ?, rev = rev + 1",
+        reason,
+    )
+
+
+def test_a_cancel_flag_before_the_job_cancels_the_round_without_any_sibling_call(
+    scene: Scene,
+) -> None:
+    set_flag(scene)
+    assert scene.job() == 0
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "stopped", 0)
+    assert scene.calls() == []
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("stopped",)]
+
+
+def test_a_round_that_is_not_queued_is_left_alone(scene: Scene) -> None:
+    scene.sql("UPDATE rounds SET state = 'canceled', cancel_reason = 'stopped', ended_at = 1")
+    assert scene.job() == 0
+    assert scene.calls() == []
+
+
+def test_a_live_holder_of_the_round_lease_makes_the_job_exit_0(scene: Scene) -> None:
+    store = Store.open(open_state_dir(scene.state), write=True, close_state=True)
+    try:
+        from review_respond.store import round_lease_key
+
+        held = store.try_acquire(round_lease_key(scene.rid), heartbeat=None)
+        assert held is not None
+        assert scene.job() == 0
+        held.release()
+    finally:
+        store.close()
+    assert scene.calls() == [] and scene.round()["state"] == "queued"
+
+
+def test_a_closed_pr_cancels_the_round(scene: Scene) -> None:
+    scene.fakes.script("forgectl", "show", json=builders.forgectl_show(state="closed"))
+    assert scene.job() == 0
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "pr_closed", 0)
+    assert [c.command for c in scene.calls()] == ["show"]
+
+
+@pytest.mark.parametrize("ref", ["-x", "a..b", "a b", "x@{y}", "end.lock", "a//b"])
+def test_a_head_ref_that_fails_check_ref_format_cancels_the_round(
+    scene: Scene, ref: str
+) -> None:
+    scene.fakes.script("forgectl", "show", json=builders.forgectl_show(head_ref=ref))
+    assert scene.job() == 0
+    assert (scene.round()["state"], scene.round()["cancel_reason"]) == (
+        "canceled",
+        "nothing_to_respond",
+    )
+
+
+def test_a_pr_that_is_not_yours_is_canceled_nothing_to_respond(scene: Scene) -> None:
+    doc = builders.forgectl_show()
+    doc["author"] = builders.REVIEWER
+    scene.fakes.script("forgectl", "show", json=doc)
+    assert scene.job() == 0
+    assert scene.round()["cancel_reason"] == "nothing_to_respond"
+
+
+def test_no_selected_comment_is_canceled_nothing_to_respond_and_not_counted(scene: Scene) -> None:
+    scene.fakes.script(
+        "forgectl", "show", json=builders.forgectl_show(head_sha=HEAD),
+        match={"positionals": {"pr": PR7}},
+    )  # fmt: skip
+    script_comments(scene.fakes, PR7, [])
+    assert scene.job() == 0
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == (
+        "canceled",
+        "nothing_to_respond",
+        0,
+    )
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [(None,)]
+
+
+def fail_show(sc: Scene) -> None:
+    sc.fakes.script(
+        "forgectl", "show",
+        json={"error": {"code": "internal", "message": "boom", "reason": None,
+                        "details": None, "lower_error": None}},
+        exit=12, schema=False,
+    )  # fmt: skip
+
+
+def fail_comments(sc: Scene) -> None:
+    sc.fakes.script(
+        "forgectl", "show", json=builders.forgectl_show(head_sha=HEAD),
+        match={"positionals": {"pr": PR7}},
+    )  # fmt: skip
+    sc.fakes.script(
+        "forgectl", "comments",
+        json={"error": {"code": "internal", "message": "boom", "reason": None,
+                        "details": None, "lower_error": None}},
+        exit=12, schema=False,
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("failing", [fail_show, fail_comments], ids=["show", "comments"])
+def test_a_failed_read_cancels_read_failed_and_counts_one_failure(
+    scene: Scene, failing: Callable[[Scene], None]
+) -> None:
+    failing(scene)
+    assert scene.job() == 0
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "read_failed", 0)
+    # one failure, whoever counted it (the check that made the round read fine: it reset to 0)
+    assert scene.sql("SELECT read_failures FROM prs") == [(1,)]
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [(None,)]
+
+
+def test_the_third_consecutive_read_failure_blocks_the_pr_failed(scene: Scene) -> None:
+    scene.sql("UPDATE prs SET read_failures = 2")
+    fail_show(scene)
+    assert scene.job() == 0
+    assert scene.sql("SELECT read_failures FROM prs") == [(3,)]
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
+
+
+def test_a_round_that_reaches_running_resets_the_read_failures(scene: Scene) -> None:
+    scene.sql("UPDATE prs SET read_failures = 2")
+    happy(scene)
+    assert scene.job() == 0
+    assert scene.sql("SELECT read_failures FROM prs") == [(0,)]
+
+
+def test_a_prompt_that_cannot_fit_fails_the_queued_round_and_delivers_nothing(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sc = make_round(world, capsys, limits={"prompt_bytes": 1024})
+    script_reads(sc)
+    assert sc.job() == 1
+    row = sc.round()
+    assert (row["state"], row["failure_reason"], row["counted"]) == ("failed", "internal", 0)
+    assert sc.comment_states()[C1] == "unhandled"
+    assert [c.tool for c in sc.calls()] == ["forgectl", "forgectl"]  # nothing was created
+    assert sc.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
+
+
+# ---- the flag during the round ------------------------------------------------------------------
+
+
+def test_a_flag_set_before_the_agent_starts_cancels_and_never_launches(scene: Scene) -> None:
+    import threading
+    import time
+
+    script_reads(scene)
+    script_throwaway(scene, sleep=1.5)
+
+    def flag() -> None:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if scene.fakes.calls("wtctl", "create"):
+                set_flag(scene)
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=flag)
+    t.start()
+    assert scene.job() == 0
+    t.join(timeout=30)
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "stopped", 0)
+    assert scene.comment_states()[C1] == "unhandled"  # back to where it was delivered from
+    assert scene.calls("agent-spawn") == []
+    assert scene.temp_files() == []
