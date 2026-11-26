@@ -12,9 +12,10 @@ Owned by later issues, left as seams:
   lookup is charged `LOOKUP_COST` to the host's `Budget`, the one the reads are charged to.
 - The comment records and the handled set are `handled.py` (#15): `HandledSet.record_read` is the
   `Detection(on_read=...)` hook; `absent_comment_ids` is the only rule about deletion (never from
-  an incomplete read). TODO(#17): `check` passes `HandledSet(...).record_read` as `on_read`.
+  an incomplete read). `check.py` passes `HandledSet(...).record_read` as `on_read`, with the
+  PR's lease held (`pr_scope`).
 - The due rule, settle and the PR block live in `due.py`.
-- TODO(#17): the `check` command, `check --pr`, `all_hosts_failed` and the `pass` lease.
+- The `check` command, `check --pr`, `all_hosts_failed` and the `pass` lease are `check.py`.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Final
@@ -742,6 +744,7 @@ class HostResult:
     read: tuple[str, ...] = ()  # of those, the ones that succeeded
     failed: tuple[str, ...] = ()  # and the ones that did not
     deferred: tuple[str, ...] = ()  # PRs the budget did not reach (first next pass)
+    held: tuple[str, ...] = ()  # PRs whose `pr:` lease another command held (`lease_held`)
     spent: int = 0  # estimated requests
 
 
@@ -751,7 +754,7 @@ class PassDetection:
 
     @property
     def all_failed(self) -> bool:
-        """No host could be read (`check` exits 12 `all_hosts_failed`, #17)."""
+        """No host could be read (`check` exits 12 `all_hosts_failed`)."""
         return bool(self.hosts) and not any(h.ok for h in self.hosts)
 
 
@@ -765,9 +768,14 @@ class Refreshed:
     # False: your account id is unknown, nothing was stored and ``not_yours`` means nothing; the
     # caller treats it as a failure (``identity_unknown``)
     account_known: bool = True
+    # the failure code of the account resolution when ``account_known`` is false
+    account_code: str | None = None
 
 
 OnRead = Callable[[StoredPr, CommentRead], None]
+# The scope of one PR's read: entered before the read, yields False when the PR's lease is held by
+# another command (the PR is skipped, not charged to the budget and attempted first next pass).
+PrScope = Callable[[str], AbstractContextManager[bool]]
 
 
 class Detection:
@@ -787,6 +795,7 @@ class Detection:
         *,
         log: LogWriter | None = None,
         on_read: OnRead | None = None,
+        pr_scope: PrScope | None = None,
         started_at: datetime | None = None,
     ) -> None:
         self.gateway = gateway
@@ -794,6 +803,7 @@ class Detection:
         self.settings = settings
         self.log = log
         self.on_read = on_read
+        self.pr_scope: PrScope = pr_scope or (lambda _pr: nullcontext(True))
         self.started_at = started_at or gateway.clock.now()
         self._checked = False
         self._whoami: _Whoami | CliError | None = None
@@ -945,6 +955,7 @@ class Detection:
         read: list[str] = []
         failed: list[str] = []
         deferred: list[str] = []
+        held: list[str] = []
         work = self._work(host, set(listed))
         for index, (pr, count) in enumerate(work):
             cost = read_cost(count)
@@ -953,16 +964,20 @@ class Detection:
             if attempted and not budget.fits(cost):
                 deferred = [p for p, _ in work[index:]]
                 break
-            budget.spend(cost)
-            attempted.append(pr)
-            try:
-                self.read_comments(pr)
-            except CliError as error:
-                if error.code != "lower_failed":
-                    raise
-                failed.append(pr)
-            else:
-                read.append(pr)
+            with self.pr_scope(pr) as free:
+                if not free:  # another command holds the PR: skipped, not charged
+                    held.append(pr)
+                    continue
+                budget.spend(cost)
+                attempted.append(pr)
+                try:
+                    self.read_comments(pr)
+                except CliError as error:
+                    if error.code != "lower_failed":
+                        raise
+                    failed.append(pr)
+                else:
+                    read.append(pr)
         return HostResult(
             host=host,
             ok=True,
@@ -972,6 +987,7 @@ class Detection:
             read=tuple(read),
             failed=tuple(failed),
             deferred=tuple(deferred),
+            held=tuple(held),
             spent=budget.spent,
         )
 
@@ -1049,10 +1065,14 @@ class Detection:
                 else {"code": outcome}
             )
             raise CliError("lower_failed", f"forgectl show failed ({code})", lower=lower)
-        account = self.account_id(facts.host)
+        account, account_code = self._resolve_account(facts.host)
         if account is None:
             return Refreshed(
-                stored=None, author_id=facts.author_id, not_yours=False, account_known=False
+                stored=None,
+                author_id=facts.author_id,
+                not_yours=False,
+                account_known=False,
+                account_code=account_code or "identity_unknown",
             )
         if facts.author_id != account:
             return Refreshed(stored=None, author_id=facts.author_id, not_yours=True)

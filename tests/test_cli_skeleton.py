@@ -127,8 +127,11 @@ def test_job_is_hidden_from_top_level_help(capsys: pytest.CaptureFixture[str]) -
             assert name in out
 
 
-# validate is implemented (tests/test_validate.py)
-@pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c != "validate"])
+# validate is implemented (tests/test_validate.py), check, list and show in tests/test_check.py
+IMPLEMENTED = {"validate", "check", "list", "show"}
+
+
+@pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c not in IMPLEMENTED])
 def test_unimplemented_command_exits_1_with_message(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -365,7 +368,7 @@ def test_explicit_auto_actor_on_tty_is_still_automatic(
 # ---- human_only: each of the four flags --------------------------------------------------
 
 HUMAN_ONLY_CASES = [
-    ("yes", ["check", "--yes"]),
+    ("yes", ["pending", "--yes"]),
     ("force", ["respond", "host/o/r#1", "--force"]),
     ("allow-sensitive", ["confirm", "rp-aaaaaaaa", "--allow-sensitive"]),
     ("allow-sensitive", ["approve", "rp-aaaaaaaa", "--allow-sensitive"]),
@@ -765,6 +768,8 @@ def test_subprocess_validate_without_siblings_fails_its_checks(tmp_path: Path) -
 # ---- every error code has a producer here or a tracked owner ---------------------------------
 
 # config: test_config.py; tool_missing, tool_too_old: test_validate.py;
+# not_found, all_hosts_failed, lower_failed, refused: test_check.py (refused: the per-PR error
+# of check --pr; the exit-20 refusal of respond belongs to #25);
 # state_unsafe, version_skew: test_store.py; lease_*: test_leases.py
 PRODUCED_HERE = {
     "lease_lost",
@@ -777,13 +782,16 @@ PRODUCED_HERE = {
     "version_skew",
     "tool_missing",
     "tool_too_old",
+    # test_check.py
+    "not_found",
+    "all_hosts_failed",
+    "lower_failed",
+    "refused",
 }
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
-    "not_found": 17,
     "vetoed": 37,
-    "lower_failed": 13,
-    "all_hosts_failed": 17,
+    "ambiguous": 29,
     "push_failed": 34,
     "reply_failed": 35,
     "outcome_unknown": 34,
@@ -791,8 +799,6 @@ OWNER_ISSUE = {
     "throwaway_missing": 32,
     "confirmation_required": 32,
     "escalated": 37,
-    "refused": 25,
-    "ambiguous": 17,
     "nothing_to_respond": 25,
 }
 
@@ -1108,7 +1114,8 @@ def test_dry_run_is_accepted_only_where_documented(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code = run(capsys, *argv_for(command, "--dry-run"))[0]
-    assert code == (1 if command in DRY_RUN else 2)
+    # `check --dry-run` is implemented: with no state directory it prints an empty result
+    assert code == (0 if command == "check" else 1 if command in DRY_RUN else 2)
 
 
 @pytest.mark.parametrize("command", [*COMMANDS, "_job"])

@@ -801,7 +801,7 @@ def test_a_stubbed_handler_raising_lower_failed_prints_the_exit_12_error_envelop
     detection = make(gateway, lease)
 
     # Only the error envelope is checked: a stubbed handler lets the CliError reach cli.main. This
-    # makes no claim about the result object of the real `check` command (#17).
+    # makes no claim about the result object of the real `check` command (see test_check.py).
     def check(_ctx: Context, _args: argparse.Namespace) -> Outcome:
         detection.read_comments(ref)
         return Outcome()

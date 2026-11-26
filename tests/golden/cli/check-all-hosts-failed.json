@@ -1,0 +1,23 @@
+{
+  "already_running": false,
+  "dry_run": false,
+  "error": {
+    "code": "all_hosts_failed",
+    "message": "no host could be read"
+  },
+  "hosts": [
+    {
+      "code": "auth_required",
+      "host": "git.example.test",
+      "ok": false,
+      "warnings": []
+    },
+    {
+      "code": "auth_required",
+      "host": "other.example.test",
+      "ok": false,
+      "warnings": []
+    }
+  ],
+  "prs": []
+}

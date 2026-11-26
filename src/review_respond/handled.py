@@ -35,7 +35,7 @@ from typing import Any, Final
 from .detect import CommentRead, ReadComment, StoredPr, absent_comment_ids
 from .errors import CliError
 from .output import sanitize_line
-from .store import Lease, StateDir, cas_update
+from .store import Lease, StateDir, Store, cas_update
 
 MAX_STORED_BODY_BYTES: Final = 64 * 1024
 _ATTEMPTS: Final = 3
@@ -147,6 +147,44 @@ def _record(row: Sequence[Any]) -> CommentRecord:
     return CommentRecord(*v)
 
 
+def read_record(conn: sqlite3.Connection, pr: str, comment_id: str) -> CommentRecord | None:
+    row = conn.execute(
+        f"SELECT {_COLUMNS} FROM comments WHERE pr = ? AND comment_id = ?", (pr, comment_id)
+    ).fetchone()
+    return None if row is None else _record(row)
+
+
+def read_records(
+    conn: sqlite3.Connection, pr: str, state: str | None = None
+) -> list[CommentRecord]:
+    """The comment records of a PR, oldest settle first (a read: no lease needed)."""
+    sql = f"SELECT {_COLUMNS} FROM comments WHERE pr = ?"
+    args: tuple[str, ...] = (pr,)
+    if state is not None:
+        sql += " AND state = ?"
+        args = (pr, state)
+    return [_record(r) for r in conn.execute(sql + " ORDER BY body_seen_at, comment_id", args)]
+
+
+def stored_body(store: Store, pr: str, comment_id: str) -> StoredBody:
+    """The stored text of a comment, sanitized (control and invisible characters become visible
+    markers; line breaks stay). A read: no lease needed.
+
+    Errors: ``internal`` when there is nothing to read (an unknown comment or PR, a row without a
+    file, a store not opened from a state directory); ``state_unsafe`` when the stored file is
+    missing, altered or unsafe."""
+    record = read_record(store.conn, pr, comment_id)
+    stored = store.source
+    if record is None or stored is None:
+        raise CliError("internal", "no stored text for this comment")
+    stored_pr = store.conn.execute("SELECT digest FROM prs WHERE pr = ?", (pr,)).fetchone()
+    if record.body_file is None or stored_pr is None:
+        raise CliError("internal", "no stored text for this comment")
+    raw = stored.get_file(stored_pr[0], record.body_file)
+    text = "\n".join(sanitize_line(part) for part in raw.decode("utf-8", "replace").split("\n"))
+    return StoredBody(text, record.body_bytes > len(raw), record.body_bytes)
+
+
 def _flag(value: bool | None) -> int | None:
     return None if value is None else int(value)
 
@@ -168,39 +206,14 @@ class HandledSet:
     # -- reading ----------------------------------------------------------------------------
 
     def get(self, pr: str, comment_id: str) -> CommentRecord | None:
-        row = self.lease.store.conn.execute(
-            f"SELECT {_COLUMNS} FROM comments WHERE pr = ? AND comment_id = ?", (pr, comment_id)
-        ).fetchone()
-        return None if row is None else _record(row)
+        return read_record(self.lease.store.conn, pr, comment_id)
 
     def records(self, pr: str, state: str | None = None) -> list[CommentRecord]:
-        sql = f"SELECT {_COLUMNS} FROM comments WHERE pr = ?"
-        args: tuple[str, ...] = (pr,)
-        if state is not None:
-            sql += " AND state = ?"
-            args = (pr, state)
-        rows = self.lease.store.conn.execute(sql + " ORDER BY body_seen_at, comment_id", args)
-        return [_record(r) for r in rows]
+        return read_records(self.lease.store.conn, pr, state)
 
     def body(self, pr: str, comment_id: str) -> StoredBody:
-        """The stored text of a comment, sanitized (control and invisible characters become
-        visible markers; line breaks stay).
-
-        Errors: ``internal`` when there is nothing to read (an unknown comment or PR, a row without
-        a file, a store not opened from a state directory); ``state_unsafe`` when the stored file
-        is missing, altered or unsafe."""
-        record = self.get(pr, comment_id)
-        stored = self.lease.store.source
-        if record is None or stored is None:
-            raise CliError("internal", "no stored text for this comment")
-        stored_pr = self.lease.store.conn.execute(
-            "SELECT digest FROM prs WHERE pr = ?", (pr,)
-        ).fetchone()
-        if record.body_file is None or stored_pr is None:
-            raise CliError("internal", "no stored text for this comment")
-        raw = stored.get_file(stored_pr[0], record.body_file)
-        text = "\n".join(sanitize_line(part) for part in raw.decode("utf-8", "replace").split("\n"))
-        return StoredBody(text, record.body_bytes > len(raw), record.body_bytes)
+        """The stored text of a comment, sanitized (see ``stored_body``)."""
+        return stored_body(self.lease.store, pr, comment_id)
 
     # -- a read -----------------------------------------------------------------------------
 
@@ -209,8 +222,8 @@ class HandledSet:
         verdicts, edits, resolution and deletion, in one transaction.
 
         The caller must serialize reads of one PR on one lease: two readers on different leases
-        could apply an older read over a newer one. TODO(#17): ``check`` must hold the PR lease
-        around the detection that calls this hook.
+        could apply an older read over a newer one. ``check`` holds the PR lease around the
+        detection that calls this hook (``Detection(pr_scope=...)``).
 
         After the rows commit, stored body files no row refers to (and older than the grace
         period) are removed; files are shared between rows, so only the set of the PR is compared.

@@ -1,0 +1,14 @@
+{
+  "already_running": false,
+  "dry_run": false,
+  "error": {
+    "code": "lower_failed",
+    "lower_error": {
+      "code": "network_error",
+      "message": "down"
+    },
+    "message": "forgectl whoami failed (network_error)"
+  },
+  "hosts": [],
+  "prs": []
+}
