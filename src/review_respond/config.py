@@ -285,7 +285,8 @@ _GLOB: Final = _ecma(r"^(?!/)(?!.*/$)(?!.*//)(?!(?:.*/)?[.][.]?(?:/|$))[A-Za-z0-
 _NAME: Final = _ecma(r"^[A-Za-z0-9._@-]+$")
 _OWNER: Final = _ecma(r"^[A-Za-z0-9._-]+$")
 _QUEUE: Final = _ecma(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_SETTING_SOURCES: Final = _ecma(r"^(?:(?:user|project|local)(?:,(?:user|project|local))*)?$")
+# Only the empty list: claude-session refuses any setting source for the respond kind.
+_SETTING_SOURCES: Final = _ecma(r"^$")
 _PREFIX: Final = _ecma(r"^[^\s]+$")
 # Narrower than the schema's `^[^'\s]+$`: the cron line sources this file inside a shell command.
 _ENV_FILE: Final = _ecma(r"^[A-Za-z0-9._/~+@:=,-]+$")

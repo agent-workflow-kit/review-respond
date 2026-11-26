@@ -47,7 +47,7 @@ This plan implements [`interface.md`](interface.md) and [`design.md`](design.md)
 **Goal**: A due PR gets a round: throwaway, prompt, forked session, validated artifact, recorded outcome.
 **Success Criteria**: the round state table and the exit-code mapping of the run outcomes hold; a queued round whose job never ran is reconciled; fork lineage (base agent only changes on a confirmed round); cleanup of throwaways and forks; with and without jobsctl; `stop`; the prompt fence, the sanitizer and prompt limits; strict artifact validation (marker, ids, paths, sizes, `report.implicit`).
 **Tests**: process tests with fake agent-spawn and wtctl for every outcome code; a killed `_job`; label forgery and unrecorded agent ids; a prompt with a fence breakout; each artifact failure; the `live` fork round (spike regression).
-**Status**: Not Started
+**Status**: In Progress (session settings and the permission profile, issue #21: generated profile, validators and file writer done; rounds, job and artifact follow)
 
 ## Stage 3: Pending confirmations and stored diff
 

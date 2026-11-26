@@ -208,9 +208,9 @@
     },
     "setting_sources": {
       "type": "string",
-      "pattern": "^(?:(?:user|project|local)(?:,(?:user|project|local))*)?$",
+      "pattern": "^$",
       "default": "",
-      "description": "Passed as --setting-sources; empty loads none."
+      "description": "Passed as --setting-sources; must be empty (loads none): claude-session refuses any setting source for the respond kind (unsafe_setting_sources)."
     },
     "env_allowlist": {
       "type": "array",

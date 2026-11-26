@@ -14,7 +14,7 @@
       "Bash(git ls-files:*)",
       "Bash(git blame:*)",
       "Bash(make test:*)",
-      "Bash(uv run pytest:*)",
+      "Bash(python -m pytest:*)",
       "Read(//opt/toolchain/lib/**)",
       "Read(~/.cache/tools/**)"
     ],
@@ -29,7 +29,9 @@
       "Bash(memoctl add:*)",
       "Bash(memoctl delete:*)",
       "Bash(memoctl cron:*)",
+      "Bash(memoctl prune:*)",
       "Bash(notice-route send:*)",
+      "Bash(notice-route flush:*)",
       "WebFetch",
       "WebSearch",
       "mcp__*",

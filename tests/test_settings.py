@@ -13,53 +13,26 @@ from typing import Any
 import pytest
 
 from review_respond import settings
-from review_respond.config import Config, RepoSettings
+from review_respond.config import Config
 from review_respond.errors import CliError
 from review_respond.gateway import Gateway
 from review_respond.settings import (
     MANDATORY_DENIES,
-    build_profile,
     build_session_settings,
     check_throwaway_root,
     remove_profile_file,
     render_profile,
     write_profile_file,
 )
-from review_respond.store import open_state_dir
+from review_respond.store import StateDir, open_state_dir
 
 from .harness import schemas
 from .harness.fakes import Fakes
+from .settings_support import CFG, REPO, ROOT, SCHEMA_ID, STATE, home_env, prof, refused
 
-SCHEMA_ID = "review-respond/permission-profile.json"
-CFG = "/home/u/.config/review-respond"
-STATE = "/home/u/.local/state/review-respond"
-REPO = "git.example.test/team/service"
-ROOT = Path(__file__).resolve().parent.parent
+__all__ = ["home_env"]  # the fixture below is autouse through pytestmark
 
-
-def repo(**kw: Any) -> RepoSettings:
-    args: dict[str, Any] = dict(
-        settle="5m", max_rounds=3, reviewers=(), respond_fresh=False,
-        allow_commands=(), read_dirs=(),
-    )  # fmt: skip
-    args.update(kw)
-    return RepoSettings(**args)
-
-
-def refused(fn: Any, *a: Any, **kw: Any) -> CliError:
-    with pytest.raises(CliError) as info:
-        fn(*a, **kw)
-    assert info.value.code == "config_invalid"
-    return info.value
-
-
-def prof(allow_commands: Any = (), read_dirs: Any = (), **kw: Any) -> dict[str, Any]:
-    return build_profile(
-        repo(allow_commands=allow_commands, read_dirs=read_dirs),
-        config_dir=CFG,
-        state_dir=STATE,
-        **kw,
-    )
+pytestmark = pytest.mark.usefixtures("home_env")
 
 
 # ---- the generated document ---------------------------------------------------------------
@@ -71,7 +44,7 @@ def test_default_profile_golden(golden: Any) -> None:
 
 def test_repo_profile_golden(golden: Any) -> None:
     doc = prof(
-        allow_commands=(("make", "test"), ("uv", "run", "pytest")),
+        allow_commands=(("make", "test"), ("python", "-m", "pytest")),
         read_dirs=("/opt/toolchain/lib", "~/.cache/tools"),
     )
     golden.check("settings/profile-repo", doc, SCHEMA_ID)
@@ -151,11 +124,11 @@ def test_profile_has_no_text_from_outside_the_config_and_fixed_strings() -> None
 
 
 def test_allow_commands_become_prefix_rules() -> None:
-    allow = prof(allow_commands=(("make", "test"), ("uv", "run", "pytest"), ("make", "test")))[
+    allow = prof(allow_commands=(("make", "test"), ("python", "-m", "pytest"), ("make", "test")))[
         "permissions"
     ]["allow"]
     assert allow.count("Bash(make test:*)") == 1
-    assert "Bash(uv run pytest:*)" in allow
+    assert "Bash(python -m pytest:*)" in allow
 
 
 @pytest.mark.parametrize(
@@ -358,16 +331,24 @@ def test_unknown_sandbox_is_refused() -> None:
     refused(build_session_settings, config, REPO, config_dir=CFG, state_dir=STATE)
 
 
-@pytest.mark.parametrize(
-    "value", ["project", "local", "user,project", "project,user", "user,local"]
-)
-def test_setting_sources_from_the_checkout_are_refused(value: str) -> None:
-    refused(session, cfg(setting_sources=value))
-
-
-def test_setting_sources_user_only_or_none() -> None:
-    assert session(cfg(setting_sources="user")).setting_sources == ("user",)
+def test_setting_sources_are_always_empty() -> None:
     assert session(cfg(setting_sources="")).setting_sources == ()
+
+
+@pytest.mark.parametrize(
+    "value", ["user", "project", "local", "user,project", "project,user", "user,local"]
+)
+def test_any_setting_source_is_refused_at_config_load(value: str) -> None:
+    with pytest.raises(Exception, match="setting_sources"):
+        cfg(setting_sources=value)
+
+
+@pytest.mark.parametrize("value", ["user", "project", "local", "user,project"])
+def test_any_setting_source_is_refused_by_the_session_settings(value: str) -> None:
+    config = cfg()
+    object.__setattr__(config, "setting_sources", value)  # a config that skipped validation
+    err = refused(session, config)
+    assert "setting_sources" in err.message and "unsafe_setting_sources" in err.message
 
 
 def test_env_allowlist_sorted_and_unique() -> None:
@@ -456,27 +437,38 @@ def test_empty_allowlist_is_one_empty_flag(gateway: Gateway, fakes: Fakes) -> No
 # ---- the profile file ----------------------------------------------------------------------
 
 
+def state_prof(state: StateDir) -> dict[str, Any]:
+    """A profile whose state directory is the opened one (what the writer requires)."""
+    return prof(state_dir=os.fspath(state.path))
+
+
+def put(state: StateDir, round_id: str, doc: dict[str, Any]) -> Path:
+    return write_profile_file(state, round_id, doc, config_dir=CFG)
+
+
 def test_profile_file_is_private(tmp_path: Path) -> None:
     state = open_state_dir(tmp_path / "state", create=True)
-    path = write_profile_file(state, "rd-abcdefgh", prof())
+    doc = state_prof(state)
+    path = put(state, "rd-abcdefgh", doc)
     assert path == state.path / "profiles" / "rd-abcdefgh.json"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
-    assert path.read_bytes() == render_profile(prof())
+    assert path.read_bytes() == render_profile(doc)
     with pytest.raises(FileExistsError):
-        write_profile_file(state, "rd-abcdefgh", prof())
+        put(state, "rd-abcdefgh", doc)
     assert remove_profile_file(state, "rd-abcdefgh") is True
     assert remove_profile_file(state, "rd-abcdefgh") is False
 
 
 def test_profile_file_never_follows_a_planted_symlink(tmp_path: Path) -> None:
     state = open_state_dir(tmp_path / "state", create=True)
-    write_profile_file(state, "rd-aaaaaaaa", prof())
+    doc = state_prof(state)
+    put(state, "rd-aaaaaaaa", doc)
     target = tmp_path / "victim"
     target.write_text("keep")
     (state.path / "profiles" / "rd-bbbbbbbb.json").symlink_to(target)
     with pytest.raises(OSError):
-        write_profile_file(state, "rd-bbbbbbbb", prof())
+        put(state, "rd-bbbbbbbb", doc)
     assert target.read_text() == "keep"
 
 
@@ -486,17 +478,17 @@ def test_profile_file_never_follows_a_planted_symlink(tmp_path: Path) -> None:
 def test_profile_file_refuses_bad_round_ids(tmp_path: Path, rid: str) -> None:
     state = open_state_dir(tmp_path / "state", create=True)
     with pytest.raises(ValueError):
-        write_profile_file(state, rid, prof())
+        put(state, rid, state_prof(state))
     with pytest.raises(ValueError):
         remove_profile_file(state, rid)
 
 
 def test_an_invalid_document_is_never_written(tmp_path: Path) -> None:
     state = open_state_dir(tmp_path / "state", create=True)
-    bad = prof()
+    bad = state_prof(state)
     bad["hooks"] = {}
     with pytest.raises(CliError):
-        write_profile_file(state, "rd-abcdefgh", bad)
+        put(state, "rd-abcdefgh", bad)
     assert not (state.path / "profiles" / "rd-abcdefgh.json").exists()
 
 
@@ -505,13 +497,13 @@ def test_an_invalid_document_is_never_written(tmp_path: Path) -> None:
 
 def test_throwaway_root_returns_the_realpath(tmp_path: Path) -> None:
     d = tmp_path / "tw"
-    d.mkdir()
+    d.mkdir(mode=0o700)
     assert check_throwaway_root(str(d), config_dir=CFG, state_dir=STATE) == os.path.realpath(d)
 
 
 def test_throwaway_root_refuses_unsafe_paths(tmp_path: Path) -> None:
     d = tmp_path / "tw"
-    d.mkdir()
+    d.mkdir(mode=0o700)
     (tmp_path / "link").symlink_to(d)
     (d / "sub").mkdir()
     (d / "f").write_text("x")
@@ -542,6 +534,7 @@ def test_throwaway_inside_the_state_dir_is_refused(tmp_path: Path) -> None:
 def test_planted_config_in_the_throwaway_is_never_read(tmp_path: Path, monkeypatch: Any) -> None:
     tw = tmp_path / "tw"
     (tw / ".claude").mkdir(parents=True)
+    tw.chmod(0o700)
     (tw / ".claude" / "settings.json").write_text('{"hooks": {"PreToolUse": [{"x": 1}]}}')
     (tw / ".claude" / "settings.local.json").write_text("{}")
     seen: list[str] = []

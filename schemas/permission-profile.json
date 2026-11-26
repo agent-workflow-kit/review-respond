@@ -35,7 +35,9 @@
             { "contains": { "const": "Bash(memoctl add:*)" } },
             { "contains": { "const": "Bash(memoctl delete:*)" } },
             { "contains": { "const": "Bash(memoctl cron:*)" } },
+            { "contains": { "const": "Bash(memoctl prune:*)" } },
             { "contains": { "const": "Bash(notice-route send:*)" } },
+            { "contains": { "const": "Bash(notice-route flush:*)" } },
             { "contains": { "const": "WebFetch" } },
             { "contains": { "const": "WebSearch" } },
             { "contains": { "const": "mcp__*" } },
@@ -106,13 +108,15 @@
       "type": "string",
       "minLength": 1,
       "maxLength": 2048,
-      "pattern": "^[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029]+$"
+      "description": "A tool name with at most one parenthesized argument that holds no parenthesis. No control, format, bidirectional, separator, filler, surrogate, private-use or special character, and no character outside the basic plane; a newline is refused at the very end too.",
+      "pattern": "^(?![\\s\\S]*\\n)[A-Za-z_*][A-Za-z0-9_*]*(?:\\([^()\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u0600-\\u0605\\u061c\\u06dd\\u070f\\u0890-\\u0891\\u08e2\\u115f-\\u1160\\u17b4-\\u17b5\\u180b-\\u180f\\u2000-\\u200f\\u2028-\\u202f\\u205f-\\u206f\\u2800\\u3164\\ud800-\\uf8ff\\ufe00-\\ufe0f\\ufeff\\uffa0\\ufff0-\\uffff]*\\))?$"
     },
     "path": {
       "type": "string",
       "minLength": 2,
       "maxLength": 1024,
-      "pattern": "^(?:/|~/)[^\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029*?\\[\\]{}\\\\]*$"
+      "description": "An absolute or ~/ path: at least one segment, none empty, . or .., no trailing slash, no glob, escape or parenthesis character, and the character set of a rule.",
+      "pattern": "^(?![\\s\\S]*\\n)~?(?:/(?!\\.{1,2}(?:/|$))[^/*?\\[\\]{}\\\\()\\u0000-\\u001f\\u007f-\\u009f\\u00ad\\u034f\\u0600-\\u0605\\u061c\\u06dd\\u070f\\u0890-\\u0891\\u08e2\\u115f-\\u1160\\u17b4-\\u17b5\\u180b-\\u180f\\u2000-\\u200f\\u2028-\\u202f\\u205f-\\u206f\\u2800\\u3164\\ud800-\\uf8ff\\ufe00-\\ufe0f\\ufeff\\uffa0\\ufff0-\\uffff]+)+$"
     }
   }
 }
