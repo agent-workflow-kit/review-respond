@@ -765,6 +765,7 @@ def test_subprocess_validate_without_siblings_fails_its_checks(tmp_path: Path) -
 # ---- every error code has a producer here or a tracked owner ---------------------------------
 
 # config: test_config.py; tool_missing, tool_too_old: test_validate.py;
+# not_found, all_hosts_failed, ambiguous: test_check.py;
 # state_unsafe, version_skew: test_store.py; lease_*: test_leases.py
 PRODUCED_HERE = {
     "lease_lost",
@@ -777,13 +778,15 @@ PRODUCED_HERE = {
     "version_skew",
     "tool_missing",
     "tool_too_old",
+    # test_check.py
+    "not_found",
+    "all_hosts_failed",
+    "ambiguous",
 }
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
-    "not_found": 17,
     "vetoed": 37,
     "lower_failed": 13,
-    "all_hosts_failed": 17,
     "push_failed": 34,
     "reply_failed": 35,
     "outcome_unknown": 34,
@@ -792,7 +795,6 @@ OWNER_ISSUE = {
     "confirmation_required": 32,
     "escalated": 37,
     "refused": 25,
-    "ambiguous": 17,
     "nothing_to_respond": 25,
 }
 

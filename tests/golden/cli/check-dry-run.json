@@ -1,0 +1,23 @@
+{
+  "already_running": false,
+  "dry_run": true,
+  "hosts": [
+    {
+      "code": null,
+      "host": "git.example.test",
+      "ok": true,
+      "warnings": [
+        "not_read"
+      ]
+    }
+  ],
+  "prs": [
+    {
+      "errors": [],
+      "lease_held": false,
+      "pr": "git.example.test/org/repo#7",
+      "started_round": null,
+      "state": "waiting"
+    }
+  ]
+}

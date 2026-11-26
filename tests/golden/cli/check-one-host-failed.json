@@ -1,0 +1,27 @@
+{
+  "already_running": false,
+  "dry_run": false,
+  "hosts": [
+    {
+      "code": "upstream_error",
+      "host": "git.example.test",
+      "ok": false,
+      "warnings": []
+    },
+    {
+      "code": null,
+      "host": "other.example.test",
+      "ok": true,
+      "warnings": []
+    }
+  ],
+  "prs": [
+    {
+      "errors": [],
+      "lease_held": false,
+      "pr": "other.example.test/org/repo#3",
+      "started_round": null,
+      "state": "idle"
+    }
+  ]
+}

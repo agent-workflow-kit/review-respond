@@ -1,0 +1,60 @@
+{
+  "comments": [
+    {
+      "author_id": "acct-rev",
+      "body": "Please rename this.",
+      "delivered_from": null,
+      "delivered_sha256": null,
+      "edited": false,
+      "eligible": true,
+      "first_seen_at": "2023-11-14T22:13:20.000000Z",
+      "handled_reason": null,
+      "id": "gh:rc:c1",
+      "line": 3,
+      "path": "src/app.py",
+      "reason": null,
+      "state": "unhandled",
+      "thread_id": "gh:rt:t1"
+    },
+    {
+      "author_id": "acct-me",
+      "body": "mine",
+      "delivered_from": null,
+      "delivered_sha256": null,
+      "edited": false,
+      "eligible": false,
+      "first_seen_at": "2023-11-14T22:13:20.000000Z",
+      "handled_reason": null,
+      "id": "gh:rc:c2",
+      "line": 3,
+      "path": "src/app.py",
+      "reason": "own",
+      "state": "unhandled",
+      "thread_id": "gh:rt:t2"
+    }
+  ],
+  "object_type": "pr",
+  "pr": {
+    "base_agent": null,
+    "base_ref": "main",
+    "block": {
+      "reason": "no_agent",
+      "set_at": "2023-11-14T22:13:20.000000Z"
+    },
+    "edited": 0,
+    "head_ref": "feat/x",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "ineligible": 1,
+    "is_fork": false,
+    "pending_id": null,
+    "pr": "git.example.test/org/repo#7",
+    "repo": "git.example.test/org/repo",
+    "rounds": 0,
+    "seen": 0,
+    "state": "waiting",
+    "unhandled": 1,
+    "updated": "2026-01-01T12:00:00.000000Z",
+    "waiting_reason": "no_agent"
+  },
+  "rounds": []
+}
