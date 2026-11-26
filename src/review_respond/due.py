@@ -21,7 +21,8 @@ nothing is set or cleared for it. Its derived state is shown from the records as
 
 Seams owned by later issues (``RoundFacts`` carries them, all defaulting to "none"):
 
-- TODO(#18): ``queued``, ``running`` and ``counted`` come from the rounds table.
+- ``queued``, ``running``, ``counted`` and (until #29) ``record_open`` come from the rounds table
+  (``rounds.round_facts``).
 - TODO(#29): ``record_open`` (a record pending, pushing or pushed) comes from the records table.
 - TODO(#19): ``agent_busy`` and the writer of ``prs.base_agent`` (``resolve_base``).
 - TODO(#37): ``post-attention`` ``round_limit`` fires once when ``apply`` reports ``new_block``.
@@ -270,6 +271,23 @@ def _require_lease(lease: Lease, pr: str) -> None:
         raise ValueError("the lease is not the pass lease or the lease of this PR")
 
 
+def set_block_in(
+    conn: sqlite3.Connection, pr: str, reason: str, comment_ids: Iterable[str], *, now: float
+) -> bool:
+    """``set_block`` inside the caller's open transaction (a round's own: the round row, its
+    comments and the block change together). The caller holds a lease that ``lease.transaction``
+    checked; the rules are those of ``set_block``."""
+    if reason not in BLOCK_REASONS:
+        raise ValueError("reason is not a block reason")
+    row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
+    if row is None or row[1] is not None:
+        return False
+    doc = {"reason": reason, "set_at": now, "comment_set_sha256": comment_set_sha256(comment_ids)}
+    return cas_update(
+        conn, "prs", "pr", pr, row[0], {"block": json.dumps(doc, separators=(",", ":"))}
+    )
+
+
 def set_block(lease: Lease, pr: str, reason: str, comment_ids: Iterable[str]) -> bool:
     """Store a block when the PR has none. False when it has one (an episode fires once and a
     block is never replaced) or is unknown. ``lease_lost`` and nothing written without the lease."""
@@ -277,17 +295,7 @@ def set_block(lease: Lease, pr: str, reason: str, comment_ids: Iterable[str]) ->
         raise ValueError("reason is not a block reason")
     _require_lease(lease, pr)
     with lease.transaction() as conn:
-        row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
-        if row is None or row[1] is not None:
-            return False
-        doc = {
-            "reason": reason,
-            "set_at": lease.store.clock.now().timestamp(),
-            "comment_set_sha256": comment_set_sha256(comment_ids),
-        }
-        return cas_update(
-            conn, "prs", "pr", pr, row[0], {"block": json.dumps(doc, separators=(",", ":"))}
-        )
+        return set_block_in(conn, pr, reason, comment_ids, now=lease.store.clock.now().timestamp())
 
 
 def clear_block(lease: Lease, pr: str, cause: str, *, expect: str | None = None) -> bool:
@@ -358,6 +366,11 @@ def _eligible_rows(conn: sqlite3.Connection, pr: str) -> list[tuple[str, float, 
         (pr,),
     ).fetchall()
     return [(r[0], r[1], r[2]) for r in rows]
+
+
+def eligible_ids(conn: sqlite3.Connection, pr: str) -> list[str]:
+    """The ids of the eligible unhandled comments (the set a block's hash covers)."""
+    return [cid for cid, *_ in _eligible_rows(conn, pr)]
 
 
 def load_inputs(

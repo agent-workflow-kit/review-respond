@@ -307,7 +307,7 @@ A round has the number `number` (1 for a PR's first round, incremented for every
 | (none) | the due rule holds (or a human `respond`), the `pre-round` hooks continued | `queued` | round row (`number`, `base_agent_id`, `trigger`, `forced`, `include_existing`); then the job is submitted and its job id (jobsctl) or the detached start time stored |
 | `queued` | `_job` finds `cancel_requested_at` set | `canceled` (the stored `cancel_reason`) | not counted |
 | `queued` | `_job` reads the PR closed or merged | `canceled` (`pr_closed`) | not counted |
-| `queued` | `_job`'s PR or comment read failed | `canceled` (`read_failed`) | not counted; no block, so the next due `check` starts a new round, until the third consecutive `read_failed` of the PR sets block `failed` (`prs.read_failures` counts them; a round of the PR that reaches `running`, or a human `respond`, resets it) and queues `post-attention` `failed` once (`details.round_id` only) |
+| `queued` | `_job`'s PR or comment read failed | `canceled` (`read_failed`) | not counted; no block, so the next due `check` starts a new round, until the third consecutive `read_failed` of the PR sets block `failed` (`prs.read_failures` is the same counter `check` raises for its own failed comment reads; a complete comment read, a round of the PR that reaches `running` and a human `respond` reset it) and queues `post-attention` `failed` once (`details.round_id` only) |
 | `queued` | `_job` selects no comment (or the PR is a fork or not yours, defensive) | `canceled` (`nothing_to_respond`) | not counted |
 | `queued` | `_job` re-read the PR and the comments and selected at least one comment | `running` | `head_sha`; each selected comment `delivered` with `delivered_sha256` and `delivered_from` |
 | `queued` | `stop` or the closed-PR sweep: the jobsctl job was canceled, or no job was submitted yet, or (detached) the job process is gone | `canceled` (`stopped` or `pr_closed`) | not counted |
@@ -319,7 +319,7 @@ A round has the number `number` (1 for a PR's first round, incremented for every
 | `pending` | its record reached `done` | `confirmed` | (the record's transaction) |
 | `pending` | its record became `rejected`, `expired` or `closed` | `rejected`, `expired` or `closed` | (the record's transaction) |
 
-Terminal states: `confirmed`, `rejected`, `expired`, `closed`, `escalated`, `failed`, `canceled`; they are immutable. A round stays `pending` while its record is `pending`, `pushing` or `pushed`. Cleanup of throwaways and forks for every terminal round: Cleanup. An `escalated` round is never retried: `post-attention` reason `escalated` fires; `show <round>` prints the agent's question (`escalation.reason`, `escalation.summary`, untrusted, each at most 4 KiB); `respond <pr> --note-file F` starts a new round from the PR's base, so the note must carry the answer in full.
+Terminal states: `confirmed`, `rejected`, `expired`, `closed`, `escalated`, `failed`, `canceled`; they are immutable. A round stays `pending` while its record is `pending`, `pushing` or `pushed`. When `cancel_requested_at` is set, the stored `cancel_reason` is the round's cancel reason whichever other cancel reason the job saw (a `stop` flag wins over `pr_closed`, `nothing_to_respond` and `read_failed`). A `_job` whose `start` selects no comment ends the round `canceled` (`nothing_to_respond`), not counted and without a block. Cleanup of throwaways and forks for every terminal round: Cleanup. An `escalated` round is never retried: `post-attention` reason `escalated` fires; `show <round>` prints the agent's question (`escalation.reason`, `escalation.summary`, untrusted; each is stored cut to 4096 UTF-8 bytes at a character boundary, and the printed text is sanitized first (control characters become `<U+XXXX>`) and then cut to at most 4096 characters, never inside a `<U+XXXX>` marker); `respond <pr> --note-file F` starts a new round from the PR's base, so the note must carry the answer in full.
 
 `check` housekeeping reconciles queued rounds under the PR's `pr:` lease:
 
@@ -382,6 +382,8 @@ One table maps every exit of `resume`, `launch` and `wait`, with the result's `p
 | (SIGTERM of `_job`) | without `cancel_requested_at` | `failed` | `job_terminated` | per Counting | 12 |
 | wtctl `create --throwaway` | any non-zero exit (the sibling error in `lower_error`) | `failed` | `throwaway_failed` | no | 12 |
 | (none) | job gone, no agent found (finalizer or queued reconcile) | `failed` | `job_lost` | no | |
+
+An exit code, or a command and code pair, that the table does not name ends the round `failed` with `internal` (not counted unless the run reached `working`; `_job` exit 1). SIGTERM of `_job` with `cancel_requested_at` set ends the round `canceled` (the stored `cancel_reason`; `_job` exit 0).
 
 The closed `failure.reason` values are `throwaway_failed`, `launch_failed`, `vetoed`, `refused`, `agent_gone`, `unreported`, `agent_failed`, `agent_lost`, `timeout`, `job_terminated`, `job_lost`, `artifact_missing`, `artifact_invalid`, `implicit_done`, `empty_result`, `diff_failed` and `internal`. An invalid artifact carries a closed `failure.detail` (Artifact).
 
@@ -852,7 +854,7 @@ None in 0.x. A `browse` command (`--focus`, `--result-file`) is a 1.x item and f
 ## Objects
 
 - **PR state** (`list`, `show`): `pr`, `repo`, `state`, `waiting_reason`, `block` (`reason`, `set_at`), `head_sha`, `head_ref`, `base_ref`, `is_fork`, `base_agent`, `rounds`, `unhandled`, `seen`, `ineligible`, `edited`, `pending_id`, `updated`.
-- **Round** (`respond`, `show`, `list --json`): `id`, `pr`, `number`, `state`, `head_sha`, `agent_id`, `base_agent_id`, `job_id`, `comment_ids`, `delivered` (comment ids), `counted`, `cancel_requested_at`, `cancel_reason` (`stopped`, `pr_closed`, `nothing_to_respond`, `read_failed`), `note_sha256`, `include_existing`, `escalation` (`{reason, summary}` or null, untrusted), `failure` (`reason`, `detail`), `started`, `ended`, `warnings`.
+- **Round** (`respond`, `show`): `id`, `pr`, `number`, `state`, `head_sha` (null until the job starts the round), `agent_id`, `base_agent_id`, `job_id`, `comment_ids`, `delivered` (comment ids), `counted`, `cancel_requested_at`, `cancel_reason` (`stopped`, `pr_closed`, `nothing_to_respond`, `read_failed`), `note_sha256`, `include_existing`, `escalation` (`{reason, summary}` or null, untrusted), `failure` (`reason`, `detail`), `started`, `ended`, `warnings`.
 - **Pending confirmation**: Pending confirmations, Record.
 - **Comment record** (`show --json`): `id`, `author_id` (null when the host gave none), `eligible`, `reason`, `state`, `delivered_sha256`, `delivered_from`, `handled_reason`, `first_seen_at`, `edited`, `thread_id`, `path`, `line`, `body` (untrusted, sanitized).
 

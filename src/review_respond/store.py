@@ -178,6 +178,69 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         # comment never moves it). Null for rows stored before it existed: read as first_seen_at.
         "ALTER TABLE comments ADD COLUMN unhandled_since REAL",
     ),
+    (
+        # The rounds (#18). `trigger_kind` is the interface's `trigger` (TRIGGER is an SQL word).
+        # `comment_ids` is the JSON list of the comments the job delivered; `counted` is 1 once
+        # the run started (Counting) and never goes back. A terminal row always has `ended_at`; a
+        # failed one its `failure_reason`; a canceled one its `cancel_reason`. Times are epoch
+        # seconds. At most one round of a PR is queued or running, and numbers never repeat.
+        """CREATE TABLE rounds (
+            id TEXT PRIMARY KEY CHECK (length(id) = 11 AND id GLOB
+                'rd-[a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7][a-z2-7]'),
+            pr TEXT NOT NULL REFERENCES prs (pr),
+            number INTEGER NOT NULL CHECK (number >= 1),
+            state TEXT NOT NULL CHECK (state IN ('queued', 'running', 'pending', 'confirmed',
+                'rejected', 'expired', 'closed', 'escalated', 'failed', 'canceled')),
+            rev INTEGER NOT NULL DEFAULT 0,
+            trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('check', 'respond')),
+            forced INTEGER NOT NULL DEFAULT 0 CHECK (forced IN (0, 1)),
+            include_existing INTEGER NOT NULL DEFAULT 0 CHECK (include_existing IN (0, 1)),
+            note_sha256 TEXT,
+            base_agent_id TEXT,
+            job_id TEXT,
+            detached_started_at REAL,
+            agent_id TEXT,
+            throwaway_id TEXT,
+            head_sha TEXT,
+            comment_ids TEXT NOT NULL DEFAULT '[]',
+            counted INTEGER NOT NULL DEFAULT 0 CHECK (counted IN (0, 1)),
+            cancel_requested_at REAL,
+            cancel_reason TEXT CHECK (cancel_reason IN ('stopped', 'pr_closed',
+                'nothing_to_respond', 'read_failed')),
+            failure_reason TEXT CHECK (failure_reason IN ('throwaway_failed', 'launch_failed',
+                'vetoed', 'refused', 'agent_gone', 'unreported', 'agent_failed', 'agent_lost',
+                'timeout', 'job_terminated', 'job_lost', 'artifact_missing', 'artifact_invalid',
+                'implicit_done', 'empty_result', 'diff_failed', 'internal')),
+            failure_detail TEXT CHECK (failure_detail IN ('frozen_file', 'json', 'schema',
+                'skill_marker', 'replies', 'paths', 'commit_message', 'path_state')),
+            escalation_reason TEXT,
+            escalation_summary TEXT,
+            escalation_cause TEXT CHECK (escalation_cause IN ('hook')),
+            warnings TEXT NOT NULL DEFAULT '[]',
+            created_at REAL NOT NULL,
+            started_at REAL,
+            ended_at REAL,
+            UNIQUE (pr, number),
+            CHECK (state NOT IN ('confirmed', 'rejected', 'expired', 'closed', 'escalated',
+                'failed', 'canceled') OR ended_at IS NOT NULL),
+            CHECK (state != 'failed' OR failure_reason IS NOT NULL),
+            CHECK (state != 'canceled' OR cancel_reason IS NOT NULL)
+        ) WITHOUT ROWID""",
+        "CREATE UNIQUE INDEX rounds_one_active ON rounds (pr) WHERE state IN ('queued', 'running')",
+        # The state table's rules, kept by the database as well as by rounds.py: a terminal round
+        # is immutable, `counted` never goes back, and a `pending` round only follows its record.
+        """CREATE TRIGGER rounds_terminal_is_immutable BEFORE UPDATE ON rounds
+        WHEN OLD.state IN ('confirmed', 'rejected', 'expired', 'closed', 'escalated', 'failed',
+            'canceled')
+        BEGIN SELECT RAISE(ABORT, 'a terminal round is immutable'); END""",
+        """CREATE TRIGGER rounds_counted_never_decreases BEFORE UPDATE ON rounds
+        WHEN NEW.counted < OLD.counted
+        BEGIN SELECT RAISE(ABORT, 'a counted round stays counted'); END""",
+        """CREATE TRIGGER rounds_pending_follows_its_record BEFORE UPDATE ON rounds
+        WHEN OLD.state = 'pending' AND NEW.state != OLD.state
+            AND NEW.state NOT IN ('confirmed', 'rejected', 'expired', 'closed')
+        BEGIN SELECT RAISE(ABORT, 'a pending round is settled by its record'); END""",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 
