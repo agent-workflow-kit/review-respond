@@ -5,7 +5,7 @@ A comment is eligible or carries exactly one reason it is not (`REASONS`). The r
 lookup run first (`prejudge`), so a comment that is ineligible anyway never costs a request; the
 write-access rule (`reviewers` or `forgectl access`) is the last one.
 
-Owned by later issues: TODO(#15) the handled set stores each verdict's `eligible` and `reason`.
+The handled set (`handled.py`) stores each verdict's `eligible` and `reason` per comment.
 """
 
 from __future__ import annotations
