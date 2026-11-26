@@ -233,7 +233,10 @@ class Gateway:
                     timed_out = True
                     out, err = self._stop_group(proc)
         except BaseException:
-            self._stop_group(proc)
+            if max_output is not None:
+                self._stop_bounded(proc, graceful=True)
+            else:
+                self._stop_group(proc)
             raise
         return self._result(tokens, proc.returncode, out, err, timed_out, overflow)
 
@@ -274,10 +277,13 @@ class Gateway:
                         proc.wait(timeout=None if deadline is None else deadline - time.monotonic())
                     except (subprocess.TimeoutExpired, ValueError):
                         timed_out = True
+            if timed_out or overflow:
+                # the output is capped already: what follows is discarded, never buffered
+                self._stop_bounded(proc, graceful=timed_out and not overflow)
         finally:
             sel.close()
-        if timed_out or overflow:
-            self._stop_group(proc)
+            for pipe in (proc.stdout, proc.stderr):
+                pipe.close()
         return bytes(streams["out"]), bytes(streams["err"]), timed_out, overflow
 
     def _timeout(self, timeout: Timeout) -> float | None:
@@ -320,6 +326,44 @@ class Gateway:
             _check_text(key, "environment name")
             _check_text(value, f"environment value of {key}")
         return tokens
+
+    @staticmethod
+    def _discard(proc: subprocess.Popen[bytes], seconds: float) -> None:
+        """Read and drop the pipes of ``proc`` until both end or ``seconds`` pass (no buffering)."""
+        deadline = time.monotonic() + seconds
+        with selectors.DefaultSelector() as sel:
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None and not pipe.closed:
+                    sel.register(pipe, selectors.EVENT_READ)
+            while sel.get_map():
+                wait = deadline - time.monotonic()
+                if wait <= 0:
+                    return
+                for key, _ in sel.select(wait):
+                    if not os.read(key.fd, 65536):
+                        sel.unregister(key.fileobj)
+
+    @classmethod
+    def _stop_bounded(cls, proc: subprocess.Popen[bytes], *, graceful: bool) -> None:
+        """Stop and reap the group of a ``max_output`` run without ever buffering its output.
+
+        ``graceful`` sends SIGTERM and waits the grace period first (a timeout); otherwise the group
+        is killed at once (an overflow, whose output is discarded anyway). Output that arrives
+        meanwhile is read and dropped, so a program that floods cannot grow this process.
+        """
+        pid = proc.pid
+        if graceful:
+            _signal_group(pid, signal.SIGTERM)
+            cls._discard(proc, _TERM_GRACE)
+        _signal_group(pid, signal.SIGKILL)
+        cls._discard(proc, _KILL_WAIT)
+        try:
+            proc.wait(timeout=_KILL_WAIT)
+        except subprocess.TimeoutExpired:
+            pass
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
 
     @staticmethod
     def _stop_group(proc: subprocess.Popen[bytes]) -> tuple[bytes, bytes]:
@@ -373,11 +417,6 @@ class Gateway:
             except RecursionError:
                 problem = "JSON nested too deeply"
         return Result(argv, code, stdout, stderr, doc, problem, timed_out, overflow)
-
-    def version(self, tool: str) -> tuple[int, int, int] | None:
-        """``<tool> --version`` parsed to a triple, or None when it does not print one."""
-        result = self.run([tool, "--version"], timeout=15.0, max_output=VERSION_OUTPUT_CAP)
-        return parse_version(result.stdout) if result.ok else None
 
 
 class _Tool:

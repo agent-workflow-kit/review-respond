@@ -142,7 +142,12 @@ def _absent(dep: Dependency, required: bool, *, on_path: bool = False) -> DepSta
 
 
 def require(gateway: Gateway, *tools: str) -> None:
-    """Exit 12 ``tool_missing`` or ``tool_too_old`` for the first of ``tools`` that fails."""
+    """Exit 12 ``tool_missing`` or ``tool_too_old`` for the first of ``tools`` that fails.
+
+    ``gateway`` must be built with ``validate.child_env`` (or an env whose ``PATH`` went through
+    ``safe_path``): only that cleaning keeps a relative or empty PATH entry from resolving a
+    program out of the current directory.
+    """
     for tool in tools:
         status = probe(gateway, BY_TOOL[tool], required=True)
         if status.ok:

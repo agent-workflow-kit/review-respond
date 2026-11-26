@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from review_respond.gateway import Gateway
+from review_respond.gateway import Gateway, parse_version
 
 from .harness.fakes import Fakes
 
@@ -413,12 +413,12 @@ def test_scripted_json_is_validated_against_the_pinned_schema(fakes: Fakes) -> N
 
 
 def test_version_is_answered_without_a_script(gateway: Gateway, fakes: Fakes) -> None:
-    assert gateway.version("forgectl") == (0, 55, 2)
-    assert gateway.version("agent-spawn") == (0, 34, 0)
-    assert gateway.version("pr-comment") == (0, 33, 0)
-    assert gateway.version("wtctl") == (0, 31, 0)
-    assert gateway.version("jobsctl") == (0, 32, 1)
-    assert gateway.version("claude-session") == (0, 45, 2)
+    assert parse_version(gateway.forgectl.version().stdout) == (0, 55, 2)
+    assert parse_version(gateway.agent_spawn.version().stdout) == (0, 34, 0)
+    assert parse_version(gateway.pr_comment.version().stdout) == (0, 33, 0)
+    assert parse_version(gateway.wtctl.version().stdout) == (0, 31, 0)
+    assert parse_version(gateway.jobsctl.version().stdout) == (0, 32, 1)
+    assert parse_version(gateway.claude_session.version().stdout) == (0, 45, 2)
     assert fakes.violations() == []
 
 

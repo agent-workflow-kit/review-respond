@@ -692,3 +692,12 @@ def test_unreadable_state_parent_is_a_failed_check_not_absent(
         "name": "state", "ok": False, "code": "state_unsafe",
     }  # fmt: skip
     assert err == ""
+
+
+def test_an_unset_path_reports_every_tool_missing_without_crashing(world: World) -> None:
+    gateway = Gateway({"HOME": str(world.fakes.bin_dir)})  # no PATH at all
+    status = deps.probe(gateway, deps.BY_TOOL["wtctl"], required=True)
+    assert not status.ok and status.found is None and status.code == "tool_missing"
+    with pytest.raises(CliError) as caught:
+        deps.require(gateway, "wtctl")
+    assert caught.value.code == "tool_missing"
