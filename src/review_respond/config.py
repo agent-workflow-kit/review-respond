@@ -285,7 +285,8 @@ _GLOB: Final = _ecma(r"^(?!/)(?!.*/$)(?!.*//)(?!(?:.*/)?[.][.]?(?:/|$))[A-Za-z0-
 _NAME: Final = _ecma(r"^[A-Za-z0-9._@-]+$")
 _OWNER: Final = _ecma(r"^[A-Za-z0-9._-]+$")
 _QUEUE: Final = _ecma(r"^[a-z0-9][a-z0-9_-]{0,63}$")
-_SETTING_SOURCES: Final = _ecma(r"^(?:(?:user|project|local)(?:,(?:user|project|local))*)?$")
+# Only the empty list: claude-session refuses any setting source for the respond kind.
+_SETTING_SOURCES: Final = _ecma(r"^$")
 _PREFIX: Final = _ecma(r"^[^\s]+$")
 # Narrower than the schema's `^[^'\s]+$`: the cron line sources this file inside a shell command.
 _ENV_FILE: Final = _ecma(r"^[A-Za-z0-9._/~+@:=,-]+$")
@@ -818,16 +819,31 @@ def _env_overlay(
     return overlay, origin, warnings
 
 
-def _config_warnings(config: Config) -> list[ConfigWarning]:
-    if config.sandbox == "required":
+def sandbox_warnings(sandbox: str) -> list[ConfigWarning]:
+    """``sandbox_weakened`` for ``preferred`` and ``off`` (also built with a round's settings)."""
+    if sandbox == "required":
         return []
     return [
         ConfigWarning(
             "sandbox_weakened",
             "sandbox",
-            f"sandbox is {config.sandbox}: the respond session may run without a sandbox",
+            f"sandbox is {sandbox}: the respond session may run without a sandbox",
         )
     ]
+
+
+def _config_warnings(config: Config) -> list[ConfigWarning]:
+    return sandbox_warnings(config.sandbox)
+
+
+def load_document(path: Path) -> dict[str, Any]:
+    """A YAML or JSON document read like a config file (regular file, owned by you, not group or
+    world writable, size-capped, strict YAML) from a directory others cannot write to.
+    ``ConfigError`` otherwise."""
+    data = _read_file(path)
+    _check_parent(path)
+    _check_symlink_target_dir(path)
+    return _parse(data, _name(path))
 
 
 # --- loading -----------------------------------------------------------------------------------

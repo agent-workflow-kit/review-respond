@@ -1,0 +1,68 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/${CWD}/**)",
+      "Glob",
+      "Grep",
+      "Edit(/${CWD}/**)",
+      "Write(/${CWD}/**)",
+      "Skill",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git blame:*)",
+      "Bash(make test:*)",
+      "Bash(python -m pytest:*)",
+      "Read(//opt/toolchain/lib/**)",
+      "Read(~/.cache/tools/**)"
+    ],
+    "deny": [
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(git config:*)",
+      "Bash(git credential:*)",
+      "Bash(gh:*)",
+      "Bash(glab:*)",
+      "Bash(agent-spawn:*)",
+      "Bash(memoctl add:*)",
+      "Bash(memoctl delete:*)",
+      "Bash(memoctl cron:*)",
+      "Bash(memoctl prune:*)",
+      "Bash(notice-route send:*)",
+      "Bash(notice-route flush:*)",
+      "WebFetch",
+      "WebSearch",
+      "mcp__*",
+      "Agent",
+      "Task",
+      "Read(//home/u/.config/review-respond/**)",
+      "Read(//home/u/.local/state/review-respond/**)",
+      "Edit(//home/u/.config/review-respond/**)",
+      "Edit(//home/u/.local/state/review-respond/**)",
+      "Write(//home/u/.config/review-respond/**)",
+      "Write(//home/u/.local/state/review-respond/**)"
+    ]
+  },
+  "sandbox": {
+    "filesystem": {
+      "allowRead": [
+        "/opt/toolchain/lib",
+        "~/.cache/tools"
+      ],
+      "allowWrite": [],
+      "denyRead": [
+        "/home/u/.config/review-respond",
+        "/home/u/.local/state/review-respond"
+      ],
+      "denyWrite": [
+        "/home/u/.config/review-respond",
+        "/home/u/.local/state/review-respond"
+      ]
+    },
+    "network": {
+      "allowedDomains": []
+    }
+  }
+}

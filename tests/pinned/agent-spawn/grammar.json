@@ -115,6 +115,10 @@
         {
           "when_pattern": {"--worktree": "^/.+"},
           "cwd_within": {"flag": "--cwd", "base": "--worktree"}
+        },
+        {
+          "requires": ["--kind"],
+          "note": "stricter than the real tool: review-respond always passes --kind respond; a run of another kind is refused as third_party_run (spike V-1)"
         }
       ]
     },
@@ -177,6 +181,10 @@
         {
           "forbids": ["--wait"],
           "note": "stricter than the real tool: review-respond never waits on the call; it starts the run and polls"
+        },
+        {
+          "requires": ["--kind"],
+          "note": "stricter than the real tool: review-respond always passes --kind respond; a fork without it is refused as third_party_run (spike V-1)"
         }
       ]
     },
