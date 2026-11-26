@@ -18,6 +18,7 @@ from review_respond import check as check_module
 from review_respond.cli import main
 from review_respond.store import Store, open_state_dir, pass_lease_key, pr_digest, pr_lease_key
 from tests.harness import builders, schemas
+from tests.harness.agents import original, show_doc
 from tests.harness.builders import HOST, HOST_B, REVIEWER, pr_item, pr_ref
 from tests.harness.fakes import Fakes
 from tests.harness.plugin import World
@@ -111,7 +112,20 @@ def fix_times(world: World, *, block_at: float = OLD) -> None:
         block_at)  # fmt: skip
 
 
-def set_agent(world: World, pr: str = PR7, agent: str = "agent-1") -> None:
+AGENT = "ag-sssssss2"
+
+
+@pytest.fixture(autouse=True)
+def agent_spawn(world: World) -> None:
+    """The base agent is resolved before the due rule (lineage.resolve_base): by default agent-spawn
+    knows no agent for the PR (``list`` is empty) and the stored base, once `set_agent` sets one,
+    is a parked original. A test that needs another answer scripts it first."""
+    world.fakes.script("agent-spawn", "list", json={"agents": []}, schema=False, times=None)
+    shown = show_doc(original(AGENT, PR7, status="parked"))
+    world.fakes.script("agent-spawn", "show", json=shown, times=None)
+
+
+def set_agent(world: World, pr: str = PR7, agent: str = AGENT) -> None:
     sql(world, "UPDATE prs SET base_agent = ? WHERE pr = ?", agent, pr)
 
 
@@ -169,8 +183,9 @@ def test_a_pass_reports_the_due_pr_and_starts_nothing(
     }  # fmt: skip
     assert sql(world, "SELECT block FROM prs") == [(None,)]
     gold(golden, "check-due", doc)
-    # nothing was started: no sibling other than forgectl was called
-    for tool in ("agent-spawn", "wtctl", "pr-comment", "jobsctl", "claude-session"):
+    # nothing was started: agent-spawn was only read (show), no other sibling was called
+    assert {c.command for c in world.fakes.calls("agent-spawn")} <= {"show", "list"}
+    for tool in ("wtctl", "pr-comment", "jobsctl", "claude-session"):
         assert world.fakes.calls(tool) == []
 
 

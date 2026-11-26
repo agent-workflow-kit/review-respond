@@ -9,8 +9,12 @@ Seams owned by later issues:
 - TODO(#24): start a round for each due PR (oldest due first, while capacity remains), with the
   `pre-round` hooks; `started_round` is always null until then. A due PR is reported with the state
   the PR state table derives for it (`waiting`, `capacity`) and listed in the human output.
-- TODO(#19): `prs.base_agent` has no writer yet (`resolve_base`); until then a PR with eligible
-  comments and no stored base agent gets the `no_agent` block, as the due rule says.
+- Before the due rule, a PR with eligible comments and no round or record in progress gets
+  `lineage.resolve_base` (agent-spawn `show`/`list`, wtctl `show`): it stores `prs.base_agent` and
+  the `agent_busy` observation the rule reads. When agent-spawn cannot be read the PR reports
+  `lower_failed`, is not due and nothing is set or cleared for it. Forks marked for teardown are
+  torn down at the end of a full pass (`lineage.teardown_pass`); TODO(#37): `teardown_refused`
+  fires `post-attention` (it is logged as a warning meanwhile).
 - `RoundFacts` come from the rounds table (`rounds.round_facts`); TODO(#29): the open record
   comes from the records table; `pending_state` log events belong to #29.
 - Step 5 (housekeeping) and step 6 (hook delivery) arrive with the issues that own them.
@@ -25,12 +29,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import due, prstate, rounds
+from . import due, lineage, prstate, rounds
 from .audit import format_ts
 from .config import Config
 from .detect import Detection, HostResult, StoredPr, get_pr
 from .errors import EXIT_FAILED, EXIT_OK, CliError
-from .gateway import Gateway
+from .gateway import AgentSpawn, Gateway, GatewayError, Wtctl
 from .handled import HandledSet
 from .output import Context, Outcome, sanitize_line
 from .prref import host_of, parse_pr
@@ -105,6 +109,8 @@ class _Pass:
         self.lease = lease
         tokens = {c.token_env for c in settings.hosts.values() if c.token_env}
         self.gateway = Gateway(child_env(dict(os.environ), tokens))
+        self.spawn = AgentSpawn(self.gateway)
+        self.wtctl = Wtctl(self.gateway)
         self.on_event = ctx.log.lease_callback() if ctx.log is not None else None
         self.leases: dict[str, Lease] = {}  # the PR leases held right now
         self.report = _Report()  # what the pass has found so far (printed if it stops at exit 12)
@@ -163,6 +169,11 @@ class _Pass:
         if open_pr is None:
             return result
         if pr_lease is not None and open_pr.host_state == "open":
+            if not self.refresh_base(open_pr, pr_lease):
+                result.errors.append("lower_failed")
+                result.state = prstate.derive(conn, self.settings, pr, self.now()).state
+                self._log_state(result)
+                return result
             inputs = due.load_inputs(
                 conn, self.settings, pr, now=self.now(), facts=rounds.round_facts(conn, pr)
             )
@@ -171,6 +182,39 @@ class _Pass:
         result.state = prstate.derive(conn, self.settings, pr, self.now()).state
         self._log_state(result)
         return result
+
+    def refresh_base(self, stored: StoredPr, pr_lease: Lease) -> bool:
+        """``resolve_base`` for a PR the due rule would reach its agent condition for. False when
+        agent-spawn could not be read (nothing is decided for the PR in this pass)."""
+        conn = self.store.conn
+        if stored.is_fork or not due.eligible_ids(conn, stored.pr):
+            return True
+        if not conn.execute(
+            "SELECT records_current FROM prs WHERE pr = ?", (stored.pr,)
+        ).fetchone()[0]:
+            return True
+        facts = rounds.round_facts(conn, stored.pr)
+        if facts.queued or facts.running or facts.record_open:
+            return True
+        try:
+            base = lineage.resolve_base(pr_lease, self.spawn, self.wtctl, self.settings, stored.pr)
+        except GatewayError:
+            return False
+        if self.ctx.log is not None:
+            for code in base.warnings:
+                self.ctx.log.warning(code, pr=stored.pr)
+        return base.kind != "unknown"
+
+    def teardown(self) -> None:
+        """Tear down the forks marked for it (the pass lease); a refusal is logged."""
+        try:
+            done = lineage.teardown_pass(self.lease, self.spawn)
+        except GatewayError:
+            return
+        if self.ctx.log is not None:
+            for item in done:
+                if item.refused:  # TODO(#37): post-attention teardown_refused
+                    self.ctx.log.warning("teardown_refused", pr=item.pr)
 
     def _log_state(self, result: _PrResult) -> None:
         before = self.before.get(result.pr)
@@ -213,6 +257,7 @@ class _Pass:
                     continue
                 with self.scope(pr) as free:
                     report.prs.append(self.evaluate(pr, self.leases[pr] if free else None, errors))
+        self.teardown()
         if detected.all_failed:
             report.error = CliError("all_hosts_failed", "no host could be read")
         return report
