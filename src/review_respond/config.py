@@ -819,7 +819,7 @@ def _env_overlay(
 
 
 def sandbox_warnings(sandbox: str) -> list[ConfigWarning]:
-    """``sandbox_weakened`` for ``preferred`` and ``off`` (also used when a round's settings are built)."""
+    """``sandbox_weakened`` for ``preferred`` and ``off`` (also built with a round's settings)."""
     if sandbox == "required":
         return []
     return [

@@ -86,7 +86,17 @@ _BUNDLED_ALLOW: Final = (
 
 _PATH_BAD_CHARS: Final = frozenset("*?[]{}\\")
 _CREDENTIAL_SEGMENTS: Final = frozenset(
-    {".ssh", ".aws", ".gnupg", ".kube", ".docker", ".config", ".claude", ".netrc", ".git-credentials"}
+    {
+        ".ssh",
+        ".aws",
+        ".gnupg",
+        ".kube",
+        ".docker",
+        ".config",
+        ".claude",
+        ".netrc",
+        ".git-credentials",
+    }
 )
 # Programs a command pattern may not start with: shells and launchers (they run anything), the
 # network, and the tools the profile denies or that act with the user's credentials.
@@ -203,7 +213,9 @@ def check_throwaway_root(path: str, *, config_dir: str, state_dir: str) -> str:
         raise _refuse("throwaway", "is not a directory", root)
     for other in (config_dir, state_dir):
         if _is_inside(root, other) or _is_inside(other, root):
-            raise _refuse("throwaway", "overlaps the review-respond config or state directory", root)
+            raise _refuse(
+                "throwaway", "overlaps the review-respond config or state directory", root
+            )
     return real
 
 
@@ -374,7 +386,12 @@ def validate_profile(doc: object) -> None:
     if set(perms) != {"allow", "deny"}:
         raise _refuse("profile.permissions", "must hold exactly allow and deny")
     for name, min_items in (("allow", 1), ("deny", 0)):
-        rules = _list(perms[name], f"profile.permissions.{name}", max_items=MAX_ALLOW_RULES, min_items=min_items)
+        rules = _list(
+            perms[name],
+            f"profile.permissions.{name}",
+            max_items=MAX_ALLOW_RULES,
+            min_items=min_items,
+        )
         if len(set(map(str, rules))) != len(rules):
             raise _refuse(f"profile.permissions.{name}", "has a duplicate")
         for rule in rules:
@@ -392,7 +409,9 @@ def validate_profile(doc: object) -> None:
     if fs["allowWrite"] != []:
         raise _refuse("profile.sandbox.filesystem.allowWrite", "must be empty")
     for name, min_items in (("allowRead", 0), ("denyRead", 2), ("denyWrite", 2)):
-        paths = _list(fs[name], f"profile.sandbox.filesystem.{name}", max_items=MAX_LIST, min_items=min_items)
+        paths = _list(
+            fs[name], f"profile.sandbox.filesystem.{name}", max_items=MAX_LIST, min_items=min_items
+        )
         if len(set(map(str, paths))) != len(paths):
             raise _refuse(f"profile.sandbox.filesystem.{name}", "has a duplicate")
         for p in paths:
@@ -523,7 +542,9 @@ def build_session_settings(
         raise ValueError("mode is headless or interactive")
     if config.sandbox not in ("required", "preferred", "off"):
         raise _refuse("sandbox", "must be required, preferred or off", config.sandbox)
-    base = None if config.permission_profile is None else load_base_profile(config.permission_profile)
+    base = (
+        None if config.permission_profile is None else load_base_profile(config.permission_profile)
+    )
     profile = build_profile(
         config.repo_settings(repo_id), config_dir=config_dir, state_dir=state_dir, base=base
     )

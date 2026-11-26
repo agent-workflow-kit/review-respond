@@ -88,7 +88,8 @@ def test_output_is_deterministic_and_canonical() -> None:
 def test_mandatory_denies_match_the_schema_and_are_present() -> None:
     schema = json.loads((ROOT / "schemas" / "permission-profile.json").read_text())
     in_schema = [
-        c["contains"]["const"] for c in schema["properties"]["permissions"]["properties"]["deny"]["allOf"]
+        c["contains"]["const"]
+        for c in schema["properties"]["permissions"]["properties"]["deny"]["allOf"]
     ]
     assert in_schema == list(MANDATORY_DENIES)
     deny = prof()["permissions"]["deny"]
@@ -304,14 +305,17 @@ def cfg(**kw: Any) -> Config:
 
 
 def session(config: Config | None = None, **kw: Any) -> settings.SessionSettings:
-    return build_session_settings(
-        config or cfg(), REPO, config_dir=CFG, state_dir=STATE, **kw
-    )
+    return build_session_settings(config or cfg(), REPO, config_dir=CFG, state_dir=STATE, **kw)
 
 
 def test_defaults() -> None:
     s = session()
-    assert (s.kind, s.mode, s.skill, s.sandbox) == ("respond", "headless", "respond-to-review", "required")
+    assert (s.kind, s.mode, s.skill, s.sandbox) == (
+        "respond",
+        "headless",
+        "respond-to-review",
+        "required",
+    )
     assert s.setting_sources == () and s.env_allowlist == ()
     assert s.model is None and s.timeout is None and s.warnings == ()
     schemas.validate(SCHEMA_ID, s.profile)
@@ -328,7 +332,9 @@ def test_values_come_from_the_config() -> None:
 
 
 def test_repo_override_feeds_the_profile() -> None:
-    config = cfg(repos={REPO: {"respond": {"allow_commands": [["make", "test"]], "read_dirs": ["/opt/lib"]}}})
+    config = cfg(
+        repos={REPO: {"respond": {"allow_commands": [["make", "test"]], "read_dirs": ["/opt/lib"]}}}
+    )
     allow = session(config).profile["permissions"]["allow"]
     assert "Bash(make test:*)" in allow and "Read(//opt/lib/**)" in allow
     other = build_session_settings(config, "git.example.test/x/y", config_dir=CFG, state_dir=STATE)
@@ -352,7 +358,9 @@ def test_unknown_sandbox_is_refused() -> None:
     refused(build_session_settings, config, REPO, config_dir=CFG, state_dir=STATE)
 
 
-@pytest.mark.parametrize("value", ["project", "local", "user,project", "project,user", "user,local"])
+@pytest.mark.parametrize(
+    "value", ["project", "local", "user,project", "project,user", "user,local"]
+)
 def test_setting_sources_from_the_checkout_are_refused(value: str) -> None:
     refused(session, cfg(setting_sources=value))
 
@@ -370,8 +378,10 @@ def test_env_allowlist_sorted_and_unique() -> None:
 @pytest.mark.parametrize(
     "name",
     [
-        "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "MY_API_TOKEN", "DB_PASSWORD", "AWS_SECRET_ACCESS_KEY",
-        "SSH_AUTH_SOCK", "ANTHROPIC_API_KEY", "REVIEW_RESPOND_X", "PATH", "LD_PRELOAD", "LD_LIBRARY_PATH",
+        "GH_TOKEN", "GITHUB_TOKEN", "GITLAB_TOKEN", "MY_API_TOKEN", "DB_PASSWORD",
+        "AWS_SECRET_ACCESS_KEY",
+        "SSH_AUTH_SOCK", "ANTHROPIC_API_KEY", "REVIEW_RESPOND_X", "PATH", "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
         "DYLD_INSERT_LIBRARIES", "BASH_ENV", "NODE_OPTIONS", "PYTHONPATH", "GIT_SSH_COMMAND",
         "GIT_CONFIG_GLOBAL", "HOME", "IFS",
     ],
@@ -381,7 +391,9 @@ def test_secret_or_dangerous_env_names_are_refused(name: str) -> None:
 
 
 def test_a_configured_token_variable_is_never_allowed() -> None:
-    config = cfg(hosts={"git.example.test": {"token_env": "FORGE_ACCESS"}}, env_allowlist=["FORGE_ACCESS"])
+    config = cfg(
+        hosts={"git.example.test": {"token_env": "FORGE_ACCESS"}}, env_allowlist=["FORGE_ACCESS"]
+    )
     refused(session, config)
 
 
@@ -433,7 +445,9 @@ def test_empty_allowlist_is_one_empty_flag(gateway: Gateway, fakes: Fakes) -> No
     fakes.script("agent-spawn", "resume", json={}, schema=False)
     gateway.agent_spawn.resume_fork(
         "ag-aaaaaaaa", cwd="/work/tw", labels=[], actor="auto:review-respond",
-        **s.agent_spawn_kwargs(plugin_dir="/p", prompt_file="/s/p.md", permission_profile="/s/p.json"),
+        **s.agent_spawn_kwargs(
+            plugin_dir="/p", prompt_file="/s/p.md", permission_profile="/s/p.json"
+        ),
     )  # fmt: skip
     argv = fakes.calls("agent-spawn")[0].argv
     assert argv[argv.index("--env-allowlist-only") + 1] == ""
@@ -466,7 +480,9 @@ def test_profile_file_never_follows_a_planted_symlink(tmp_path: Path) -> None:
     assert target.read_text() == "keep"
 
 
-@pytest.mark.parametrize("rid", ["", "../x", "rd-ABCDEFGH", "rd-abc", "rd-abcdefgh/x", "x" * 300, "rd-abcdefg\n"])
+@pytest.mark.parametrize(
+    "rid", ["", "../x", "rd-ABCDEFGH", "rd-abc", "rd-abcdefgh/x", "x" * 300, "rd-abcdefg\n"]
+)
 def test_profile_file_refuses_bad_round_ids(tmp_path: Path, rid: str) -> None:
     state = open_state_dir(tmp_path / "state", create=True)
     with pytest.raises(ValueError):
