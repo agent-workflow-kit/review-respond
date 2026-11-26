@@ -17,7 +17,7 @@
       "thread_id": "gh:rt:t1"
     }
   ],
-  "finalize": null,
+  "finalize": "busy",
   "object_type": "round",
   "round": {
     "agent_id": "ag-abcdefgh",

@@ -16,6 +16,9 @@ Ending a round removes the files that belong to it (the prompt, the generated pr
 of a detached job). Every transition goes through ``rounds.Rounds`` under the round's lease or the
 PR's lease; nothing here writes a round row.
 
+``show`` runs it for one round; TODO(#31): ``confirm`` runs it too (a round whose job is gone before
+the record is confirmed).
+
 Seams: TODO(#37): the ``post-attention`` ``failed`` / ``job_lost`` / ``escalated`` events of the
 ending transitions (``extra=``); TODO(#26): the cleanup of throwaways and forks of an ended round;
 TODO(#28), TODO(#29): ``Job.check_done`` leaves a round with a valid artifact ``running`` until the
@@ -36,7 +39,9 @@ from .job import Job, end_of_last_run, parse_show
 from .outcomes import RunEnd
 from .output import Context
 from .placement import SUBMIT_GRACE_SECONDS, Placement, remove_output
+from .prompt import remove_prompt_file
 from .rounds import RoundRow, Rounds, Transition, get_round
+from .settings import remove_profile_file
 from .store import Lease, Store, holder_gone, round_lease_key
 
 ACTIVE_JOB_STATUSES: Final = ("queued", "starting", "running", "held")
@@ -86,7 +91,6 @@ class Finalizer:
         self.spawn: AgentSpawn = self.plain.agent_spawn
         self.jobsctl: Jobsctl = self.plain.jobsctl
         self.placement = placement
-        self._jobs: dict[str, Job] = {}
 
     # -- helpers -------------------------------------------------------------------------------
 
@@ -106,18 +110,14 @@ class Finalizer:
         """Remove what belongs to a round that ended without its own job: its detached job's
         output and its prompt and profile files."""
         state = self.store.source
-        if state is not None:
-            remove_output(state, row.id, self.log)
-        try:
-            from .prompt import remove_prompt_file
-            from .settings import remove_profile_file
-
-            state = self.store.source
-            if state is not None:
-                for remove in (remove_prompt_file, remove_profile_file):
-                    remove(state, row.id)
-        except (OSError, CliError):
-            self.log.warning("temp_file_left", round=row.id)
+        if state is None:
+            return
+        remove_output(state, row.id, self.log)
+        for remove in (remove_prompt_file, remove_profile_file):
+            try:
+                remove(state, row.id)
+            except (OSError, CliError):
+                self.log.warning("temp_file_left", round=row.id)
 
     # -- the queued reconcile ------------------------------------------------------------------
 
@@ -149,7 +149,7 @@ class Finalizer:
         if self.placement is None:
             raise CliError("internal", "the reconcile needs a placement to submit a job")
         placed = self.placement.submit(Rounds(pr_lease, log=self.log), row)
-        self._step(row.id, "agent_missing", level="warn")
+        self.log.warning("job_resubmitted", round=row.id, key=placed.how)
         return Reconciled("resubmitted", placed=placed.how)
 
     def _jobsctl_verdict(self, row: RoundRow) -> str:
@@ -205,14 +205,14 @@ class Finalizer:
         exit-13 job is held by jobsctl until then, and holds a queue slot). Looks at the rounds
         that ended in the last ``HELD_WINDOW_SECONDS`` (a terminal round cannot carry a mark);
         returns how many it resolved."""
-        if self.placement is None or not self.placement.jobsctl_present():
-            return 0
         where, args = ("", ()) if only is None else (" AND pr = ?", (only,))
         found = self.store.conn.execute(
             "SELECT id, job_id FROM rounds WHERE state = 'escalated' AND job_id IS NOT NULL"
             f" AND ended_at >= ?{where} ORDER BY ended_at, id",
             (self._now() - HELD_WINDOW_SECONDS, *args),
         ).fetchall()
+        if not found or self.placement is None or not self.placement.jobsctl_present():
+            return 0
         resolved = 0
         for round_id, job_id in found:
             try:
