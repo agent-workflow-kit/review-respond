@@ -796,7 +796,7 @@ class Detection:
         self.started_at = started_at or gateway.clock.now()
         self._checked = False
         self._whoami: _Whoami | CliError | None = None
-        self._budgets: dict[str, Budget] = {}
+        self._pass_budgets: dict[str, Budget] = {}  # only while a host pass runs
 
     # -- plumbing ---------------------------------------------------------------------------
 
@@ -876,10 +876,9 @@ class Detection:
         )
 
     def budget(self, host: str) -> Budget:
-        """The host's budget of this pass (a read outside a host pass gets its own)."""
-        if host not in self._budgets:
-            self._budgets[host] = Budget(self.settings.limits.requests_per_host)
-        return self._budgets[host]
+        """The host's budget of the running pass; a read outside a host pass gets a fresh one
+        each time (a spent budget never carries over to a later read)."""
+        return self._pass_budgets.get(host) or Budget(self.settings.limits.requests_per_host)
 
     def account_id(self, host: str) -> str | None:
         """Your account id on ``host`` (the comparison key of eligibility, #14)."""
@@ -903,6 +902,8 @@ class Detection:
             return self._host_pass(host)
         except UnicodeEncodeError:  # defence in depth: the parsers already refuse such text
             return self._fail(host, "bad_output")
+        finally:
+            self._pass_budgets.pop(host, None)
 
     def _host_pass(self, host: str) -> HostResult:
         self._require()
@@ -920,7 +921,7 @@ class Detection:
             facts, complete = _parse_listing(listing, host, account)
         except _HostFailed as failure:
             return self._fail(host, failure.code)
-        budget = self._budgets[host] = Budget(self.settings.limits.requests_per_host)
+        budget = self._pass_budgets[host] = Budget(self.settings.limits.requests_per_host)
         budget.spend(listing_cost(len(facts)))
         now = self._now()
         with self.lease.transaction() as conn:
@@ -1158,6 +1159,7 @@ class Detection:
         bot_ids = rules.entry_ids(self.settings.bot_authors, pr.host)
         prefix = self.settings.respond_to_own_comments_prefix
         asked: dict[tuple[str, str], bool | None] = {}  # one lookup per author and login
+        budget = self.budget(pr.host)  # shared by every lookup of this read
         out: dict[str, Verdict] = {}
         for comment in read.comments:
             verdict = rules.prejudge(
@@ -1171,7 +1173,7 @@ class Detection:
                 own_prefix=prefix,
             )
             if verdict is None:
-                verdict = self._write_access(pr, comment, reviewers, asked)
+                verdict = self._write_access(pr, comment, reviewers, asked, budget)
             out[comment.id] = verdict
         return out
 
@@ -1181,6 +1183,7 @@ class Detection:
         comment: ReadComment,
         reviewers: frozenset[str],
         asked: dict[tuple[str, str], bool | None],
+        budget: Budget,
     ) -> Verdict:
         author_id, login = comment.author_id, comment.author_login
         if author_id is None:  # cannot happen after `prejudge`; kept for the type
@@ -1188,17 +1191,19 @@ class Detection:
         if author_id in reviewers:
             return rules.ELIGIBLE
         # a login that is not shaped like one is never passed to forgectl (it would be argv)
-        if login is None or rules.LOGIN_RE.fullmatch(login) is None:
+        if login is None or rules.ARGV_LOGIN_RE.fullmatch(login) is None:
             return rules.ineligible("unknown_access")
         key = (author_id, login)
         if key not in asked:
-            asked[key] = self._lookup_access(pr, author_id, login)
+            asked[key] = self._lookup_access(pr, author_id, login, budget)
         answer = asked[key]
         if answer is None:
             return rules.ineligible("unknown_access")
         return rules.ELIGIBLE if answer else rules.ineligible("no_access")
 
-    def _lookup_access(self, pr: StoredPr, author_id: str, login: str) -> bool | None:
+    def _lookup_access(
+        self, pr: StoredPr, author_id: str, login: str, budget: Budget
+    ) -> bool | None:
         """`write_access` of an author: from the cache, else from `forgectl access` (charged
         `LOOKUP_COST` to the host's budget, whether or not it works). None is the unknown answer:
         a null answer, a failed or misfit lookup, or no budget left. Only an answer that fits its
@@ -1210,7 +1215,6 @@ class Detection:
         )
         if hit:
             return cached
-        budget = self.budget(pr.host)
         if not budget.fits(LOOKUP_COST):
             return None
         budget.spend(LOOKUP_COST)

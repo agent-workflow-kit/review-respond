@@ -32,6 +32,28 @@ LOOKUP_COST: Final = 2  # one `forgectl access` is two host requests
 LOGIN_RE: Final = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,254}"
 )
+# forgectl's input grammar `login` (tests/pinned/forgectl/grammar.json): the only logins that may
+# be passed as an argument to `forgectl access`; stricter than the answer's `user` above
+ARGV_LOGIN_RE: Final = re.compile(
+    r"(?:[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?|[A-Za-z0-9_]"
+    r"|[A-Za-z0-9_.][A-Za-z0-9_.-]{0,253}[A-Za-z0-9_-])"
+)
+# pr-comment's marker detection (pr-comment docs/interface.md, Marker detection)
+_DEDUPE_LINE_RE: Final = re.compile(r"<!-- forgectl:dedupe:[A-Za-z0-9._:-]{1,128} -->")
+_LINE_BREAK_RE: Final = re.compile(r"\r\n|\n|\r")
+
+
+def has_marker(body: str) -> bool:
+    """True when ``body`` was posted through pr-comment: after trailing whitespace and at most
+    one last forgectl dedupe line are removed, its last non-empty line is exactly the marker. A
+    body that only quotes the marker elsewhere does not match."""
+    lines = _LINE_BREAK_RE.split(body.rstrip())
+    if lines and _DEDUPE_LINE_RE.fullmatch(lines[-1]):
+        lines.pop()
+    for line in reversed(lines):
+        if line.strip():
+            return line == MARKER
+    return False
 
 
 @dataclass(frozen=True)
@@ -76,7 +98,7 @@ def prejudge(
         return ineligible("unknown_author")
     if author_id == account_id:
         # the marker wins over the opt-in prefix; without the prefix every own comment is own
-        if MARKER in body or own_prefix is None or not body.startswith(own_prefix):
+        if has_marker(body) or own_prefix is None or not body.startswith(own_prefix):
             return ineligible("own")
     if is_bot is not False or author_id in bot_ids:
         return ineligible("bot")

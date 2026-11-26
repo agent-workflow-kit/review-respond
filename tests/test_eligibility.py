@@ -6,6 +6,7 @@ same per-host budget as the reads."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,7 +16,7 @@ import pytest
 
 from review_respond.config import Config
 from review_respond.detect import CommentRead, Detection, HostResult
-from review_respond.eligibility import MARKER, REASONS
+from review_respond.eligibility import ARGV_LOGIN_RE, MARKER, REASONS
 from review_respond.errors import CliError
 from review_respond.gateway import Gateway
 from review_respond.store import Lease, Store, open_state_dir, pass_lease_key, pr_digest
@@ -369,7 +370,6 @@ def test_reason_unknown_access_when_the_budget_ran_out(
 ) -> None:
     config = settings(limits={"requests_per_host": 1})
     det = Detection(gateway, lease, config)
-    det.budget(HOST).spend(1)
     result = read(
         gateway, lease, store, fakes, doc_of(builders.comment("gh:rc:c1", "x")), detection=det
     )
@@ -697,7 +697,6 @@ def test_one_lookup_per_author_per_read_and_it_costs_two(
         detection=det,
     )
     assert len(access_calls(fakes)) == 1
-    assert det.budget(HOST).spent == 2
 
 
 def test_a_cached_answer_costs_nothing(
@@ -708,7 +707,7 @@ def test_a_cached_answer_costs_nothing(
     read(gateway, lease, store, fakes, doc)
     det = Detection(gateway, lease, settings())
     read(gateway, lease, store, fakes, doc, detection=det)
-    assert det.budget(HOST).spent == 0
+    assert len(access_calls(fakes)) == 1  # the second read asked nothing
 
 
 def test_a_failed_lookup_is_still_charged(
@@ -721,9 +720,20 @@ def test_a_failed_lookup_is_still_charged(
         exit=12,
         match={"positionals": {"repo": REPO, "user": "reviewer-one"}},
     )
-    det = Detection(gateway, lease, settings())
-    read(gateway, lease, store, fakes, doc_of(builders.comment("gh:rc:c1", "x")), detection=det)
-    assert det.budget(HOST).spent == 2
+    det = Detection(gateway, lease, settings(limits={"requests_per_host": 3}))
+    result = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(
+            builders.comment("gh:rc:c1", "x"),
+            builders.comment("gh:rc:c2", "y", author=ALICE),
+        ),
+        detection=det,
+    )
+    assert verdict(result, "gh:rc:c2") == (False, "unknown_access")  # the failure cost 2
+    assert len(access_calls(fakes)) == 1
 
 
 def test_lookups_stop_when_the_next_one_does_not_fit(
@@ -744,7 +754,6 @@ def test_lookups_stop_when_the_next_one_does_not_fit(
     )
     assert verdict(result, "gh:rc:c1") == (True, None)  # 2 of 3 spent
     assert verdict(result, "gh:rc:c2") == (False, "unknown_access")  # 2 more does not fit
-    assert det.budget(HOST).spent == 2
     assert [c[2] for c in access_calls(fakes)] == ["alice"]
 
 
@@ -957,7 +966,6 @@ def test_an_access_answer_that_does_not_fit_the_schema_is_an_unknown_and_not_cac
     )
     assert verdict(result, "gh:rc:c1") == (False, "unknown_access")
     assert cache_rows(store) == []
-    assert det.budget(HOST).spent == 2
 
 
 def test_garbage_output_from_access_is_an_unknown(
@@ -1073,3 +1081,134 @@ def test_cache_table_rejects_an_out_of_range_answer(store: Store) -> None:
             "INSERT INTO access_cache (repo, author_id, login, write_access, fetched_at)"
             " VALUES ('r', 'a', 'l', 7, 1.0)"
         )
+
+
+# ---- review fixes ------------------------------------------------------------------------------
+
+
+def test_a_read_outside_a_pass_gets_a_fresh_budget_each_time(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    script_access(fakes, "alice", True)
+    script_access(fakes, "bob", True)
+    det = Detection(gateway, lease, settings(limits={"requests_per_host": 2}))
+    first = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(builders.comment("gh:rc:c1", "x", author=ALICE)),
+        detection=det,
+    )
+    second = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(builders.comment("gh:rc:c2", "y", author=BOB)),
+        detection=det,
+    )
+    assert verdict(first, "gh:rc:c1") == (True, None)
+    assert verdict(second, "gh:rc:c2") == (True, None)
+    assert [c[2] for c in access_calls(fakes)] == ["alice", "bob"]
+
+
+def test_the_pass_budget_does_not_outlive_its_pass(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    fakes.script(
+        "forgectl",
+        "prs",
+        json=builders.forgectl_prs([pr_item(1)]),
+        match={"flags": {"--host": HOST}},
+    )
+    script_read(fakes, doc_of(builders.comment("gh:rc:c1", "x", author=ALICE)), times=2)
+    script_access(fakes, "alice", True)
+    script_access(fakes, "bob", True)
+    det = Detection(gateway, lease, settings(limits={"requests_per_host": 4}))
+    assert det.run().hosts[0].spent == 4  # listing 1, read 1, lookup 2
+    later = det.read_comments(PR1)
+    assert verdict(later, "gh:rc:c1") == (True, None)  # alice is cached
+    script_read(fakes, doc_of(builders.comment("gh:rc:c2", "y", author=BOB)))
+    again = det.read_comments(PR1)
+    assert verdict(again, "gh:rc:c2") == (True, None)  # a fresh budget: bob is looked up
+    assert [c[2] for c in access_calls(fakes)] == ["alice", "bob"]
+
+
+@pytest.mark.parametrize("login", [".", "..", "a.", "a" * 254 + "."])
+def test_a_login_outside_the_forgectl_login_grammar_costs_no_lookup_and_no_budget(
+    login: str, gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    odd = {"login": login, "id": "acct-h", "is_bot": False}
+    script_access(fakes, "bob", True)
+    result = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(
+            builders.comment("gh:rc:c1", "x", author=odd),
+            builders.comment("gh:rc:c2", "y", author=BOB),
+        ),
+        config=settings(limits={"requests_per_host": 2}),
+    )
+    assert verdict(result, "gh:rc:c1") == (False, "unknown_access")
+    assert verdict(result, "gh:rc:c2") == (True, None)  # the whole budget was left for bob
+    assert [c[2] for c in access_calls(fakes)] == ["bob"]
+    assert [row[1] for row in cache_rows(store)] == ["acct-bob"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"done\n\n{MARKER}",
+        f"done\n\n{MARKER}\n",
+        f"done\n\n{MARKER}  \n\n \t\n",
+        f"done\n\n{MARKER}\n<!-- forgectl:dedupe:prc:rv:abc-1.2 -->",
+        f"done\r\n{MARKER}\r\n<!-- forgectl:dedupe:k -->\r\n",
+        f"/awkit done\n\n{MARKER}",
+    ],
+)
+def test_a_body_ending_in_the_marker_is_own_even_with_the_prefix(
+    body: str, gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    result = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(builders.comment("gh:rc:c1", body, author=ME)),
+        config=settings(respond_to_own_comments_prefix="/awkit"),
+    )
+    assert verdict(result, "gh:rc:c1") == (False, "own")
+    assert access_calls(fakes) == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f"/awkit see\n> {MARKER}\nmore",
+        f"/awkit {MARKER} and more",
+        f"/awkit\n{MARKER}\ntext after",
+        f"/awkit\n{MARKER}\n<!-- forgectl:dedupe:a -->\n<!-- forgectl:dedupe:b -->",
+        f"/awkit\n{MARKER} x",
+    ],
+)
+def test_a_body_that_only_quotes_the_marker_is_admitted_by_the_prefix(
+    body: str, gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    script_access(fakes, "me-user", True)
+    result = read(
+        gateway,
+        lease,
+        store,
+        fakes,
+        doc_of(builders.comment("gh:rc:c1", body, author=ME)),
+        config=settings(respond_to_own_comments_prefix="/awkit"),
+    )
+    assert verdict(result, "gh:rc:c1") == (True, None)  # on to the bot and access rules
+
+
+def test_the_argv_login_pattern_is_the_pinned_forgectl_grammar() -> None:
+    pinned = json.loads(Path("tests/pinned/forgectl/grammar.json").read_text())
+    assert f"^{ARGV_LOGIN_RE.pattern}$" == pinned["patterns"]["login"]
