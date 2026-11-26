@@ -36,6 +36,15 @@ def job_doc(
         "actor": "auto:review-respond", "decision_ids": [], "exit": None, "leftovers": None,
         "resolved_path": None, "resolved_by": None, "note": None, "env": {},
     }  # fmt: skip
+    if status == "running":
+        doc["resolved_path"] = "/usr/bin/review-respond"
+    if status in ("held", "done"):
+        doc["resolved_path"] = "/usr/bin/review-respond"
+        doc["leftovers"] = 0
+    if status == "held":
+        doc["exit"] = {"kind": "exited", "code": 13, "signal": None, "core": False}
+    if status == "done":
+        doc["exit"] = {"kind": "exited", "code": 0, "signal": None, "core": False}
     doc.update(over)
     if detail:
         doc.update({"attempts": [], "output": None})

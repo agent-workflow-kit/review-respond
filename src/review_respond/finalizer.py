@@ -31,7 +31,7 @@ from typing import Any, Final
 from . import labels, lineage
 from .config import Config
 from .errors import CliError
-from .gateway import AgentSpawn, Gateway, GatewayError, Jobsctl, Result, Wtctl
+from .gateway import AgentSpawn, Gateway, GatewayError, Jobsctl, Result
 from .job import Job, end_of_last_run, parse_show
 from .outcomes import RunEnd
 from .output import Context
@@ -42,6 +42,8 @@ from .store import Lease, Store, holder_gone, round_lease_key
 ACTIVE_JOB_STATUSES: Final = ("queued", "starting", "running", "held")
 TERMINAL_JOB_STATUSES: Final = ("done", "failed", "canceled")
 MAX_WARNED_IDS: Final = 10
+# the root the path-state check is given when the round's throwaway is gone: nothing is there
+GONE_ROOT: Final = "/nonexistent/review-respond-throwaway"
 HELD_WINDOW_SECONDS: Final = 86400.0
 ACTOR: Final = lineage.ACTOR
 _SIGNAL_EXITS: Final = (130, 143)
@@ -155,6 +157,9 @@ class Finalizer:
         or ``unknown`` (jobsctl cannot be asked now: nothing is decided)."""
         assert row.job_id is not None
         try:
+            if self.placement is None or not self.placement.jobsctl_present():
+                self.log.warning("jobsctl_unavailable", round=row.id)
+                return "unknown"  # the job is jobsctl's: without it nothing can be said
             result: Result = self.jobsctl.show(row.job_id)
         except GatewayError:
             self.log.warning("jobsctl_unavailable", round=row.id)
@@ -278,11 +283,20 @@ class Finalizer:
         if end.exit is None or end.exit in _SIGNAL_EXITS:
             end = RunEnd("wait", 1, started=end.started)  # a signal is never an outcome: internal
         if end.exit == 0:
-            job.root = self._throwaway_root(row)
+            root, found = self._throwaway(row)
+            if found == "unreadable":
+                self.log.warning("throwaway_unreadable", round=row.id)
+                self._step(row.id, "left_running")
+                return  # nothing is decided: the next pass asks again
+            job.root = root if found == "ok" else GONE_ROOT
             job.check_done(end, shown)
-            self._step(
-                row.id, "pending_recorded" if self._state(row.id) == "pending" else "left_running"
-            )
+            state = self._state(row.id)
+            if state == "running":
+                self._step(row.id, "left_running")  # TODO(#28), TODO(#29): the diff and record
+            elif state == "pending":
+                self._step(row.id, "pending_recorded")
+            else:
+                self._after_end(row)
         else:
             job.finish(end, esc)
             self._after_end(row)
@@ -315,19 +329,24 @@ class Finalizer:
         if state is not None and self._state(row.id) not in ("running", "queued"):
             remove_output(state, row.id, self.log)
 
-    def _throwaway_root(self, row: RoundRow) -> str | None:
-        """The round throwaway's root from its wtctl record (None when it cannot be read)."""
+    def _throwaway(self, row: RoundRow) -> tuple[str | None, str]:
+        """The round throwaway's root from its wtctl record and how it was found: ``ok``, ``gone``
+        (no throwaway recorded, or wtctl does not know it: its files are gone) or ``unreadable``
+        (wtctl could not be asked: nothing is decided)."""
         if row.throwaway_id is None:
-            return None
-        wt: Wtctl = self.plain.wtctl
+            return None, "gone"
         try:
-            result = wt.show(row.throwaway_id)
+            result = self.plain.wtctl.show(row.throwaway_id)
         except GatewayError:
-            return None
+            return None, "unreadable"
+        if result.returncode == 10 and not result.timed_out and not result.overflow:
+            return None, "gone"
         doc = result.json
         record = doc.get("record", doc) if isinstance(doc, dict) else None
         path = record.get("path") if isinstance(record, dict) else None
-        return path if result.ok and isinstance(path, str) and os.path.isabs(path) else None
+        if result.ok and isinstance(path, str) and os.path.isabs(path):
+            return path, "ok"
+        return None, "unreadable"
 
     def _find_agent(self, row: RoundRow, lease: Lease, job: Job) -> RoundRow | None:
         """The agent of a round that never recorded one, found by its labels and verified. Returns
@@ -344,7 +363,7 @@ class Finalizer:
         if not listed.ok or not isinstance(agents, list):
             self.log.warning("list_failed", round=row.id)
             return None
-        root = self._throwaway_root(row) if row.base_agent_id is None else None
+        root = self._throwaway(row)[0] if row.base_agent_id is None else None
         accepted = [
             a["agent_id"]
             for a in agents  # pyright: ignore[reportUnknownVariableType]
