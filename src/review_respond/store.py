@@ -5,7 +5,7 @@ refuses (exit 12 ``state_unsafe``) when it is not private. A schema newer than t
 is readable and not writable (exit 12 ``version_skew``).
 
 Leases and compare-and-set transitions live at the end of this module (docs/interface.md:
-Concurrency, decision D-19). The audit and log writers belong to #11, and the tables of each
+Concurrency, decision D-19). The audit and log writers live in audit.py, and the tables of each
 feature to the issue that needs them; this module gives them the connection, a transaction helper,
 the migration list to append to, and the lease-checked compare-and-set writes.
 """
@@ -921,8 +921,9 @@ _KEY_RE: Final = re.compile(r"pass|pr:[0-9a-f]{20}|round:[A-Za-z0-9][A-Za-z0-9_-
 _IDENT_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 EventCallback = Callable[[str, str], None]
-# TODO(#11): wire the event callback to the `lease` event of log.jsonl (`stalled`, `taken_over`).
-# The callback must be thread-safe: the heartbeat thread may call it (the `lost` event).
+# Pass `ctx.log.lease_callback()` (audit.py) as `on_event`: it logs `taken_over`, `stalled` and
+# `lost` as `lease` events. It may run on the heartbeat thread (`lost`); the log writer is
+# thread-safe and never raises for a failed append.
 
 
 def pass_lease_key() -> str:

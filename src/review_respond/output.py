@@ -10,10 +10,13 @@ import tempfile
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import Config
 from .store import Store
+
+if TYPE_CHECKING:
+    from .audit import AuditLog, LogWriter
 
 PROG = "review-respond"
 
@@ -37,6 +40,10 @@ class Context:
     settings: Config | None = None
     # The open state database (every command opens it first; a read-only one on a newer schema).
     store: Store | None = None
+    # The append-only files (None for `validate`, `--dry-run` and the read-only commands, which
+    # never write them). `audit` is None too until the config is loaded (it records its hash).
+    audit: AuditLog | None = None
+    log: LogWriter | None = None
 
 
 @dataclass(frozen=True)

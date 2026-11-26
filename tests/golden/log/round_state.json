@@ -1,0 +1,9 @@
+{
+  "event": "round_state",
+  "from": "queued",
+  "level": "warn",
+  "reason": "go",
+  "round": "rd-aaaaaaaa",
+  "to": "running",
+  "ts": "2026-01-01T12:00:00.000000Z"
+}

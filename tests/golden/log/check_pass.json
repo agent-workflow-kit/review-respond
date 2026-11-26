@@ -1,0 +1,11 @@
+{
+  "already_running": false,
+  "errors": 0,
+  "event": "check_pass",
+  "finished_at": "2026-01-01T12:00:01Z",
+  "level": "warn",
+  "prs": 3,
+  "rounds_started": 1,
+  "started_at": "2026-01-01T12:00:00Z",
+  "ts": "2026-01-01T12:00:00.000000Z"
+}

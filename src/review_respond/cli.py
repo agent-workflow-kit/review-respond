@@ -14,6 +14,7 @@ from typing import Any, NoReturn
 
 from . import __version__
 from .actor import check_decision_ids, check_human_only, default_actor, parse_actor
+from .audit import AuditLog, JsonlFile, LogWriter, open_jsonl_files
 from .config import ConfigError, LoadedConfig, load_config
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
@@ -216,8 +217,22 @@ def _open_store(command: str, *, dry_run: bool) -> Store | None:
     return Store.open(open_state_dir(), write=command not in READ_ONLY_COMMANDS, close_state=True)
 
 
+def _open_logs(command: str, store: Store | None) -> tuple[JsonlFile, JsonlFile] | None:
+    """The checked audit.jsonl and log.jsonl, made right after the state check.
+
+    Not for `validate` or `--dry-run` (no store), nor for the read-only commands: they never
+    write any state, so a config warning in `list` is printed and not logged.
+    """
+    if store is None or store.source is None or command in READ_ONLY_COMMANDS:
+        return None
+    return open_jsonl_files(store.source)
+
+
 def _build_context(
-    args: argparse.Namespace, config_path: Path | None, store: Store | None
+    args: argparse.Namespace,
+    config_path: Path | None,
+    store: Store | None,
+    files: tuple[JsonlFile, JsonlFile] | None = None,
 ) -> Context:
     explicit_actor = parse_actor(args.actor) if args.actor is not None else None
     loaded: LoadedConfig | None = None
@@ -242,9 +257,21 @@ def _build_context(
     # `validate` loads the config itself and reports a bad one as its failed `config` check.
     if config_error is not None and args.command != "validate":
         raise config_error.to_cli_error()
+    log = LogWriter(files[1]) if files is not None else None
+    audit: AuditLog | None = None
+    if files is not None:
+        audit = AuditLog(
+            files[0],
+            actor=actor,
+            decision_ids=check_decision_ids(args.decision_id or ()),
+            config_sha256=loaded.config.sha256() if loaded is not None else None,
+            override_escalation=getattr(args, "override_escalation", False),
+        )
     if loaded is not None:
-        # TODO(#11): also record these as `warning` events in log.jsonl (the writer is #11's).
         for item in loaded.warnings:
+            if log is not None:
+                # the log is a record, not a notice: --quiet does not silence it
+                log.warning(item.code, key=item.key)
             # --quiet silences notices, never the weakened-sandbox warning (a safety setting).
             if args.quiet and item.code != "sandbox_weakened":
                 continue
@@ -262,6 +289,8 @@ def _build_context(
         quiet=args.quiet,
         settings=loaded.config if loaded is not None else None,
         store=store,
+        audit=audit,
+        log=log,
     )
 
 
@@ -288,6 +317,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     ctx = fallback
     opened: Store | None = None
+    files: tuple[JsonlFile, JsonlFile] | None = None
     try:
         args = parser.parse_args(args_list)
         if args.command is None:
@@ -300,7 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         config_path = _check_flags(args)
         # The state check comes before the config is read (a refusal there must not depend on it).
         opened = _open_store(command, dry_run=getattr(args, "dry_run", False))
-        ctx = _build_context(args, config_path, opened)
+        files = _open_logs(command, opened)
+        ctx = _build_context(args, config_path, opened, files)
         handler = HANDLERS.get(command) or _not_implemented(command)
         outcome = handler(ctx, args)
         return emit(outcome.payload, outcome.human, outcome.exit_code, ctx)
@@ -315,5 +346,7 @@ def main(argv: list[str] | None = None) -> int:
         internal = CliError("internal", f"unexpected {type(exc).__name__}")
         return _report(internal, ctx)
     finally:
+        for file in files or ():
+            file.close()
         if opened is not None:
             opened.close()

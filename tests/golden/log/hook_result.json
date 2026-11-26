@@ -1,0 +1,15 @@
+{
+  "async": false,
+  "decision_ids": [
+    "d1"
+  ],
+  "duration_ms": 5,
+  "event": "hook_result",
+  "exit_code": 13,
+  "hook": "pre-push",
+  "level": "warn",
+  "object_id": "rp-aaaaaaaa",
+  "timed_out": false,
+  "ts": "2026-01-01T12:00:00.000000Z",
+  "vetoed": false
+}
