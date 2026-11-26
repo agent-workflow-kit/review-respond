@@ -39,14 +39,14 @@ def forgectl_show(
         "created_at": TS,
         "updated_at": TS,
         "closed_at": None if state == "open" else TS_LATER,
-        "merged_at": None,
-        "merged_by": None,
+        "merged_at": TS_LATER if state == "merged" else None,
+        "merged_by": ME["login"] if state == "merged" else None,
         "labels": [],
         "author_association": "OWNER",
         "head": {"sha": head_sha, "ref": head_ref, "repo": repo, "is_fork": False},
         "base": {"ref": "main", "sha": "c" * 40, "is_default": True},
-        "merged_head_sha": None,
-        "merge_commit_sha": None,
+        "merged_head_sha": head_sha if state == "merged" else None,
+        "merge_commit_sha": "d" * 40 if state == "merged" else None,
         "head_fetch_ref": f"refs/pull/{number}/head",
         "mergeable": True,
         "blocked_by": [],
@@ -171,3 +171,151 @@ def scenario_comment_lifecycle(
             [thread(tid, [comment(cid, body)], outdated=True, line=None)]
         ),
     }
+
+
+# -- listing, identity and access (forgectl prs, whoami, access) ----------------------------------
+
+HOST_B = "other.example.test"
+
+
+def pr_ref(number: int, *, host: str = HOST, repo: str = "org/repo") -> str:
+    return f"{host}/{repo}#{number}"
+
+
+def pr_item(
+    number: int,
+    *,
+    host: str = HOST,
+    repo: str = "org/repo",
+    state: str = "open",
+    head_sha: str = HEAD_A,
+    head_ref: str = "feat/x",
+    is_fork: bool | None = False,
+    head_repo: str | None = ...,  # type: ignore[assignment]
+    created_at: str = TS,
+    updated_at: str = TS,
+) -> dict[str, Any]:
+    """One `forgectl prs` item. `head_repo` defaults to the PR's repo (not a fork)."""
+    full = f"{host}/{repo}"
+    return {
+        "pr": f"{full}#{number}",
+        "pr_id": f"PR_kwDOexample{number}",
+        "repo": full,
+        "number": number,
+        "url": f"https://{host}/{repo}/pull/{number}",
+        "title": f"Change {number}",
+        "author": ME,
+        "state": state,
+        "draft": False,
+        "labels": [],
+        "head": {
+            "sha": head_sha,
+            "ref": head_ref,
+            "repo": full if head_repo is ... else head_repo,
+            "is_fork": is_fork,
+        },
+        "base": {"ref": "main"},
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "repo_id": "R_kgDOexample",
+    }
+
+
+def forgectl_prs(
+    items: list[dict[str, Any]],
+    *,
+    complete: bool = True,
+    errors: list[dict[str, Any]] | None = None,
+    host: str = HOST,
+) -> dict[str, Any]:
+    return {
+        "items": items,
+        "complete": complete,
+        "errors": errors or [],
+        "hosts_queried": [host],
+        "rate_limit": {"host": host, "remaining": None, "reset_at": None},
+    }
+
+
+def host_error(host: str, code: str = "upstream_error", message: str = "host said no") -> dict[str, Any]:
+    return {"host": host, "code": code, "message": message}
+
+
+def forgectl_whoami_hosts(
+    *hosts: str, ids: dict[str, str | None] | None = None, token_source: dict[str, str] | None = None,
+    errors: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """`forgectl whoami` for several hosts; `token_source` maps a host to `none` and so on."""
+    entries = []
+    for host in hosts:
+        account = (ids or {}).get(host, f"acct-me-{host.split('.')[0]}")
+        entries.append(
+            {
+                "host": host,
+                "backend": "github",
+                "login": "me-user",
+                "id": account,
+                "me": "me-user",
+                "me_matches_login": True,
+                "token_source": (token_source or {}).get(host, "token_env"),
+                "scopes": None,
+            }
+        )
+    return {"hosts": entries, "errors": errors or []}
+
+
+def forgectl_access(
+    *, write_access: bool | None, user: str = "reviewer-one", repo: str = REPO
+) -> dict[str, Any]:
+    """`forgectl access`; `write_access: None` is the unknown answer (consumers treat it as no)."""
+    known = write_access is not None
+    return {
+        "repo": repo,
+        "user": user,
+        "write_access": write_access,
+        "level": ("write" if write_access else "read") if known else None,
+        "source": "collaborator_permission",
+        "reason": None if known else "no_permission_to_read",
+    }
+
+
+def real_shape_comments(pr: str = PR) -> dict[str, Any]:
+    """`forgectl comments` as a real GitHub host returned it (spike V-11), with the values that
+    break naive code: `is_bot: null`, a null author login and id, an outdated thread with no line,
+    an unresolvable thread, a comment minimized by a moderator and a reply chain."""
+    null_author = {"login": None, "id": None, "is_bot": None}
+    unknown_bot = {"login": "some-app", "id": "app-1", "is_bot": None}
+    return forgectl_comments(
+        [
+            thread(
+                "gh:rt:PRRT_kwDOabc-1",
+                [
+                    comment("gh:rc:PRRC_kwDOabc-1", "Please rename `foo`.", author=REVIEWER),
+                    comment(
+                        "gh:rc:PRRC_kwDOabc-2", "Done?", author=ME, reply_to="gh:rc:PRRC_kwDOabc-1"
+                    ),
+                ],
+            ),
+            thread(
+                "gh:rt:PRRT_kwDOabc-2",
+                [comment("gh:rc:PRRC_kwDOabc-3", "stale remark", author=unknown_bot)],
+                outdated=True,
+                line=None,
+                commit_sha=HEAD_B,
+            ),
+            thread(
+                "gh:ic:IC_kwDOabc-4",
+                [comment("gh:ic:IC_kwDOabc-4", "ghost wrote this", author=null_author)],
+                resolvable=False,
+                path=None,
+                line=None,
+                commit_sha=None,
+            ),
+            thread(
+                "gh:rt:PRRT_kwDOabc-5",
+                [comment("gh:rc:PRRC_kwDOabc-5", "spam", minimized=True)],
+                resolved=True,
+            ),
+        ],
+        pr=pr,
+    )

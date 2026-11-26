@@ -65,6 +65,36 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             rev INTEGER NOT NULL DEFAULT 0
         ) WITHOUT ROWID""",
     ),
+    (
+        # One row per PR seen in a listing (#13). `host_state` is the host's fact (open, closed,
+        # merged), never the derived PR state of `list`. Times are epoch seconds; `created_at` and
+        # `updated_at` are the host's RFC 3339 text. `comment_count` is the number of comments
+        # the last good read returned (the budget estimate). Later issues add columns (`block`,
+        # `base_agent`, ...) with ALTER TABLE in their own migration.
+        """CREATE TABLE prs (
+            pr TEXT PRIMARY KEY,
+            digest TEXT NOT NULL UNIQUE,
+            host TEXT NOT NULL,
+            repo TEXT NOT NULL,
+            number INTEGER NOT NULL,
+            host_state TEXT NOT NULL CHECK (host_state IN ('open', 'closed', 'merged')),
+            head_sha TEXT NOT NULL,
+            head_ref TEXT NOT NULL,
+            head_repo TEXT,
+            is_fork INTEGER NOT NULL CHECK (is_fork IN (0, 1)),
+            base_ref TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            first_seen_at REAL NOT NULL DEFAULT 0,
+            listed_at REAL NOT NULL DEFAULT 0,
+            last_comments_read_at REAL,
+            last_comments_attempt_at REAL,
+            read_failures INTEGER NOT NULL DEFAULT 0,
+            comment_count INTEGER NOT NULL DEFAULT 0,
+            rev INTEGER NOT NULL DEFAULT 0
+        ) WITHOUT ROWID""",
+        "CREATE INDEX prs_by_host ON prs (host, host_state)",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 
@@ -928,6 +958,11 @@ EventCallback = Callable[[str, str], None]
 
 def pass_lease_key() -> str:
     return _PASS_KEY
+
+
+def pr_digest(pr: str) -> str:
+    """The PR digest: the first 20 hex characters of the sha256 of the PR reference."""
+    return hashlib.sha256(pr.encode("utf-8", "surrogateescape")).hexdigest()[:20]
 
 
 def pr_lease_key(pr_digest: str) -> str:
