@@ -902,3 +902,78 @@ def test_a_check_pass_that_cannot_take_the_pass_lease_reports_already_running(
     doc = json.loads(capsys.readouterr().out)
     assert code == 0 and doc["already_running"] is True and doc["prs"] == []
     assert scene.round()["state"] == "queued"
+
+
+# ---- hostile and odd answers ------------------------------------------------------------------
+
+
+def test_an_exit_code_that_is_not_a_number_ends_the_round_internal(
+    running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc = final_run(running, "failed")
+    doc["runs"][0]["outcome"]["exit_code"] = "18"
+    script_show(running, doc, schema=False)
+    assert check(running, capsys)[0] == 0
+    row = running.round()
+    assert (row["state"], row["failure_reason"]) == ("failed", "internal")
+
+
+def test_a_run_list_with_no_final_run_ends_the_round_agent_lost(
+    running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc = final_run(running, "failed")
+    doc["runs"] = [None]
+    script_show(running, doc, schema=False)
+    assert check(running, capsys)[0] == 0
+    assert running.round()["failure_reason"] == "agent_lost"
+
+
+def test_a_show_whose_runs_are_not_a_list_decides_nothing(
+    running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    doc = final_run(running, "failed")
+    doc["runs"] = {"0": "x"}
+    script_show(running, doc, schema=False)
+    assert check(running, capsys)[0] == 0
+    assert running.round()["state"] == "running" and "show_failed" in warnings(running.world)
+
+
+def test_an_escalation_text_with_control_characters_is_stored_cut_and_printed_sanitized(
+    running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    hostile = "\x1b[31mred\x00‮" + "x" * 10_000
+    script_show(running, final_run(running, "blocked", reason=hostile, summary=hostile))
+    assert check(running, capsys)[0] == 0
+    stored = running.round()["escalation_reason"]
+    assert len(stored.encode()) <= 4096
+    main(["show", running.rid, "--json", "--config", str(running.config)])
+    shown = json.loads(capsys.readouterr().out)["round"]["escalation"]["reason"]
+    assert "\x1b" not in shown and "\x00" not in shown and "‮" not in shown
+    assert "<U+001B>" in shown and len(shown) <= 4096
+
+
+def test_a_database_that_stays_busy_makes_show_print_busy(
+    running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``try_acquire`` answers None for a busy database, like for a live holder."""
+    release = threading.Event()
+    locked = threading.Event()
+
+    def hold() -> None:
+        conn = sqlite3.connect(running.state / "state.db", isolation_level=None)
+        conn.execute("BEGIN IMMEDIATE")
+        locked.set()
+        release.wait(30)
+        conn.execute("ROLLBACK")
+        conn.close()
+
+    t = threading.Thread(target=hold)
+    t.start()
+    assert locked.wait(10)
+    try:
+        code = main(["show", running.rid, "--json", "--config", str(running.config)])
+    finally:
+        release.set()
+        t.join(timeout=30)
+    doc = json.loads(capsys.readouterr().out)
+    assert code == 0 and doc["finalize"] == "busy" and doc["round"]["state"] == "running"

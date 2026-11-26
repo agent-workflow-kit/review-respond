@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -47,7 +48,7 @@ class World:
         self.env = private_env(root, fakes)
         # What ``Gateway.start_detached`` was asked to start (no process is started, unless the
         # test carries the ``real_detached`` marker): argv, cwd, the env and the output path.
-        self.detached: list[dict[str, object]] = []
+        self.detached: list[dict[str, Any]] = []
 
     def drop_tool(self, name: str) -> None:
         """Remove a fake sibling from the PATH of this world (jobsctl is optional: without it a
