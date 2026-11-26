@@ -12,7 +12,7 @@ import pytest
 
 from review_respond import labels, lineage
 from review_respond.errors import CliError
-from review_respond.store import Store, open_state_dir
+from review_respond.store import Store, open_state_dir, pass_lease_key
 from tests.harness import builders
 from tests.harness.adversarial import FORGED_AGENT_IDS
 from tests.test_rounds import AGENT, BASE, Env
@@ -77,7 +77,8 @@ def round_with_fork(env: Env, agent: str, end: str = "pending") -> str:
     elif end == "escalated":
         env.rounds.to_escalated(rid, reason="r", summary="s", counted=True)
     elif end == "canceled":
-        env.rounds.to_canceled(rid, counted=True)
+        env.rounds.request_cancel(rid, "stopped")
+        env.rounds.cancel_flagged(rid)
     else:
         env.rounds.to_pending(rid)
         if end != "pending":
@@ -131,7 +132,7 @@ def test_recording_the_same_agent_again_keeps_one_row(env: Env) -> None:
 @pytest.mark.parametrize("name", sorted(FORGED_AGENT_IDS))
 def test_a_forged_agent_id_is_never_recorded(env: Env, name: str) -> None:
     rid = round_with_fork(env, FORK1, "running")
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, CliError)):  # a well-formed one: the round has its agent
         env.rounds.record_agent(rid, FORGED_AGENT_IDS[name])
     assert states(env) == {FORK1: "round"}
 
@@ -335,6 +336,15 @@ def pending_teardown(env: Env, *agents: str) -> None:
             assert lineage.mark_teardown_pending(conn, a, now=NOW)
 
 
+def pass_lease(env: Env) -> Any:
+    held = getattr(env, "_pass", None)
+    if held is None:
+        held = env.store.try_acquire(pass_lease_key(), heartbeat=None)
+        assert held is not None
+        env._pass = held  # type: ignore[attr-defined]
+    return held
+
+
 def spawn(gateway: Any) -> Any:
     from review_respond.gateway import AgentSpawn
 
@@ -364,7 +374,7 @@ def test_teardown_acts_only_on_recorded_forks_marked_for_it(env: Env, gateway: A
     switch(env, round_with_fork(env, FORK3, "pending"))  # the base
     script_teardown(fakes, FORK1)
     assert env.lease is not None
-    done = lineage.teardown_pass(env.lease, spawn(gateway))
+    done = lineage.teardown_pass(pass_lease(env), spawn(gateway))
     assert [(d.agent_id, d.outcome) for d in done] == [(FORK1, "torn_down")]
     assert [c.argv for c in fakes.calls("agent-spawn")] == [
         ["teardown", FORK1, "--actor", "auto:review-respond", "--json"]
@@ -379,7 +389,7 @@ def test_teardown_exit_0_or_10_means_torn_down(
     pending_teardown(env, FORK1)
     script_teardown(fakes, FORK1, code)
     assert env.lease is not None
-    lineage.teardown_pass(env.lease, spawn(gateway))
+    lineage.teardown_pass(pass_lease(env), spawn(gateway))
     assert states(env) == {FORK1: "torn_down"}
 
 
@@ -397,13 +407,13 @@ def test_a_live_fork_is_stopped_first_and_retried_next_pass(
         schema=False,
     )  # fmt: skip
     assert env.lease is not None
-    done = lineage.teardown_pass(env.lease, spawn(gateway))
+    done = lineage.teardown_pass(pass_lease(env), spawn(gateway))
     assert [d.outcome for d in done] == ["retry"]
     assert [c.command for c in fakes.calls("agent-spawn")] == ["teardown", "stop"]
     fork = lineage.get_fork(env.store.conn, FORK1)
     assert fork is not None and fork.state == "teardown_pending" and fork.failed_passes == 1
     script_teardown(fakes, FORK1, 0)
-    lineage.teardown_pass(env.lease, spawn(gateway))
+    lineage.teardown_pass(pass_lease(env), spawn(gateway))
     assert states(env) == {FORK1: "torn_down"}
 
 
@@ -415,7 +425,7 @@ def test_three_failed_passes_report_teardown_refused_once(
     refused: list[bool] = []
     for _ in range(5):
         script_teardown(fakes, FORK1, 12)
-        done = lineage.teardown_pass(env.lease, spawn(gateway))
+        done = lineage.teardown_pass(pass_lease(env), spawn(gateway))
         refused.append(done[0].refused)
     assert refused == [False, False, True, False, False]  # once, then it keeps retrying
     fork = lineage.get_fork(env.store.conn, FORK1)
@@ -429,7 +439,7 @@ def test_exit_0_is_the_answer_whatever_the_body_says(
     pending_teardown(env, FORK1)
     fakes.script("agent-spawn", "teardown", stdout="not json", exit=0, schema=False)
     assert env.lease is not None
-    lineage.teardown_pass(env.lease, spawn(gateway))
+    lineage.teardown_pass(pass_lease(env), spawn(gateway))
     assert states(env) == {FORK1: "torn_down"}  # exit 0 is the answer; the body is not trusted
 
 
@@ -441,7 +451,7 @@ def test_the_pass_never_tears_down_the_pr_base_even_if_marked(
         conn.execute("DROP TRIGGER IF EXISTS forks_forward_only")
         conn.execute("UPDATE forks SET state = 'teardown_pending'")
     assert env.lease is not None
-    assert lineage.teardown_pass(env.lease, spawn(gateway)) == []
+    assert lineage.teardown_pass(pass_lease(env), spawn(gateway)) == []
     assert fakes.calls("agent-spawn") == []
 
 
@@ -453,7 +463,7 @@ def test_agent_ids_that_match_are_accepted(text: str) -> None:
     assert lineage.is_agent_id(text)
 
 
-@pytest.mark.parametrize("name", sorted(FORGED_AGENT_IDS))
+@pytest.mark.parametrize("name", sorted(set(FORGED_AGENT_IDS) - {"well_formed_but_foreign"}))
 def test_forged_agent_ids_are_not_agent_ids(name: str) -> None:
     assert not lineage.is_agent_id(FORGED_AGENT_IDS[name])
 

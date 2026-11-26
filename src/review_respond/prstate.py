@@ -54,7 +54,7 @@ class Derived:
 
 def derive(conn: sqlite3.Connection, config: Config, pr: str, now: float) -> Derived:
     """The derived state of a stored PR. `RoundFacts` come from the rounds table; TODO(#29): the
-    open record comes from the records table; TODO(#19): `agent_busy`."""
+    open record comes from the records table; `agent_busy` is the stored observation."""
     inputs = due.load_inputs(conn, config, pr, now=now, facts=rounds.round_facts(conn, pr))
     state, reason = due.derive_state(inputs)
     return Derived(state, reason, inputs)
