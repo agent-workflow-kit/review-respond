@@ -563,6 +563,8 @@ def test_cas_on_a_missing_row_is_false(table: Store) -> None:
         ("items", "id; --", {"value": "y"}),
         ("items", "id", {"value = 'q', rev": "y"}),
         ("items", "id", {"rev": 99}),
+        ("items", "id", {"REV": 99}),
+        ("items", "REV", {"value": "y"}),
         ("items", "id", {}),
         ("", "id", {"value": "y"}),
     ],
@@ -636,7 +638,10 @@ def test_the_heartbeat_renews_while_held_and_stops_on_release(tmp_path: Path) ->
         return row is not None and row.renewed_at > first.renewed_at
 
     wait_until(advanced)
+    thread = lease._thread  # pyright: ignore[reportPrivateUsage]
+    assert thread is not None and thread.is_alive()
     lease.release()
+    assert not thread.is_alive()  # release stops and joins the heartbeat
     assert store.read_lease(PR) is None
     time.sleep(0.2)  # a stopped heartbeat does not resurrect the row
     assert store.read_lease(PR) is None
@@ -679,3 +684,230 @@ def test_the_leases_table_comes_from_an_appended_migration(tmp_path: Path) -> No
     ):
         assert needed in cols
     store.close()
+
+
+# ---- review round 1 ---------------------------------------------------------------------
+
+
+def test_cas_rejects_a_key_that_matches_more_than_one_row(store: Store) -> None:  # R1
+    with store.transaction() as conn:
+        conn.execute("CREATE TABLE dup (k TEXT, value TEXT, rev INTEGER NOT NULL)")
+        conn.execute("INSERT INTO dup VALUES ('a', 'x', 0), ('a', 'x', 0)")
+    with pytest.raises(CliError) as caught, store.transaction() as conn:
+        cas_update(conn, "dup", "k", "a", 0, {"value": "y"})
+    assert caught.value.code == "internal"
+    rows = store.conn.execute("SELECT value, rev FROM dup").fetchall()
+    assert rows == [("x", 0), ("x", 0)]
+
+
+def busy_store(store: Store) -> Store:
+    quick = Store.open(
+        open_state_dir(state_of(store)), write=True, close_state=True, busy_timeout_ms=30
+    )
+    quick.clock = store.clock
+    return quick
+
+
+def test_a_busy_database_is_contention_not_an_error(store: Store) -> None:  # R2
+    quick = busy_store(store)
+    clock = store.clock
+    assert isinstance(clock, FakeClock)
+    holder = reopen(store)
+    with holder.transaction():
+        assert quick.try_acquire(PR, heartbeat=None) is None
+        with pytest.raises(CliError) as caught:
+            quick.acquire(PR, wait=2, contended="busy", heartbeat=None)
+        assert caught.value.reason == "busy"
+        with pytest.raises(CliError) as timeout:
+            quick.acquire(PR, wait=2, contended="lease_timeout", heartbeat=None)
+        assert timeout.value.code == "lease_timeout"
+    assert sum(clock.slept) >= 4
+    assert quick.try_acquire(PR, heartbeat=None) is not None  # free again
+    quick.close()
+    holder.close()
+
+
+def test_a_failing_event_callback_does_not_leak_the_lease(store: Store) -> None:  # R3
+    tamper_gone = store.try_acquire(PR, heartbeat=None)
+    assert tamper_gone is not None
+    tamper(store, PR, pid=2**22 + 12345)  # a dead holder: taking over emits taken_over
+
+    def boom(_event: str, _key: str) -> None:
+        raise OSError("log is full")
+
+    with pytest.raises(OSError):
+        store.try_acquire(PR, heartbeat=None, on_event=boom)
+    assert store.read_lease(PR) is None
+    assert store.try_acquire(PR, heartbeat=None) is not None
+
+
+@pytest.mark.parametrize(
+    "column, value",
+    [
+        ("pid", "abc"),
+        ("pid", b"12"),
+        ("pid", 1.5),
+        ("pid_start", 12345),
+        ("boot_id", b"x"),
+        ("expires_at", "soon"),
+        ("renewed_at", b"x"),
+        ("acquired_at", "x"),
+        ("rev", "x"),
+    ],
+)
+def test_a_corrupt_lease_row_is_taken_over(store: Store, column: str, value: object) -> None:  # R4
+    assert store.try_acquire(PR, heartbeat=None) is not None
+    tamper(store, PR, **{column: value})
+    assert store.read_lease(PR) is not None  # reading never raises
+    lease = store.try_acquire(PR, heartbeat=None)
+    assert lease is not None
+    row = store.read_lease(PR)
+    assert row is not None and row.pid == os.getpid() and row.token == lease.token
+
+
+def failing_transaction(store: Store, error: BaseException) -> None:
+    def boom() -> object:
+        raise error
+
+    store.transaction = boom  # type: ignore[method-assign,assignment]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [sqlite3.OperationalError("disk I/O error"), store_mod._busy_error()],  # pyright: ignore[reportPrivateUsage]
+)
+def test_release_tolerates_a_database_failure(store: Store, error: BaseException) -> None:  # R5
+    lease = store.try_acquire(PR, heartbeat=None)
+    assert lease is not None
+    failing_transaction(store, error)
+    lease.release()  # the row is taken over later as holder gone
+
+
+def test_exit_does_not_mask_the_in_flight_exception(store: Store) -> None:  # R5
+    lease = store.try_acquire(PR, heartbeat=None)
+    assert lease is not None
+    with pytest.raises(KeyError):
+        with lease:
+            failing_transaction(store, CliError("version_skew", "newer database"))
+            raise KeyError("the real failure")
+
+
+@pytest.mark.parametrize("wait", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_wait_is_rejected(store: Store, wait: float) -> None:  # R6
+    with pytest.raises(ValueError):
+        store.acquire(PR, wait=wait, contended="busy", heartbeat=None)
+    assert store.read_lease(PR) is None
+
+
+def test_lost_is_reported_once_per_lease(tmp_path: Path) -> None:  # R7
+    store = Store.open(open_state_dir(tmp_path / "s"), write=True, close_state=True)
+    events: list[tuple[str, str]] = []
+    lease = store.try_acquire(PR, heartbeat=0.02, on_event=lambda *e: events.append(e))
+    assert lease is not None
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM leases")
+    wait_until(lambda: lease.lost)
+    for _ in range(2):
+        with pytest.raises(CliError), lease.transaction():
+            pass
+        with pytest.raises(CliError):
+            lease.renew()
+    lease.release()
+    assert events == [("lost", PR)]
+    store.close()
+
+
+def test_lost_is_reported_from_a_failed_write_without_a_heartbeat(store: Store) -> None:  # R7
+    events: list[tuple[str, str]] = []
+    lease = store.try_acquire(PR, heartbeat=None, on_event=lambda *e: events.append(e))
+    assert lease is not None
+    with store.transaction() as conn:
+        conn.execute("DELETE FROM leases")
+    for _ in range(2):
+        with pytest.raises(CliError), lease.transaction():
+            pass
+    assert events == [("lost", PR)]
+
+
+def test_a_live_holder_with_a_non_utf8_process_name_is_not_gone(
+    world: World, store: Store
+) -> None:  # R8
+    code = (
+        "import ctypes, sys\n"
+        "libc = ctypes.CDLL(None)\n"
+        "libc.prctl(15, b'\\xff\\xfeab', 0, 0, 0)\n"
+        "print('READY', flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    proc = subprocess.Popen(
+        [sys.executable, "-I", "-c", code],
+        env=world.env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    world.procs.record(proc.pid)
+    worker = Worker(proc)
+    try:
+        assert worker.line() == "READY"
+        raw = Path(f"/proc/{proc.pid}/stat").read_bytes()
+        if b"\xff\xfeab" not in raw:
+            pytest.skip("prctl(PR_SET_NAME) is not available")
+        start = store_mod.process_start(proc.pid)
+        assert start is not None
+        assert not store_mod.holder_gone(proc.pid, start, store_mod.boot_id())
+    finally:
+        worker.finish()
+
+
+def test_an_unparseable_stat_of_a_live_pid_is_not_gone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:  # R10
+    boot = store_mod.boot_id()
+    fake = tmp_path / "proc"
+    (fake / "self").mkdir(parents=True)
+    (fake / "self" / "stat").write_text("1 (x) S 0\n")
+    (fake / "sys" / "kernel" / "random").mkdir(parents=True)
+    (fake / "sys" / "kernel" / "random" / "boot_id").write_text(boot + "\n")
+    (fake / str(os.getpid())).mkdir()
+    monkeypatch.setattr(store_mod, "_PROC", fake)
+    for text in ("", "no closing paren at all", "1 (x) "):
+        (fake / str(os.getpid()) / "stat").write_text(text)
+        assert store_mod.process_state(os.getpid()) is None
+        assert not store_mod.holder_gone(os.getpid(), "1", boot)
+    absent = 2**22 + 12345
+    assert store_mod.holder_gone(absent, "1", boot)
+
+
+def test_a_forked_child_never_touches_the_parents_lease(store: Store) -> None:  # R11
+    lease = store.try_acquire(PR, heartbeat=None)
+    assert lease is not None
+    pid = os.fork()
+    if pid == 0:
+        code = 3
+        try:
+            lease.release()  # a no-op here
+            try:
+                with lease.transaction():
+                    pass
+            except CliError as error:
+                code = 0 if error.code == "lease_lost" else 4
+        finally:
+            os._exit(code)
+    deadline = time.monotonic() + 20
+    status = None
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.01)
+    else:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        raise AssertionError("forked child did not finish")
+    assert os.waitstatus_to_exitcode(status) == 0
+    row = store.read_lease(PR)
+    assert row is not None and row.token == lease.token  # the child left the row alone
+    lease.release()
+    assert store.read_lease(PR) is None
