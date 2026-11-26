@@ -609,6 +609,11 @@ class StateDir:
                 while view:
                     view = view[os.write(fd, view) :]
                 os.fsync(fd)
+            except BaseException:
+                # A half-written file would make a retry fail with FileExistsError.
+                with contextlib.suppress(OSError):
+                    os.unlink(name, dir_fd=dfd)
+                raise
             finally:
                 os.close(fd)
             _fsync_dir(dfd)

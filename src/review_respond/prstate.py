@@ -160,7 +160,7 @@ def comment_object(store: Store, record: CommentRecord) -> dict[str, Any]:
     """One comment record (schemas/defs.json comment_record); the text is sanitized and cut."""
     if record.body_file is None:
         raise _tampered("a comment without its stored text")
-    body = stored_body(store, record.pr, record.id)
+    body = stored_body(store, record.pr, record.id, max_chars=MAX_BODY_CHARS)
     path = None if record.path is None else sanitize(record.path, max_chars=MAX_PATH_CHARS)
     return {
         "id": record.id,
@@ -176,7 +176,7 @@ def comment_object(store: Store, record: CommentRecord) -> dict[str, Any]:
         "thread_id": record.thread_id,
         "path": path,
         "line": record.line,
-        "body": body.text[:MAX_BODY_CHARS],
+        "body": body.text,
     }
 
 

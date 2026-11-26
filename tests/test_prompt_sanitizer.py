@@ -26,7 +26,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "review_respond"
 def test_every_hostile_fixture_comes_out_printable() -> None:
     for name, text in adversarial.HOSTILE_COMMENT_TEXTS.items():
         out = sanitize(text, newlines=True)
-        assert all(ch == "\n" or safe(ch) for ch in out), name
+        assert all(ch in "\n\t" or safe(ch) for ch in out), name
         out.encode("utf-8")  # no lone surrogate survives
 
 
@@ -54,7 +54,32 @@ def test_newline_handling() -> None:
     assert sanitize("a\r\nb", newlines=True) == "a\nb"
     assert sanitize("a\rb", newlines=True) == "a<U+000D>b"
     assert sanitize("a\u2028b", newlines=True) == "a<U+2028>b"
-    assert sanitize("a\tb", newlines=True) == "a<U+0009>b"
+    assert sanitize("a\tb", newlines=True) == "a\tb"  # multi-line text keeps a tab
+    assert sanitize("a\tb") == "a<U+0009>b"  # one-line text marks it
+    assert sanitize_capped("a\tb", max_bytes=10) == ("a\tb", 0)
+    assert sanitize_capped("a\tb", max_bytes=10, newlines=False) == ("a<U+0009>b", 0)
+
+
+@pytest.mark.parametrize("code", [0x180B, 0x180C, 0x180D, 0x180E, 0x180F, 0x17B4, 0x17B5])
+def test_invisible_mongolian_and_khmer_characters_are_marked(code: int) -> None:
+    assert sanitize(chr(code)) == f"<U+{code:04X}>"
+
+
+def test_crlf_is_normalized_once() -> None:
+    text = "a\r\r\nh"
+    expected = sanitize(text, newlines=True)
+    assert expected == "a<U+000D>\nh"
+    assert sanitize_capped(text, max_bytes=100) == (expected, 0)
+
+
+def test_capped_cut_at_a_cr_run_counts_the_normalized_rest() -> None:
+    # "a" "\r" "\r\n" "h" normalizes to "a" "\r" "\n" "h"; the cut falls inside the CR run.
+    out, cut = sanitize_capped("a\r\r\nh", max_bytes=len("a<U+000D>"))
+    assert out == "a<U+000D>" and cut == len("\nh")
+    out, cut = sanitize_capped("a\r\r\nh", max_bytes=2)
+    assert out == "a" and cut == len("\r\nh")
+    out, cut = sanitize_capped("a\r\nb\r\nc", max_bytes=3)
+    assert out == "a\nb" and cut == len("\nc")
 
 
 def test_cut_never_splits_a_marker() -> None:
@@ -77,14 +102,14 @@ def test_fuzz_properties() -> None:
         [chr(c) for c in range(0, 0x2FF)]
         + [chr(c) for c in range(0x2000, 0x2070)]
         + [chr(c) for c in (0xD800, 0xDC80, 0xFEFF, 0xFE0F, 0xE0001, 0xE0100, 0xFFFF, 0x10FFFF)]
-        + list("<U+>/untrusted\n\r")
+        + list("<U+>/untrusted\n\r\t")
     )
     for _ in range(400):
         text = "".join(rng.choice(pool) for _ in range(rng.randrange(0, 60)))
         for newlines in (False, True):
             out = sanitize(text, newlines=newlines)
             assert sanitize(out, newlines=newlines) == out  # a fixed point
-            assert all(safe(ch) or (newlines and ch == "\n") for ch in out)
+            assert all(safe(ch) or (newlines and ch in "\n\t") for ch in out)
             out.encode("utf-8")
             limit = rng.randrange(0, 40)
             cut = sanitize(text, newlines=newlines, max_chars=limit)

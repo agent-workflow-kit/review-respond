@@ -418,3 +418,81 @@ def test_prompt_file_refuses_a_symlinked_prompts_dir(tmp_path: Path) -> None:
         write_prompt_file(state, "rd-abcdefgh", "x")
     assert err.value.code == "state_unsafe"
     assert list(elsewhere.iterdir()) == []
+
+
+# ---- review round 1 ------------------------------------------------------------------------
+
+
+def _first_comment_cases() -> list[tuple[list[PromptComment], str | None]]:
+    """Small, seeded cases: multi-line first bodies (every line costs a ``| `` prefix), a few
+    short later comments, sometimes a note."""
+    rng = random.Random(1)
+    cases: list[tuple[list[PromptComment], str | None]] = []
+    for n in range(24):
+        unit = rng.choice(["ab\n", "x y\n", "\n", "é\n", "\x00\n", "line of text\n"])
+        body = unit * rng.randrange(150, 700)
+        later = [comment(f"l{k}", "z" * rng.randrange(1, 40), 2.0 + k) for k in range(n % 3)]
+        cases.append(([comment("f", body, 1.0), *later], "note" if n % 4 == 0 else None))
+    return cases
+
+
+def test_over_limit_requirement_is_exact_for_multiline_first_bodies() -> None:
+    for comments, note in _first_comment_cases():
+        probe = build(comments, limit_bytes=1, note=note)
+        assert probe.status == "over_limit" and probe.required_bytes is not None
+        need = probe.required_bytes
+        ok = build(comments, limit_bytes=need, note=note)
+        assert ok.status == "ok" and len(ok.text.encode()) <= need
+        assert build(comments, limit_bytes=need - 1, note=note).status == "over_limit"
+        assert build(comments, limit_bytes=need + 7, note=note).status == "ok"
+
+
+def test_first_body_at_exactly_the_minimum_is_not_over_limit() -> None:
+    comments = [comment("f", "ab\n" * 400, 1.0)]
+    need = build(comments, limit_bytes=1).required_bytes
+    assert need is not None
+    got = build(comments, limit_bytes=need)
+    assert got.status == "ok" and got.truncated == ("f",)
+    assert build(comments, limit_bytes=need - 1).status == "over_limit"
+
+
+def test_the_omission_marker_is_counted_only_when_something_is_omitted() -> None:
+    comments = [comment(f"c{i}", "y" * 50, float(i)) for i in range(4)]
+    full = build(comments)
+    size = len(full.text.encode())
+    exact = build(comments, limit_bytes=size)
+    assert exact.included == ("c0", "c1", "c2", "c3") and exact.omitted == ()
+    assert "[omitted" not in exact.text
+    short = build(comments, limit_bytes=size - 1)
+    assert short.omitted and "[omitted:" in short.text
+    assert len(short.text.encode()) <= size - 1
+
+
+def test_required_bytes_may_be_the_no_marker_total() -> None:
+    comments = [comment("a", "p" * 100, 1.0), comment("b", "q", 2.0)]
+    size = len(build(comments).text.encode())
+    for limit in range(1, size):
+        got = build(comments, limit_bytes=limit)
+        if got.status == "over_limit":
+            assert got.required_bytes is not None and got.required_bytes > limit
+            assert build(comments, limit_bytes=got.required_bytes).status == "ok"
+    assert build(comments, limit_bytes=size).included == ("a", "b")
+
+
+def test_a_tab_stays_in_a_body_and_is_marked_in_header_values() -> None:
+    got = build([comment(body="a\tb\n\tc", author_login="x\ty", path="p\tq")])
+    assert "| a\tb\n| \tc\n" in got.text
+    assert 'author="x<U+0009>y"' in got.text and 'path="p<U+0009>q"' in got.text
+
+
+def test_trailing_spaces_and_empty_lines_are_kept() -> None:
+    got = build([comment(body="a  \n\nb ")])
+    assert "| a  \n| \n| b \n" in got.text
+
+
+def test_a_missing_login_is_the_bare_word_none() -> None:
+    got = build([comment("a", author_login=None), comment("b", author_login="none", ts=2.0)])
+    assert 'comment id="a" author=none\n' in got.text
+    assert 'comment id="b" author="none"\n' in got.text
+    got = build([comment("c", author_login="unknown")])
+    assert 'author="unknown"' in got.text

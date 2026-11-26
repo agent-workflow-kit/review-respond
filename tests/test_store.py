@@ -1135,3 +1135,20 @@ def test_put_refreshes_the_mtime_of_a_reused_file_so_pruning_keeps_it(sdir: Path
     assert state.put_file("rp-a", b"orphan") == digest
     assert state.prune_owner_files("rp-a", set(), min_age=3600) == 0
     assert path.exists()
+
+
+def test_a_failed_private_write_leaves_no_file_so_a_retry_works(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = open_state_dir(tmp_path / "state")
+
+    def boom(fd: int, data: object) -> int:
+        raise OSError(28, "No space left on device")
+
+    with monkeypatch.context() as m:
+        m.setattr("review_respond.store.os.write", boom)
+        with pytest.raises(OSError):
+            state.write_private_file("prompts", "rd-abcdefgh.md", b"hello")
+    assert not (state.path / "prompts" / "rd-abcdefgh.md").exists()
+    path = state.write_private_file("prompts", "rd-abcdefgh.md", b"hello")
+    assert path.read_bytes() == b"hello"

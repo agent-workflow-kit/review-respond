@@ -40,11 +40,11 @@ if TYPE_CHECKING:
 
 _MARKED_CATEGORIES: Final = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 # Invisible or blank characters outside the categories above: variation selectors (they carry
-# hidden data after any character), the combining grapheme joiner, the Hangul fillers and the
-# braille blank.
+# hidden data after any character), the combining grapheme joiner, the Hangul fillers, the
+# Khmer inherent vowels, the Mongolian free variation selectors and the braille blank.
 _EXTRA_MARKED: Final = frozenset(
-    {0x034F, 0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0}
-    | set(range(0x180B, 0x180E))
+    {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0}
+    | set(range(0x180B, 0x1810))
     | set(range(0xFE00, 0xFE10))
     | set(range(0xE0100, 0xE01F0))
 )
@@ -55,7 +55,7 @@ def _marker(ch: str) -> str:
 
 
 def _piece(ch: str, newlines: bool) -> str:
-    if ch == "\n" and newlines:
+    if newlines and ch in "\n\t":
         return ch
     if ch.isascii():
         return ch if ch.isprintable() else _marker(ch)
@@ -66,11 +66,12 @@ def _piece(ch: str, newlines: bool) -> str:
 
 def _render(
     text: str, newlines: bool, max_chars: int | None, max_bytes: int | None
-) -> tuple[str, int]:
-    """The sanitized text and how many characters of ``text`` it consumed.
+) -> tuple[str, str]:
+    """The sanitized text and the rest of ``text`` it did not consume.
 
     Stops before a piece that would pass ``max_chars`` (output characters) or ``max_bytes``
-    (output UTF-8 bytes); a marker is never split.
+    (output UTF-8 bytes); a marker is never split. With ``newlines`` ``\\r\\n`` is normalized
+    to ``\\n`` here, once, and the rest is a part of the normalized text.
     """
     if newlines:
         text = text.replace("\r\n", "\n")
@@ -90,7 +91,7 @@ def _render(
         chars += len(piece)
         size += weight
         consumed += 1
-    return "".join(out), consumed
+    return "".join(out), text[consumed:]
 
 
 def sanitize(text: str, *, newlines: bool = False, max_chars: int | None = None) -> str:
@@ -98,10 +99,11 @@ def sanitize(text: str, *, newlines: bool = False, max_chars: int | None = None)
 
     Control characters (C0, DEL, C1, so NUL, ESC, CR, backspace), format characters (bidi
     controls, zero-width characters, joiners, soft hyphen, tags, the byte order mark), line and
-    paragraph separators, private-use and unassigned code points, lone surrogates and the
-    invisible fillers and variation selectors become ``<U+XXXX>`` markers. With ``newlines`` a
-    ``\\n`` stays (and ``\\r\\n`` becomes ``\\n``, a lone ``\\r`` is marked); without it every
-    line break is marked, so the result is one line. ``max_chars`` cuts the result, never inside
+    paragraph separators, private-use and unassigned code points (as the running Python's
+    Unicode tables judge them), lone surrogates and the invisible fillers and variation
+    selectors become ``<U+XXXX>`` markers. With ``newlines`` a ``\\n`` and a tab stay (and
+    ``\\r\\n`` becomes ``\\n``, a lone ``\\r`` is marked); without it every line break and tab is
+    marked, so the result is one line. ``max_chars`` cuts the result, never inside
     a marker. The output is a fixed point: sanitizing it again changes nothing.
     """
     return _render(text, newlines, max_chars, None)[0]
@@ -115,10 +117,7 @@ def sanitize_line(text: str) -> str:
 def sanitize_capped(text: str, *, max_bytes: int, newlines: bool = True) -> tuple[str, int]:
     """The sanitized text cut to at most ``max_bytes`` UTF-8 bytes (never inside a marker), and
     how many bytes of the original text (UTF-8) were cut off."""
-    if newlines:
-        text = text.replace("\r\n", "\n")
-    out, consumed = _render(text, newlines, None, max_bytes)
-    rest = text[consumed:]
+    out, rest = _render(text, newlines, None, max_bytes)
     return out, len(rest.encode("utf-8", "surrogatepass"))
 
 
@@ -214,14 +213,18 @@ def _field(name: str, value: str | None) -> str:
 
 def _body_lines(body: str, cap: int) -> tuple[list[str], int]:
     text, cut = sanitize_capped(body, max_bytes=cap)
-    lines = [("| " + line).rstrip(" ") if line else "|" for line in text.split("\n")]
+    lines = ["| " + line for line in text.split("\n")]
     if cut:
         lines.append(f"| [truncated: {cut} bytes]")
     return lines, cut
 
 
 def _render_comment(c: PromptComment, cap: int) -> tuple[str, bool]:
-    head = "comment" + _field("id", c.id) + _field("author", c.author_login or "unknown")
+    head = (
+        "comment"
+        + _field("id", c.id)
+        + (" author=none" if not c.author_login else _field("author", c.author_login))
+    )
     if c.edited:
         head += " edited=true"
     if c.thread_id is not None:
@@ -315,24 +318,29 @@ def _assemble(
     empty_fence = _fence(nonce, "")
     fixed = _size(trusted) + 1 + _size(empty_fence)  # one blank line before the fence
 
+    rendered = [_render_comment(c, MAX_BODY_BYTES) for c in ordered]
+    sizes = [_size(block) for block, _ in rendered]
     chosen: list[tuple[PromptComment, str, bool]] = []
     used = fixed
     omitted_from = len(ordered)
     for i, c in enumerate(ordered):
-        block, cut = _render_comment(c, MAX_BODY_BYTES)
+        block, cut = rendered[i]
         rest = ordered[i + 1 :]
-        need = used + _size(block) + _size(_omitted_marker(rest))
-        if need <= limit:
+        if used + sum(sizes[i:]) <= limit:  # everything left fits: no omission marker
+            chosen.extend((x, *rendered[j]) for j, x in enumerate(ordered) if j >= i)
+            break
+        if used + sizes[i] + _size(_omitted_marker(rest)) <= limit:
             chosen.append((c, block, cut))
-            used += _size(block)
+            used += sizes[i]
             continue
         if i == 0:
             shrunk = _shrink_first(c, limit - fixed - _size(_omitted_marker(rest)))
             if shrunk is None:
+                smallest = fixed + _size(_render_comment(c, MIN_FIRST_BODY_BYTES)[0])
+                required = min(smallest + _size(_omitted_marker(rest)), fixed + sum(sizes))
                 return BuiltPrompt(
                     "over_limit", "", nonce, (), tuple(x.id for x in ordered), (),
-                    required_bytes=fixed + _size(_render_comment(c, MIN_FIRST_BODY_BYTES)[0])
-                    + _size(_omitted_marker(rest)),
+                    required_bytes=required,
                 )  # fmt: skip
             chosen.append((c, shrunk, True))
             used += _size(shrunk)
@@ -362,15 +370,17 @@ def _assemble(
 
 
 def _shrink_first(c: PromptComment, room: int) -> str | None:
-    """The first comment rendered inside ``room`` bytes, its body cut; ``None`` if it cannot."""
-    cap = min(MAX_BODY_BYTES, room)
-    while cap >= MIN_FIRST_BODY_BYTES:
+    """The first comment rendered inside ``room`` bytes, its body cut; ``None`` if even a body
+    of ``MIN_FIRST_BODY_BYTES`` does not fit."""
+    cap = max(MIN_FIRST_BODY_BYTES, min(MAX_BODY_BYTES, room))
+    while True:
         block, _ = _render_comment(c, cap)
         over = _size(block) - room
         if over <= 0:
             return block
-        cap -= over
-    return None
+        if cap == MIN_FIRST_BODY_BYTES:
+            return None
+        cap = max(MIN_FIRST_BODY_BYTES, cap - over)
 
 
 # ---- the prompt file -----------------------------------------------------------------------

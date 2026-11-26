@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 from review_respond import handled as handled_mod
+from review_respond import prstate
 from review_respond.detect import CommentRead, ReadComment, get_pr
 from review_respond.eligibility import ELIGIBLE, Verdict, ineligible
 from review_respond.errors import CliError
@@ -1219,3 +1220,12 @@ def test_a_failing_cleanup_does_not_fail_the_recorded_read(
     monkeypatch.setattr(HandledSet, "_prune", boom)
     env.read(rc())
     assert len(table_rows(store)) == 1
+
+
+def test_the_stored_body_cut_never_splits_a_marker(env: Env) -> None:
+    env.read(rc(body="a" + "\x00" * 10000))
+    store = env.hs.lease.store
+    obj = prstate.comment_object(store, env.get())
+    body = obj["body"]
+    assert len(body) <= prstate.MAX_BODY_CHARS
+    assert body.startswith("a<U+0000>") and body.endswith("<U+0000>")
