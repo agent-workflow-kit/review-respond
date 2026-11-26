@@ -1,0 +1,77 @@
+{
+  "checks": [
+    {
+      "code": null,
+      "name": "config",
+      "ok": true
+    },
+    {
+      "code": null,
+      "name": "state",
+      "ok": true
+    },
+    {
+      "code": "tool_too_old",
+      "name": "dependencies",
+      "ok": false
+    },
+    {
+      "code": null,
+      "name": "credentials",
+      "ok": true
+    }
+  ],
+  "dependencies": [
+    {
+      "found": "0.55.2",
+      "minimum": "0.55.2",
+      "ok": true,
+      "required": true,
+      "tool": "forgectl"
+    },
+    {
+      "found": "0.34.0",
+      "minimum": "0.34.0",
+      "ok": true,
+      "required": true,
+      "tool": "agent-spawn"
+    },
+    {
+      "found": "0.32.9",
+      "minimum": "0.33.0",
+      "ok": false,
+      "required": true,
+      "tool": "pr-comment"
+    },
+    {
+      "found": "0.31.0",
+      "minimum": "0.31.0",
+      "ok": true,
+      "required": true,
+      "tool": "wtctl"
+    },
+    {
+      "found": "0.45.2",
+      "minimum": "0.45.2",
+      "ok": true,
+      "required": true,
+      "tool": "claude-session"
+    },
+    {
+      "found": "2.43.0",
+      "minimum": "2.34",
+      "ok": true,
+      "required": true,
+      "tool": "git"
+    },
+    {
+      "found": "0.32.1",
+      "minimum": "0.32.1",
+      "ok": true,
+      "required": false,
+      "tool": "jobsctl"
+    }
+  ],
+  "ok": false,
+  "warnings": []
+}

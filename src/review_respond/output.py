@@ -35,8 +35,9 @@ class Context:
     result_file: Path | None = None
     verbose: bool = False
     quiet: bool = False
-    # The loaded config; None for `validate` (it loads the config itself, TODO(#12)) and for the
-    # fallback context used before the flags are parsed.
+    # The loaded config; None for `validate` when the config is invalid (it loads the config
+    # itself and reports that as its failed `config` check) and for the fallback context used
+    # before the flags are parsed.
     settings: Config | None = None
     # The open state database (every command opens it first; a read-only one on a newer schema).
     store: Store | None = None
