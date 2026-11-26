@@ -1,0 +1,9 @@
+{
+  "event": "pr_state",
+  "from": null,
+  "level": "warn",
+  "pr": "example.com/org/repo#12",
+  "reason": "first_seen",
+  "to": "idle",
+  "ts": "2026-01-01T12:00:00.000000Z"
+}

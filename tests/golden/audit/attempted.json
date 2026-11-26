@@ -1,0 +1,18 @@
+{
+  "action": "push",
+  "actor": "human:tester",
+  "attempt_id": "AAAAAAAAAAAAAAAAAAAAAA",
+  "decision_id": "d-1",
+  "inputs": {
+    "actor_source": "flag",
+    "config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diff_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "override_escalation": true,
+    "pending_id": "rp-aaaaaaaa"
+  },
+  "phase": "attempted",
+  "result": null,
+  "target": "example.com/org/repo#12",
+  "ts": "2026-01-01T12:00:00.000000Z"
+}

@@ -1,0 +1,22 @@
+{
+  "action": "push",
+  "actor": "human:tester",
+  "attempt_id": "AAAAAAAAAAAAAAAAAAAAAA",
+  "decision_id": "d-1",
+  "inputs": {
+    "actor_source": "flag",
+    "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "config_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "override_escalation": true
+  },
+  "phase": "outcome",
+  "result": {
+    "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "exit_code": 0,
+    "reason": null,
+    "status": "ok"
+  },
+  "target": "example.com/org/repo#12",
+  "ts": "2026-01-01T12:00:00.000000Z"
+}
