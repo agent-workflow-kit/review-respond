@@ -336,8 +336,13 @@ def _assemble(
         if i == 0:
             shrunk = _shrink_first(c, limit - fixed - _size(_omitted_marker(rest)))
             if shrunk is None:
-                smallest = fixed + _size(_render_comment(c, MIN_FIRST_BODY_BYTES)[0])
-                required = min(smallest + _size(_omitted_marker(rest)), fixed + sum(sizes))
+                marker = _size(_omitted_marker(rest))
+                cut_first = _size(_render_comment(c, MIN_FIRST_BODY_BYTES)[0])
+                required = min(
+                    fixed + sizes[0] + marker,  # the first whole, the rest omitted
+                    fixed + cut_first + marker,  # the first cut to the floor, the rest omitted
+                    fixed + sum(sizes),  # everything, no marker
+                )
                 return BuiltPrompt(
                     "over_limit", "", nonce, (), tuple(x.id for x in ordered), (),
                     required_bytes=required,

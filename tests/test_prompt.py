@@ -447,6 +447,20 @@ def test_over_limit_requirement_is_exact_for_multiline_first_bodies() -> None:
         assert build(comments, limit_bytes=need + 7, note=note).status == "ok"
 
 
+def test_required_bytes_is_the_true_minimum_near_the_first_body_floor() -> None:
+    for n in range(257, 271):
+        for extra in (0, 1, 2, 3):
+            later = [comment(f"l{k}", "z" * (5 + k), 2.0 + k) for k in range(extra)]
+            comments = [comment("f", "x" * n, 1.0), *later]
+            need = build(comments, limit_bytes=1).required_bytes
+            assert need is not None
+            assert build(comments, limit_bytes=need).status == "ok"
+            assert build(comments, limit_bytes=need - 1).status == "over_limit"
+    comments = [comment("f", "x" * 257, 1.0), comment("g", "y", 2.0)]
+    scan = next(k for k in range(1, 3000) if build(comments, limit_bytes=k).status == "ok")
+    assert build(comments, limit_bytes=1).required_bytes == scan
+
+
 def test_first_body_at_exactly_the_minimum_is_not_over_limit() -> None:
     comments = [comment("f", "ab\n" * 400, 1.0)]
     need = build(comments, limit_bytes=1).required_bytes
