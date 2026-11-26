@@ -1568,15 +1568,27 @@ def test_a_listing_item_that_is_not_open_fails_the_host(
     assert rows(store) == {}
 
 
-def test_without_a_known_account_the_author_is_not_checked_for_refresh(
+def test_without_a_known_account_refresh_stores_nothing_and_says_so(
     gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
 ) -> None:
     ref = pr_ref(7)
     whoami_script(fakes, builders.forgectl_whoami_hosts(HOST, ids={HOST: None}))
     fakes.script("forgectl", "show", json=builders.forgectl_show(pr=ref))
     refreshed = make(gateway, lease, config=settings(accounts=False)).refresh_pr(ref)
-    assert refreshed.stored is not None and not refreshed.not_yours
+    assert refreshed.stored is None
+    assert not refreshed.account_known
     assert refreshed.author_id == "acct-me"
+    assert rows(store) == {}
+
+
+def test_refresh_pr_with_a_known_account_reports_it_known(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = pr_ref(7)
+    fakes.script("forgectl", "show", json=builders.forgectl_show(pr=ref))
+    refreshed = make(gateway, lease).refresh_pr(ref)
+    assert refreshed.stored is not None
+    assert refreshed.account_known and not refreshed.not_yours
 
 
 def test_refresh_pr_does_not_store_a_pr_of_another_author_and_says_so(
@@ -1604,6 +1616,23 @@ def test_refresh_pr_does_not_store_a_pr_of_another_author_and_says_so(
 def test_one_line_text_refuses_bidi_zero_width_c1_and_control_characters(char: str) -> None:
     with pytest.raises(detect_mod._Bad):
         detect_mod._text(f"feat{char}x", "ref", 255, one_line=True)
+
+
+def test_one_line_text_allows_the_zero_width_joiners_and_still_refuses_the_rest() -> None:
+    for char in ("‌", "‍"):
+        assert detect_mod._text(f"a{char}b", "ref", 255, one_line=True) == f"a{char}b"
+    for char in ("​", "‎", "‏"):
+        with pytest.raises(detect_mod._Bad):
+            detect_mod._text(f"a{char}b", "ref", 255, one_line=True)
+    item = pr_item(1)
+    item["title"] = "Fix \U0001f468‍\U0001f469‍\U0001f467 icons"
+    item["labels"] = ["می‌خواهم"]
+    detect_mod._parse_facts(item, "item")  # does not raise
+
+
+@pytest.mark.parametrize("char", ["‌", "‍"])
+def test_one_line_text_keeps_the_zero_width_joiners(char: str) -> None:
+    assert detect_mod._text(f"a{char}b", "ref", 255, one_line=True) == f"a{char}b"
 
 
 @pytest.mark.parametrize("char", [" ", "é", "‧", " ", "‰", "⁥", "�"])

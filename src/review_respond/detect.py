@@ -78,9 +78,10 @@ _HOST_ERROR_CODES: Final = frozenset(
 )  # fmt: skip
 _TEXT_LIMIT: Final = 1 << 16
 # one-line text may not carry a control character, C1, a line or paragraph separator, a zero-width
-# or bidirectional control, or the byte order mark
+# space or directional mark, a bidirectional control, or the byte order mark. U+200C and U+200D
+# (the joiners) stay allowed: emoji sequences and Persian text need them.
 _UNSAFE_LINE_RE: Final = re.compile(
-    "[\x00-\x1f\x7f\u0080-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+    "[\x00-\x1f\x7f\u0080-\u009f\u2028\u2029\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
 )
 
 
@@ -716,6 +717,9 @@ class Refreshed:
     stored: StoredPr | None  # None: not stored because the PR is not yours
     author_id: str | None
     not_yours: bool
+    # False: your account id is unknown, nothing was stored and ``not_yours`` means nothing; the
+    # caller treats it as a failure (``identity_unknown``)
+    account_known: bool = True
 
 
 OnRead = Callable[[StoredPr, CommentRead], None]
@@ -969,8 +973,10 @@ class Detection:
     def refresh_pr(self, pr: str) -> Refreshed:
         """`forgectl show` for one PR, stored like a listing item (`check --pr`, `respond`).
 
-        A PR whose author is not your account (when the account id is known) is not stored: the
-        result has ``stored=None`` and ``not_yours`` true, so the caller can refuse it.
+        A PR whose author is not your account is not stored: the result has ``stored=None`` and
+        ``not_yours`` true, so the caller can refuse it. When your account id is unknown nothing is
+        stored either: ``stored=None`` and ``account_known`` false (``not_yours`` is then
+        meaningless and false); the caller must fail with ``identity_unknown``.
         """
         self._require()
         outcome = self._run(lambda: self.gateway.forgectl.show(pr))
@@ -991,7 +997,11 @@ class Detection:
             )
             raise CliError("lower_failed", f"forgectl show failed ({code})", lower=lower)
         account = self.account_id(facts.host)
-        if account is not None and facts.author_id != account:
+        if account is None:
+            return Refreshed(
+                stored=None, author_id=facts.author_id, not_yours=False, account_known=False
+            )
+        if facts.author_id != account:
             return Refreshed(stored=None, author_id=facts.author_id, not_yours=True)
         with self.lease.transaction() as conn:
             _upsert(conn, facts, self._now())
