@@ -13,8 +13,8 @@ Seams owned by later issues:
 
 - TODO(#29): ``record_open`` tells whether a record (a pending confirmation) of the PR is open; the
   default says none, because the records table does not exist yet.
-- TODO(#16): the due rule and the settle clock read ``body_seen_at`` (the settle timestamp) of the
-  eligible unhandled records; nothing here decides when a PR is due.
+- ``due.py`` reads ``body_seen_at`` (the settle timestamp) of the eligible unhandled records;
+  nothing here decides when a PR is due.
 - TODO(#18), TODO(#23): the round code calls ``deliver`` (the job selecting comments into a
   prompt), ``mark_handled`` (the round becoming pending), ``release`` (failed, canceled,
   escalated) and ``redo`` (``reject --redo``).
@@ -294,7 +294,9 @@ class HandledSet:
                 self._update(conn, existing, c, eligible, reason, now, files, record_open)
         live = [r.id for r in rows.values() if r.state not in ("deleted", "delivered")]
         for comment_id in sorted(absent_comment_ids(live, read)):
-            self._change(conn, rows[comment_id], {"state": "deleted"})
+            self._change(conn, rows[comment_id], {"state": "deleted"}, now)
+        if read.complete:  # the records now match the read that detect.py stamped as read
+            conn.execute("UPDATE prs SET records_current = 1, rev = rev + 1 WHERE pr = ?", (pr.pr,))
 
     def _installed_at(self, conn: sqlite3.Connection) -> datetime:
         row = conn.execute("SELECT value FROM meta WHERE key = 'installed_at'").fetchone()
@@ -325,12 +327,14 @@ class HandledSet:
             "INSERT INTO comments (pr, comment_id, thread_id, author_id, author_login, created_at,"
             " host_updated_at, body_sha256, body_file, body_bytes, first_seen_at, body_seen_at,"
             " state, handled_sha256, handled_reason, eligible, reason, thread_resolved, outdated,"
-            " path, line, reply_to) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " path, line, reply_to, unhandled_since)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 pr.pr, c.id, c.thread_id, c.author_id, c.author_login, c.created_at,
                 c.updated_at, digest, files[digest], len(c.body.encode("utf-8", "replace")),
                 now, now, state, handled_sha, handled_reason, int(eligible), reason,
                 int(c.thread_resolved), _flag(c.thread_outdated), c.path, c.line, c.reply_to,
+                now if state == "unhandled" else None,
             ),
         )  # fmt: skip
 
@@ -403,10 +407,16 @@ class HandledSet:
                 delivered_sha256=None,
                 delivered_from=None,
             )
-        self._change(conn, row, changes)
+        self._change(conn, row, changes, now)
 
     @staticmethod
-    def _change(conn: sqlite3.Connection, row: CommentRecord, changes: dict[str, object]) -> None:
+    def _change(
+        conn: sqlite3.Connection, row: CommentRecord, changes: dict[str, object], now: float
+    ) -> None:
+        # the settle ceiling counts from when the comment last became unhandled: entering the
+        # state from another one restarts it, an edit of an unhandled comment never does
+        if changes.get("state") == "unhandled" and row.state != "unhandled":
+            changes = {**changes, "unhandled_since": now}
         if changes and not cas_update(
             conn, "comments", "comment_id", row.id, row.rev, changes, where={"pr": row.pr}
         ):
@@ -442,7 +452,7 @@ class HandledSet:
         for row in rows:
             changes = change(row)
             if changes is not None:
-                self._change(conn, row, changes)
+                self._change(conn, row, changes, self._now())
                 done.append(row.id)
         return done
 
