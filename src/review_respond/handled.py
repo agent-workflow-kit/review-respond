@@ -13,8 +13,8 @@ Seams owned by later issues:
 
 - TODO(#29): ``record_open`` tells whether a record (a pending confirmation) of the PR is open; the
   default says none, because the records table does not exist yet.
-- TODO(#16): the due rule and the settle clock read ``body_seen_at`` (the settle timestamp) of the
-  eligible unhandled records; nothing here decides when a PR is due.
+- ``due.py`` reads ``body_seen_at`` (the settle timestamp) of the eligible unhandled records;
+  nothing here decides when a PR is due.
 - TODO(#18), TODO(#23): the round code calls ``deliver`` (the job selecting comments into a
   prompt), ``mark_handled`` (the round becoming pending), ``release`` (failed, canceled,
   escalated) and ``redo`` (``reject --redo``).
@@ -295,6 +295,8 @@ class HandledSet:
         live = [r.id for r in rows.values() if r.state not in ("deleted", "delivered")]
         for comment_id in sorted(absent_comment_ids(live, read)):
             self._change(conn, rows[comment_id], {"state": "deleted"})
+        if read.complete:  # the records now match the read that detect.py stamped as read
+            conn.execute("UPDATE prs SET records_current = 1, rev = rev + 1 WHERE pr = ?", (pr.pr,))
 
     def _installed_at(self, conn: sqlite3.Connection) -> datetime:
         row = conn.execute("SELECT value FROM meta WHERE key = 'installed_at'").fetchone()

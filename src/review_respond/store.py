@@ -156,6 +156,23 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         ) WITHOUT ROWID""",
         "CREATE INDEX comments_by_state ON comments (pr, state)",
     ),
+    (
+        # The due rule (#16). `block` is null or JSON `{reason, set_at (epoch seconds),
+        # comment_set_sha256}` with one of the seven documented reasons; only `cas_update` writes
+        # it. `base_agent` is the resolved base agent id (null: none found). `records_current`
+        # is 0 from the moment a complete comment read is stored until its comment records are
+        # applied (same transaction as the records), so `last_comments_read_at` is never taken as
+        # proof that the records are current.
+        """ALTER TABLE prs ADD COLUMN block TEXT CHECK (block IS NULL OR CASE WHEN json_valid(block)
+            THEN coalesce(json_extract(block, '$.reason') IN ('escalated', 'failed', 'stopped',
+                'round_limit', 'no_agent', 'hook_vetoed', 'hook_escalated'), 0)
+                AND coalesce(json_type(block, '$.set_at') IN ('integer', 'real'), 0)
+                AND coalesce(json_type(block, '$.comment_set_sha256') = 'text', 0)
+            ELSE 0 END)""",
+        "ALTER TABLE prs ADD COLUMN base_agent TEXT",
+        "ALTER TABLE prs ADD COLUMN records_current INTEGER NOT NULL DEFAULT 0"
+        " CHECK (records_current IN (0, 1))",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 
