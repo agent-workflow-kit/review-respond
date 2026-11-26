@@ -149,16 +149,18 @@ def scene(world: World, capsys: pytest.CaptureFixture[str]) -> Scene:
     return make_round(world, capsys)
 
 
-def tw_doc(root: Path) -> dict[str, Any]:
+def tw_doc(root: Path, rid: str, *, reused: bool = False, **over: Any) -> dict[str, Any]:
+    labels = sorted(["app=review-respond", "role=round", f"round={rid}"])
     record = wt_record("wt-throwaa2", None) | {
         "object_type": "throwaway", "owned": None, "common_dir": None, "common_id": None,
         "admin_dir": None, "name": None, "branch": None, "created_branch": None, "base": None,
         "base_sha": None, "head_at_create": None, "remote": None, "baseline_digest": None,
         "bootstrap": None, "base_dir": str(root.parent), "root_id": "1:9", "holders": [],
         "sparse": None, "ref": HEAD, "source": "remote", "depth": 1, "path": str(root),
-    }  # fmt: skip
+        "labels": labels,
+    } | over  # fmt: skip
     return {
-        "record": record, "branch_action": None, "bootstrap": None, "reused": False,
+        "record": record, "branch_action": None, "bootstrap": None, "reused": reused,
         "warnings": [], "dry_run": False,
     }  # fmt: skip
 
@@ -175,8 +177,11 @@ def script_reads(sc: Scene, comments: list[dict[str, Any]] | None = None) -> Non
     script_comments(sc.fakes, PR7, comments if comments is not None else one_comment())
 
 
-def script_throwaway(sc: Scene, **kw: Any) -> None:
-    sc.fakes.script("wtctl", "create", json=tw_doc(sc.root), **kw)
+def script_throwaway(
+    sc: Scene, record: dict[str, Any] | None = None, *, reused: bool = False, **kw: Any
+) -> None:
+    doc = tw_doc(sc.root, sc.rid, reused=reused, **(record or {}))
+    sc.fakes.script("wtctl", "create", json=doc, **kw)
 
 
 def resumed(sc: Scene, *, working: bool = True) -> dict[str, Any]:
@@ -627,14 +632,17 @@ def test_a_flag_set_before_the_agent_starts_cancels_and_never_launches(scene: Sc
 
 
 def during(sc: Scene, tool: str, command: str, action: Callable[[], object]) -> Any:
-    """Run ``action`` in a thread once the fake has recorded a call of ``tool command``."""
+    """Run ``action`` in a thread once the fake has recorded a new call of ``tool command`` (one
+    made after this call: the ``check`` that set the round up made some too)."""
     import threading
     import time
+
+    seen = len(sc.fakes.calls(tool, command))
 
     def watch() -> None:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
-            if sc.fakes.calls(tool, command):
+            if len(sc.fakes.calls(tool, command)) > seen:
                 action()
                 return
             time.sleep(0.02)
@@ -805,29 +813,54 @@ def test_a_fork_is_only_what_the_jobs_own_resume_answer_says_never_a_label_searc
     assert scene.round()["agent_id"] == FORK
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda d, rid: d["agent"].update(agent_id=BASE),  # the original as "the fork"
-        lambda d, rid: d["agent"].update(labels=["owner=review-respond"]),  # no round label
-        lambda d, rid: d["agent"].update(labels=["round=rd-aaaaaaaa"]),  # another round's label
-        lambda d, rid: d["agent"].update(agent_id="AG-../../x"),
-    ],
-    ids=["is-the-base", "no-label", "other-round", "malformed-id"],
-)
-def test_an_unusable_resume_answer_fails_the_round_and_nothing_is_waited_on_or_stopped(
-    scene: Scene, mutate: Callable[[dict[str, Any], str], None]
-) -> None:
+def _unusable(scene: Scene, mutate: Callable[[dict[str, Any], str], None]) -> None:
     script_reads(scene)
     script_throwaway(scene)
     doc = resumed(scene)
     mutate(doc, scene.rid)
     scene.fakes.script("agent-spawn", "resume", json=doc, schema=False)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d, rid: d["agent"].update(agent_id=BASE),  # the original as "the fork"
+        lambda d, rid: d["agent"].update(agent_id="AG-../../x"),
+    ],
+    ids=["is-the-base", "malformed-id"],
+)
+def test_an_unusable_resume_answer_with_no_usable_id_fails_the_round_and_stops_nothing(
+    scene: Scene, mutate: Callable[[dict[str, Any], str], None]
+) -> None:
+    _unusable(scene, mutate)
     assert scene.job() == 1
     row = scene.round()
     assert (row["state"], row["failure_reason"], row["agent_id"]) == ("failed", "internal", None)
     assert scene.sql("SELECT count(*) FROM forks") == [(0,)]
-    assert [c.command for c in scene.calls("agent-spawn")] == ["resume"]
+    assert [c.command for c in scene.calls("agent-spawn")] == ["resume"]  # never stop or wait
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda d, rid: d["agent"].update(labels=["owner=review-respond"]),  # no round label
+        lambda d, rid: d["agent"].update(labels=["round=rd-aaaaaaaa"]),  # another round's label
+    ],
+    ids=["no-label", "other-round"],
+)
+def test_an_unusable_resume_answer_with_a_well_formed_id_stops_that_agent_before_failing(
+    scene: Scene, mutate: Callable[[dict[str, Any], str], None]
+) -> None:
+    _unusable(scene, mutate)
+    scene.fakes.script("agent-spawn", "stop", json=STOP_DOC, schema=False)
+    assert scene.job() == 1
+    row = scene.round()
+    assert (row["state"], row["failure_reason"], row["agent_id"]) == ("failed", "internal", None)
+    assert scene.sql("SELECT count(*) FROM forks") == [(0,)]
+    assert [c.command for c in scene.calls("agent-spawn")] == ["resume", "stop"]
+    (stop,) = scene.calls("agent-spawn", "stop")
+    assert stop.positionals["agent_id"] == FORK
+    assert stop.flags["--actor"] == "auto:review-respond"
 
 
 def test_a_tainted_original_is_a_refusal_at_round_time(scene: Scene) -> None:
@@ -921,7 +954,7 @@ def test_a_missing_note_file_fails_the_queued_round(
     for f in (sc.state / "files").rglob("*"):
         if f.is_file() and f.read_bytes() == b"a note":
             f.unlink()
-    assert sc.job() in (1, 12)
+    assert sc.job() == 12  # `state_unsafe`: a stored file is missing
     assert sc.round()["state"] == "failed"
     assert sc.comment_states()[C1] == "unhandled"
 
@@ -947,7 +980,7 @@ def test_the_credential_variables_of_pass_env_reach_forgectl_and_wtctl_not_agent
         assert call.env.get("MY_FORGE_TOKEN_VAR") == "tok-1"
     for call in sc.calls("agent-spawn"):
         assert "MY_FORGE_TOKEN_VAR" not in call.env
-        assert call.env.get("MY_OTHER_VAR") == "other-1"
+        assert "MY_OTHER_VAR" not in call.env  # agent-spawn (and its children) get no pass_env
     assert not any(k.startswith("REVIEW_RESPOND_") for c in sc.calls() for k in c.env)
 
 
@@ -1019,10 +1052,42 @@ def wait_for(sc: Scene, tool: str, command: str, seconds: float = 30.0) -> None:
 
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if sc.fakes.calls(tool, command):
+        if sc.calls(tool, command):  # the calls since ``start_job``
             return
         time.sleep(0.02)
     raise AssertionError(f"{tool} {command} was never called")
+
+
+def _is_fake(pid: int, sc: Scene) -> bool:
+    """Whether ``pid`` is (still) one of this test's fake programs (never a reused pid)."""
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
+        state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return str(sc.fakes.bin_dir) in cmdline and state != "Z"
+
+
+def reap_fakes(
+    sc: Scene, tool: str, command: str, *, kill: bool = False, patience: float = 15.0
+) -> None:
+    """Make sure the fake process of each recorded ``tool command`` call is gone: wait for it in
+    a bounded loop (it was left running by a killed job), killing only that exact verified pid when
+    it must go now (``kill``) or does not end in time."""
+    import os
+    import signal
+    import time
+
+    pids = [c.pid for c in sc.fakes.calls(tool, command) if c.pid]
+    deadline = time.monotonic() + (0.0 if kill else patience)
+    while time.monotonic() < deadline and any(_is_fake(p, sc) for p in pids):
+        time.sleep(0.05)
+    for pid in pids:
+        if _is_fake(pid, sc):
+            os.kill(pid, signal.SIGKILL)
+    gone = time.monotonic() + 5.0
+    while time.monotonic() < gone and any(_is_fake(p, sc) for p in pids):
+        time.sleep(0.05)
 
 
 STOP_DOC: dict[str, Any] = {
@@ -1037,7 +1102,6 @@ def test_sigterm_during_wait_stops_the_agent_waits_and_maps_the_run(
 ) -> None:
     import os
     import signal
-    import time
 
     script_reads(scene)
     script_throwaway(scene)
@@ -1063,7 +1127,6 @@ def test_sigterm_during_wait_stops_the_agent_waits_and_maps_the_run(
     # the wait call returned before the job ended: its recorded call is complete
     assert scene.temp_files() == []
     assert scene.comment_states()[C1] == "unhandled"
-    time.sleep(0)  # (nothing left running: the fake wait was awaited)
 
 
 def test_sigterm_before_the_agent_exists_ends_the_round_without_a_stop(scene: Scene) -> None:
@@ -1106,25 +1169,30 @@ def test_a_killed_job_between_resume_and_the_agent_record_leaves_the_state_the_f
 ) -> None:
     import os
     import signal
-    import time
 
     script_reads(scene)
     script_throwaway(scene)
     script_resume(scene, sleep=2.0)  # the fork exists once this returns; the job dies first
     proc = start_job(scene)
-    wait_for(scene, "agent-spawn", "resume")
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.communicate(timeout=60)
-    assert proc.returncode == -signal.SIGKILL
-    row = scene.round()
-    # running, the throwaway recorded, no agent: the finalizer looks the fork up by its label
-    assert (row["state"], row["agent_id"], row["throwaway_id"]) == ("running", None, "wt-throwaa2")
-    assert scene.comment_states()[C1] == "delivered"
-    assert scene.sql("SELECT count(*) FROM forks") == [(0,)]
-    assert len(scene.temp_files()) == 2  # a dead job cannot clean: the cleanup (#26) does
-    held = scene.sql("SELECT pid FROM leases WHERE key LIKE 'round:%'")
-    assert held == [(proc.pid,)]  # only the finalizer may take it over (verified gone)
-    time.sleep(2.2)  # let the orphaned fake finish before the world is torn down
+    try:
+        wait_for(scene, "agent-spawn", "resume")
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.communicate(timeout=60)
+        assert proc.returncode == -signal.SIGKILL
+        row = scene.round()
+        # running, the throwaway recorded, no agent: the finalizer looks the fork up by its label
+        assert (row["state"], row["agent_id"], row["throwaway_id"]) == (
+            "running",
+            None,
+            "wt-throwaa2",
+        )
+        assert scene.comment_states()[C1] == "delivered"
+        assert scene.sql("SELECT count(*) FROM forks") == [(0,)]
+        assert len(scene.temp_files()) == 2  # a dead job cannot clean: the cleanup (#26) does
+        held = scene.sql("SELECT pid FROM leases WHERE key LIKE 'round:%'")
+        assert held == [(proc.pid,)]  # only the finalizer may take it over (verified gone)
+    finally:
+        reap_fakes(scene, "agent-spawn", "resume")  # the orphaned fake finishes by itself
 
 
 def test_a_killed_job_during_the_wait_leaves_the_recorded_agent_for_the_finalizer(
@@ -1132,21 +1200,22 @@ def test_a_killed_job_during_the_wait_leaves_the_recorded_agent_for_the_finalize
 ) -> None:
     import os
     import signal
-    import time
 
     script_reads(scene)
     script_throwaway(scene)
     script_resume(scene)
     script_wait(scene, "failed", sleep=2.0)
     proc = start_job(scene)
-    wait_for(scene, "agent-spawn", "wait")
-    os.kill(proc.pid, signal.SIGKILL)
-    proc.communicate(timeout=60)
-    row = scene.round()
-    assert (row["state"], row["agent_id"], row["counted"]) == ("running", FORK, 1)
-    assert scene.sql("SELECT state, source FROM forks") == [("round", BASE)]
-    assert scene.comment_states()[C1] == "delivered"
-    time.sleep(2.2)
+    try:
+        wait_for(scene, "agent-spawn", "wait")
+        os.kill(proc.pid, signal.SIGKILL)
+        proc.communicate(timeout=60)
+        row = scene.round()
+        assert (row["state"], row["agent_id"], row["counted"]) == ("running", FORK, 1)
+        assert scene.sql("SELECT state, source FROM forks") == [("round", BASE)]
+        assert scene.comment_states()[C1] == "delivered"
+    finally:
+        reap_fakes(scene, "agent-spawn", "wait")
 
 
 def test_a_queued_rounds_note_file_survives_the_pruning_of_unreferenced_bodies(
@@ -1168,3 +1237,532 @@ def test_a_queued_rounds_note_file_survives_the_pruning_of_unreferenced_bodies(
         lease.release()
     finally:
         store.close()
+
+
+# ---- round 1 review fixes ------------------------------------------------------------------------
+
+
+def log_text(sc: Scene) -> str:
+    return (sc.state / "log.jsonl").read_text()
+
+
+def script_reads_slow(sc: Scene, *, show: float = 0.0, comments: float = 0.0) -> None:
+    """The PR and comment reads, each answered after a delay (a window for a flag or a signal)."""
+    sc.fakes.script(
+        "forgectl", "show", json=builders.forgectl_show(head_sha=HEAD),
+        match={"positionals": {"pr": PR7}}, sleep=show,
+    )  # fmt: skip
+    sc.fakes.script(
+        "forgectl", "comments",
+        json=builders.forgectl_comments(one_comment(), pr=PR7),
+        match={"positionals": {"pr": PR7}}, sleep=comments,
+    )  # fmt: skip
+
+
+def failed_internal(sc: Scene, *, counted: int = 0) -> None:
+    row = sc.round()
+    assert (row["state"], row["failure_reason"], row["counted"]) == ("failed", "internal", counted)
+
+
+# R1: an unexpected error after `start` ends the round, it never leaves it running
+
+
+def test_a_prompt_file_that_cannot_be_written_ends_the_round_failed_internal(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    prompts = scene.state / "prompts"
+    prompts.mkdir(mode=0o700, exist_ok=True)
+    (prompts / f"{scene.rid}.md").write_text("in the way")  # the exclusive create fails
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.round()["throwaway_id"] == "wt-throwaa2"
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.calls("agent-spawn") == []
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
+
+
+# R2: after SIGTERM the wait's real result is mapped, only a stop end (or none) is a SIGTERM end
+
+
+@pytest.mark.parametrize(
+    "outcome, code, state",
+    [("blocked", 13, "escalated"), ("done", 0, "running")],
+    ids=["escalated", "done-validated"],
+)
+def test_a_wait_that_returns_a_real_outcome_after_sigterm_is_mapped_not_discarded(
+    scene: Scene, outcome: str, code: int, state: str
+) -> None:
+    import os
+    import signal
+
+    (scene.root / "src").mkdir(exist_ok=True)
+    (scene.root / "src" / "app.py").write_text("x = 1\n")
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script("agent-spawn", "stop", json=STOP_DOC, schema=False)
+    script_wait(scene, outcome, sleep=2.0)
+    if outcome == "done":
+        script_show(scene, show_after(scene, artifact=artifact_file(scene, good_artifact())))
+    proc = start_job(scene)
+    wait_for(scene, "agent-spawn", "wait")
+    os.kill(proc.pid, signal.SIGTERM)
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == code, err
+    row = scene.round()
+    assert (row["state"], row["failure_reason"]) == (state, None)
+    assert len(scene.calls("agent-spawn", "stop")) == 1
+
+
+# R5 and the re-read before `start`: the stop flag wins over a queued failure and over `start`
+
+
+def test_a_cancel_flag_set_during_the_read_wins_over_a_queued_failure(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sc = make_round(world, capsys, limits={"prompt_bytes": 1024})
+    script_reads_slow(sc, show=1.0)
+    t = during(sc, "forgectl", "show", lambda: set_flag(sc))
+    assert sc.job() == 0
+    t.join(timeout=30)
+    row = sc.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "stopped", 0)
+    assert sc.comment_states()[C1] == "unhandled"
+    assert sc.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("stopped",)]
+
+
+def test_a_cancel_flag_set_during_the_read_cancels_before_start_and_delivers_nothing(
+    scene: Scene,
+) -> None:
+    script_reads_slow(scene, show=1.0)
+    t = during(scene, "forgectl", "show", lambda: set_flag(scene))
+    assert scene.job() == 0
+    t.join(timeout=30)
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "stopped", 0)
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.calls("wtctl") == []
+
+
+# R6 and R10: the throwaway root bound, and the throwaway is recorded before the root is judged
+
+
+def root_of(sc: Scene, size: int) -> Path:
+    """A real directory (0700) whose path is exactly ``size`` bytes."""
+    path = sc.world.root / "tw" / "long"
+    remaining = size - len(str(path.parent))
+    parts: list[str] = []
+    while remaining > 202:
+        parts.append("a" * 200)
+        remaining -= 201
+    parts.append("b" * (remaining - 1))
+    root = path.parent.joinpath(*parts)
+    assert len(str(root)) == size
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    return root
+
+
+def test_a_throwaway_root_longer_than_the_selection_root_fails_the_round_internal(
+    scene: Scene,
+) -> None:
+    scene.root = root_of(scene, 1100)
+    script_reads(scene)
+    script_throwaway(scene)
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.round()["throwaway_id"] == "wt-throwaa2"  # recorded for the cleanup (#26)
+    assert scene.calls("agent-spawn") == []
+    assert scene.comment_states()[C1] == "unhandled"
+
+
+def test_a_throwaway_root_of_exactly_the_selection_size_is_usable(scene: Scene) -> None:
+    scene.root = root_of(scene, 1024)
+    happy(scene)
+    assert scene.job() == 0
+    assert scene.round()["state"] == "running"
+    assert scene.round()["agent_id"] == FORK
+
+
+# R7 is above (the unusable resume answers). R8: the wtctl record is checked before it is used
+
+FORGED: dict[str, Callable[[Scene], dict[str, Any]]] = {
+    "no-labels": lambda sc: {"labels": []},
+    "other-round": lambda sc: {"labels": ["app=review-respond", "role=round", "round=rd-aaaaaaaa"]},
+    "no-app-label": lambda sc: {"labels": ["role=round", f"round={sc.rid}"]},
+    "other-ref": lambda sc: {"ref": "b" * 40},
+    "outside-base-dir": lambda sc: {"base_dir": "/somewhere/else"},
+}
+
+
+@pytest.mark.parametrize("make", list(FORGED.values()), ids=list(FORGED))
+def test_a_forged_throwaway_record_fails_the_round_internal_and_stays_recorded(
+    scene: Scene, make: Callable[[Scene], dict[str, Any]]
+) -> None:
+    script_reads(scene)
+    script_throwaway(scene, make(scene))
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.round()["throwaway_id"] == "wt-throwaa2"
+    assert scene.calls("agent-spawn") == []
+    assert "throwaway_unusable" in log_text(scene)
+
+
+def test_a_reused_throwaway_record_fails_the_round_internal(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene, reused=True, schema=False)  # not valid per the pinned schema
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.round()["throwaway_id"] == "wt-throwaa2"
+    assert scene.calls("agent-spawn") == []
+
+
+def test_a_throwaway_record_without_the_optional_fields_is_not_judged_on_them(scene: Scene) -> None:
+    # the pinned shape always holds `ref`; a record without it has nothing to compare (defensive)
+    script_reads(scene)
+    script_throwaway(scene, {"ref": None}, schema=False)
+    script_resume(scene)
+    script_wait(scene, "failed")
+    assert scene.job() == 12
+    assert scene.round()["failure_reason"] == "agent_failed"
+    assert scene.round()["agent_id"] == FORK
+
+
+# R9: agent-spawn and git get no credentials and no pass_env
+
+
+def test_git_and_agent_spawn_never_see_pass_env_or_tokens(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_respond.gateway import Gateway
+
+    monkeypatch.setenv("MY_FORGE_TOKEN_VAR", "tok-1")
+    monkeypatch.setenv("MY_OTHER_VAR", "other-1")
+    seen: list[tuple[list[str], dict[str, str]]] = []
+    real = Gateway.run
+
+    def spy(self: Gateway, argv: Any, **kw: Any) -> Any:
+        seen.append((list(argv), dict(kw.get("env") or self.env)))
+        return real(self, argv, **kw)
+
+    monkeypatch.setattr(Gateway, "run", spy)
+    sc = make_round(
+        world,
+        capsys,
+        hosts={HOST: {"token_env": "MY_FORGE_TOKEN_VAR"}},
+        jobs={"pass_env": ["MY_FORGE_TOKEN_VAR", "MY_OTHER_VAR"]},
+    )
+    happy(sc)
+    assert sc.job() == 0
+    git_envs = [env for argv, env in seen if argv[0] == "git" and "check-ref-format" in argv]
+    assert git_envs
+    for env in git_envs:
+        assert "MY_FORGE_TOKEN_VAR" not in env and "MY_OTHER_VAR" not in env
+    for call in sc.calls("agent-spawn"):
+        assert "MY_FORGE_TOKEN_VAR" not in call.env and "MY_OTHER_VAR" not in call.env
+    assert all(c.env.get("MY_OTHER_VAR") == "other-1" for c in sc.calls("forgectl"))
+
+
+# R11: exit 0 of wait needs the run outcome `done`
+
+
+def test_a_wait_exit_0_whose_run_outcome_is_not_done_fails_internal_whatever_the_artifact(
+    scene: Scene,
+) -> None:
+    (scene.root / "src").mkdir(exist_ok=True)
+    (scene.root / "src" / "app.py").write_text("x = 1\n")
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script(
+        "agent-spawn", "wait", json=waited(scene, "failed"), exit=0,
+        schema="agent-spawn/cli/wait.json",
+    )  # fmt: skip
+    script_show(scene, show_after(scene, artifact=artifact_file(scene, good_artifact())))
+    assert scene.job() == 1
+    failed_internal(scene, counted=1)
+    assert scene.comment_states()[C1] == "unhandled"
+
+
+def test_a_reread_last_run_with_exit_0_and_an_outcome_other_than_done_fails_internal(
+    scene: Scene,
+) -> None:
+    (scene.root / "src").mkdir(exist_ok=True)
+    (scene.root / "src" / "app.py").write_text("x = 1\n")
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script("agent-spawn", "wait", json=error_doc("internal"), exit=143, schema=False)
+    show = show_after(scene, artifact=artifact_file(scene, good_artifact()))
+    show["runs"][0]["outcome"]["outcome"] = "failed"
+    show["runs"][0]["outcome"]["exit_code"] = 0
+    script_show(scene, show, schema=False)  # an outcome and an exit code the schema forbids
+    assert scene.job() == 1
+    failed_internal(scene, counted=1)
+
+
+# R12: the answers of wait, show and wtctl create are bounded
+
+
+def test_an_oversized_wait_answer_is_internal(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "AGENT_SPAWN_OUTPUT_CAP", 2048)
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script("agent-spawn", "wait", stdout="x" * 5000, exit=0, schema=False)
+    assert scene.job() == 1
+    failed_internal(scene, counted=1)
+
+
+def test_an_oversized_show_answer_is_a_failed_show(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "AGENT_SPAWN_OUTPUT_CAP", 2048)
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    script_wait(scene)
+    scene.fakes.script("agent-spawn", "show", stdout="x" * 5000, schema=False)
+    assert scene.job() == 1
+    failed_internal(scene, counted=1)
+    assert "show_failed" in log_text(scene)
+
+
+def test_an_oversized_wtctl_create_answer_is_internal(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "WTCTL_OUTPUT_CAP", 100)
+    script_reads(scene)
+    script_throwaway(scene)
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.calls("agent-spawn") == []
+
+
+# R13, R14, R15: the stop and the wait share one budget (jobs.kill_grace minus 15 s)
+
+
+def test_a_stop_before_the_wait_shares_its_budget_with_the_wait(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import time
+
+    sc = make_round(world, capsys, jobs={"kill_grace": "20s"})  # wait budget 5 s, grace 5 s
+    script_reads(sc)
+    script_throwaway(sc)
+    script_resume(sc, sleep=1.0)
+    sc.fakes.script("agent-spawn", "stop", json=STOP_DOC, schema=False, sleep=3.0)
+    script_wait(sc, "killed", sleep=10.0)  # ignores the stop
+    stopped_at: list[float] = []
+    flag = during(sc, "agent-spawn", "resume", lambda: set_flag(sc))
+    mark = during(sc, "agent-spawn", "stop", lambda: stopped_at.append(time.monotonic()))
+    try:
+        sc.job()
+        ended = time.monotonic()
+        flag.join(timeout=30)
+        mark.join(timeout=30)
+        assert "wait_abandoned" in log_text(sc)
+        # the budget started before the stop (3 s): the wait is given up about 5 s after it began,
+        # not 5 s after the stop returned (8 s)
+        assert ended - stopped_at[0] < 6.9
+    finally:
+        reap_fakes(sc, "agent-spawn", "wait", kill=True)
+
+
+def test_a_wait_that_ignores_the_stop_is_abandoned_after_the_budget(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import os
+    import signal
+
+    sc = make_round(world, capsys, jobs={"kill_grace": "17s"})  # wait budget 2 s
+    script_reads(sc)
+    script_throwaway(sc)
+    script_resume(sc)
+    sc.fakes.script("agent-spawn", "stop", json=STOP_DOC, schema=False)
+    script_wait(sc, "killed", sleep=8.0)
+    proc = start_job(sc)
+    try:
+        wait_for(sc, "agent-spawn", "wait")
+        os.kill(proc.pid, signal.SIGTERM)
+        _, err = proc.communicate(timeout=60)
+        assert proc.returncode == 12, err
+        row = sc.round()
+        assert (row["state"], row["failure_reason"]) == ("failed", "job_terminated")
+        assert "wait_abandoned" in log_text(sc)
+    finally:
+        reap_fakes(sc, "agent-spawn", "wait", kill=True)
+
+
+def test_a_wait_that_returns_while_the_stop_runs_is_not_abandoned(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import os
+    import signal
+
+    sc = make_round(world, capsys, jobs={"kill_grace": "17s"})  # wait budget 2 s
+    script_reads(sc)
+    script_throwaway(sc)
+    script_resume(sc)
+    sc.fakes.script("agent-spawn", "stop", json=STOP_DOC, schema=False, sleep=3.0)
+    script_wait(sc, "killed", sleep=1.5)  # ends inside the stop, which outlasts the budget
+    proc = start_job(sc)
+    try:
+        wait_for(sc, "agent-spawn", "wait")
+        os.kill(proc.pid, signal.SIGTERM)
+        _, err = proc.communicate(timeout=60)
+        assert proc.returncode == 12, err
+        assert sc.round()["failure_reason"] == "job_terminated"
+        assert "wait_abandoned" not in log_text(sc)
+    finally:
+        reap_fakes(sc, "agent-spawn", "wait")
+
+
+# R17: SIGTERM before `start` leaves the round queued (the queued reconcile, #24, ends it)
+
+
+def test_sigterm_before_the_round_starts_leaves_it_queued_and_delivers_nothing(
+    scene: Scene,
+) -> None:
+    import os
+    import signal
+
+    script_reads_slow(scene, comments=1.5)
+    proc = start_job(scene)
+    wait_for(scene, "forgectl", "comments")
+    os.kill(proc.pid, signal.SIGTERM)
+    _, err = proc.communicate(timeout=60)
+    assert proc.returncode == 1, err
+    assert scene.round()["state"] == "queued"
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.calls("wtctl") == [] and scene.calls("agent-spawn") == []
+    assert scene.temp_files() == []
+
+
+# R18: gaps the review found
+
+
+def test_a_comment_edited_between_the_read_and_the_delivery_is_skipped(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.job as job_mod
+
+    monkeypatch.setattr(job_mod, "body_digest", lambda body: "f" * 64)  # not the stored hash
+    script_reads(scene)
+    assert scene.job() == 0
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == (
+        "canceled",
+        "nothing_to_respond",
+        0,
+    )
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.calls("wtctl") == []
+
+
+def test_a_fork_pr_is_canceled_nothing_to_respond(scene: Scene) -> None:
+    doc = builders.forgectl_show(head_sha=HEAD)
+    doc["head"]["is_fork"] = True
+    scene.fakes.script("forgectl", "show", json=doc)
+    assert scene.job() == 0
+    assert (scene.round()["state"], scene.round()["cancel_reason"]) == (
+        "canceled",
+        "nothing_to_respond",
+    )
+    assert [c.command for c in scene.calls()] == ["show"]
+
+
+@pytest.mark.parametrize("include", [False, True], ids=["plain", "include-existing"])
+def test_a_seen_comment_is_delivered_only_to_an_include_existing_round(
+    world: World, capsys: pytest.CaptureFixture[str], include: bool
+) -> None:
+    sc = make_round(world, capsys, include_existing=include)
+    sc.sql("UPDATE comments SET state = 'seen'")
+    if include:
+        happy(sc)
+        assert sc.job() == 0
+        assert sc.round()["state"] == "running"
+        assert sc.comment_states()[C1] == "delivered"
+    else:
+        script_reads(sc)
+        assert sc.job() == 0
+        assert (sc.round()["state"], sc.round()["cancel_reason"]) == (
+            "canceled",
+            "nothing_to_respond",
+        )
+        assert sc.comment_states()[C1] == "seen"
+
+
+def test_refused_session_settings_fail_the_queued_round_before_any_call(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.job as job_mod
+    from review_respond.errors import CliError
+
+    def refuse(*args: Any, **kw: Any) -> Any:
+        raise CliError("config_invalid", "the profile is refused")
+
+    monkeypatch.setattr(job_mod, "build_session_settings", refuse)
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.comment_states()[C1] == "unhandled"
+    assert scene.calls() == []
+    assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
+
+
+def test_a_stored_note_over_the_size_cap_fails_the_queued_round(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sc = make_round(world, capsys, note=b"n" * 8193)
+    assert sc.job() == 1
+    failed_internal(sc)
+    assert sc.comment_states()[C1] == "unhandled"
+    assert sc.calls() == []
+
+
+def test_a_flag_set_while_resume_fails_with_exit_12_cancels_the_round(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    scene.fakes.script("agent-spawn", "resume", json=error_doc("launch_failed"), exit=12, sleep=1.0)
+    t = during(scene, "agent-spawn", "resume", lambda: set_flag(scene))
+    assert scene.job() == 0
+    t.join(timeout=30)
+    row = scene.round()
+    assert (row["state"], row["cancel_reason"], row["counted"]) == ("canceled", "stopped", 0)
+    assert scene.comment_states()[C1] == "unhandled"
+
+
+def test_a_flag_does_not_turn_a_throwaway_failure_into_a_cancel(scene: Scene) -> None:
+    script_reads(scene)
+    scene.fakes.script(
+        "wtctl", "create",
+        json={"error": {"code": "internal", "message": "boom", "reason": None,
+                        "details": None, "lower_error": None}},
+        exit=12, schema=False, sleep=1.0,
+    )  # fmt: skip
+    t = during(scene, "wtctl", "create", lambda: set_flag(scene))
+    assert scene.job() == 12
+    t.join(timeout=30)
+    row = scene.round()
+    assert (row["state"], row["failure_reason"]) == ("failed", "throwaway_failed")
+
+
+def test_a_malformed_show_document_after_a_done_run_fails_the_round_show_failed(
+    scene: Scene,
+) -> None:
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    script_wait(scene)
+    script_show(scene, {"agent": None, "runs": "none"}, schema=False)
+    assert scene.job() == 1
+    failed_internal(scene, counted=1)
+    assert "show_failed" in log_text(scene)

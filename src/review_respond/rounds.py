@@ -555,9 +555,9 @@ class Rounds:
         """``_job`` cannot build what the round needs and no comment was delivered yet (the
         prompt cannot fit ``limits.prompt_bytes`` even for one comment, the stored note is
         unreadable, the session settings are unsafe): ``queued`` -> ``failed`` (``internal``),
-        not counted, block ``failed``. The state table has no such row (a decision for the
-        maintainer, see docs/interface.md Round states): without a block a due ``check`` would
-        queue the same round again at every pass."""
+        not counted, block ``failed`` (docs/interface.md Round states): without a block a due
+        ``check`` would queue the same round again at every pass. ``post-attention`` ``failed``
+        is queued by ``extra`` (TODO(#37)), like every other ``failed`` end."""
 
         def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             new_block = self._block(conn, row, "failed")

@@ -19,13 +19,15 @@ Boundaries (what this module does not do):
 - Throwaway removal and fork teardown of an ended round are TODO(#26); a job that dies leaves
   the temp files of its round for the cleanup (TODO(#26)) and the round for the finalizer (#24).
 
-Round transitions after ``start`` run under the ``round:`` lease (every one is one atomic
-compare-and-set transaction that checks the lease); the PR's lease is held for the read, the
-record of the read and ``start`` (interface: ``pr:`` for each short transaction; the
-``lease_timeout`` after 60 s leaves the round as stored).
+The job holds the ``round:`` lease for its life. It takes the PR's lease only for the PR and
+comment read, the record of that read and ``start`` (``_read_and_start``); every later transition
+runs under the ``round:`` lease alone: each is one atomic transaction that checks the lease and is
+a compare-and-set on the row's ``rev``, so it needs no ``pr:`` lease (docs/interface.md: Leases;
+a ``lease_timeout`` after 60 s leaves the round as stored).
 
 SIGTERM sets a flag only; the job acts on it at the next step boundary and, while it waits for the
-agent, within a quarter of a second (the ``wait`` call runs in a thread).
+agent, within a quarter of a second (the ``wait`` call runs in a thread). A SIGTERM before
+``start`` leaves the round ``queued`` (exit 1): the queued reconcile (#24) ends it.
 """
 
 from __future__ import annotations
@@ -50,9 +52,16 @@ from .durations import parse_duration
 from .errors import CliError
 from .gateway import AgentSpawn, Gateway, GatewayError, Result
 from .handled import HandledSet, body_digest
-from .outcomes import RunEnd, map_run_end
+from .outcomes import STOP_REASONS, RunEnd, map_run_end
 from .output import Context, Outcome
-from .prompt import BuiltPrompt, PromptComment, build_prompt, remove_prompt_file, write_prompt_file
+from .prompt import (
+    BuiltPrompt,
+    PromptComment,
+    build_prompt,
+    remove_prompt_file,
+    sanitize,
+    write_prompt_file,
+)
 from .rounds import TERMINAL_STATES, RoundRow, Rounds, Transition, get_round
 from .settings import (
     SessionSettings,
@@ -79,7 +88,8 @@ PR_LEASE_WAIT: Final = 60.0
 MAX_NOTE_BYTES: Final = 8192
 # The throwaway's path is not known when the comments are selected (it is created after the
 # round starts, the comments being delivered only once the round runs). Selection uses a root of
-# this size; the real root must not be longer (a longer one fails the round before the launch).
+# this size; the real root's SANITIZED length must not be longer (a longer one fails the round
+# before the launch), so the real prompt never outgrows the trial one.
 SELECTION_ROOT_BYTES: Final = 1024
 WAIT_TICK: Final = 0.25
 _SIGNAL_EXITS: Final = (130, 143)
@@ -210,19 +220,20 @@ def frozen_ref(last: dict[str, Any]) -> tuple[bool, FrozenRef | None]:
 # ---- the job ----------------------------------------------------------------------------------
 
 
-def _env(
-    environ: Mapping[str, str], pass_env: list[str], tokens: set[str], *, with_tokens: bool
-) -> dict[str, str]:
-    """A sibling's environment: the allow-listed variables and ``jobs.pass_env``. Only forgectl
-    and wtctl get the credential variables; agent-spawn (whose children are the agent) never."""
+def _credential_env(environ: Mapping[str, str], pass_env: list[str]) -> dict[str, str]:
+    """The environment of forgectl and wtctl: the allow-listed variables and ``jobs.pass_env``
+    (which holds their credential variables)."""
     env = child_env(environ, ())
     for name in pass_env:
-        if name in environ and (with_tokens or name not in tokens):
+        if name in environ:
             env[name] = environ[name]
-    if not with_tokens:
-        for name in tokens:
-            env.pop(name, None)
     return env
+
+
+def _plain_env(environ: Mapping[str, str], tokens: set[str]) -> dict[str, str]:
+    """The environment of agent-spawn (whose children are the agent) and git: the allow-listed
+    variables only. Never ``jobs.pass_env`` and never a credential variable."""
+    return child_env(environ, tokens)
 
 
 class Job:
@@ -238,8 +249,8 @@ class Job:
         self.rid = round_id
         tokens = {c.token_env for c in settings.hosts.values() if c.token_env}
         pass_env = list(settings.jobs.pass_env)
-        self.gw = Gateway(_env(os.environ, pass_env, tokens, with_tokens=True))
-        self.spawn_gw = Gateway(_env(os.environ, pass_env, tokens, with_tokens=False))
+        self.gw = Gateway(_credential_env(os.environ, pass_env))
+        self.spawn_gw = Gateway(_plain_env(os.environ, tokens))  # agent-spawn and git
         self.spawn: AgentSpawn = self.spawn_gw.agent_spawn
         self.config_dir = os.fspath((ctx.config or default_config_path()).parent)
         self.state_dir = os.fspath(state.path)
@@ -250,6 +261,7 @@ class Job:
         self.grace_seconds = int(max(5, kill_grace - 50))
         self.wait_budget = max(1.0, kill_grace - 15)
         self.terminated = False
+        self.terminated_at = 0.0  # the spawn gateway's monotonic time of the SIGTERM
         self.started = False  # the run reached ``working`` (Counting)
         self.agent_id: str | None = None
         self.agent_done = False  # the agent's run ended: the temp files can go
@@ -264,6 +276,7 @@ class Job:
     # -- plumbing ---------------------------------------------------------------------------
 
     def _on_signal(self, _signum: int, _frame: FrameType | None) -> None:
+        self.terminated_at = self.spawn_gw.clock.monotonic()
         self.terminated = True  # acted on at the next step boundary (never inside a transaction)
 
     def _row(self) -> RoundRow:
@@ -350,8 +363,11 @@ class Job:
             return self._running(started)
         except CliError as error:
             if error.code != "lease_lost":
-                self._fail_internal(error)
+                self._fail_internal()
             raise
+        except Exception:  # an OSError of a file write, a bug: the round must not stay running
+            self._fail_internal()
+            return 1
 
     def _prepare_local(self, row: RoundRow, digest: str) -> int | None:
         """What needs no sibling: the settings and the stored note. A failure ends the round
@@ -376,6 +392,9 @@ class Job:
 
     def _queued_failed(self, why: str, error: CliError | None = None) -> int:
         self._warn(why)
+        if self._row().cancel_requested_at is not None:
+            self.rounds.cancel_flagged(self.rid)  # the stop flag wins; TODO(#37): extra
+            return 0
         self.rounds.fail_queued(self.rid)  # TODO(#37): post-attention extra
         if error is not None and error.code == "state_unsafe":
             raise error
@@ -413,7 +432,8 @@ class Job:
         ):
             return False
         try:
-            return self.gw.git.run(["check-ref-format", "--branch", ref]).returncode == 0
+            # no credentials: git gets the plain environment
+            return self.spawn_gw.git.run(["check-ref-format", "--branch", ref]).returncode == 0
         except GatewayError:
             return False
 
@@ -513,7 +533,7 @@ class Job:
 
     # -- running -----------------------------------------------------------------------------
 
-    def _fail_internal(self, error: CliError) -> None:
+    def _fail_internal(self) -> None:
         """An unexpected failure after the round started: end it ``failed`` (``internal``)."""
         self._warn("job_internal")
         try:
@@ -534,9 +554,9 @@ class Job:
         code = map_run_end(flagged).job_exit
         return 1 if code is None else code
 
-    def _failed(self, reason: str) -> int:
-        self.rounds.to_failed(self.rid, reason, counted=self.started)
-        return 1 if reason == "internal" else 12
+    def _failed_internal(self) -> int:
+        self.rounds.to_failed(self.rid, "internal", counted=self.started)
+        return 1
 
     def _running(self, row: RoundRow) -> int:
         if self.terminated:
@@ -558,7 +578,7 @@ class Job:
             return self._finish(end, esc)
         agent_id = self._record_agent(row, launch, base, tw_id)
         if agent_id is None:
-            return self._failed("internal")
+            return self._failed_internal()
         self.started = self.started or end.started
         if end.started:
             self.rounds.note_started(self.rid)
@@ -573,29 +593,58 @@ class Job:
                 labels=labels.throwaway_labels(role="round", round_id=self.rid).labels,
                 actor=ACTOR,
             )
-            code = 0 if result.ok else (result.returncode or 1)
+            # an answer past the cap is not an exit code of wtctl: `internal`
+            code = None if result.overflow else (0 if result.ok else (result.returncode or 1))
         except GatewayError:
             result, code = None, 1
         if code != 0 or result is None:
             self._warn("throwaway_failed")
             return self._finish(RunEnd("wtctl_create", exit=code))
-        record = _dict(_dict(result.json).get("record"))
+        doc = _dict(result.json)
+        record = _dict(doc.get("record"))
         tw_id, path = _text(record.get("id")), _text(record.get("path"))
         if record.get("object_type") != "throwaway" or tw_id is None or path is None:
             self._warn("throwaway_unreadable")
-            return self._failed("internal")
+            return self._failed_internal()
         try:
-            root = check_throwaway_root(path, config_dir=self.config_dir, state_dir=self.state_dir)
-            if len(root.encode()) > SELECTION_ROOT_BYTES:
-                raise CliError("config_invalid", "the throwaway path is too long")
+            # recorded before anything is judged: a refused throwaway is left for the cleanup (#26)
             self.rounds.record_throwaway(self.rid, tw_id)
-        except (CliError, ValueError) as error:
-            if isinstance(error, CliError) and error.code == "lease_lost":
-                raise
+        except ValueError:  # not a plain identifier: nothing to record
+            self._warn("throwaway_unreadable")
+            return self._failed_internal()
+        root = self._usable_root(row, doc, record, path)
+        if root is None:
             self._warn("throwaway_unusable")
-            return self._failed("internal")
+            return self._failed_internal()
         self.root = root
         return tw_id, root
+
+    def _usable_root(
+        self, row: RoundRow, doc: dict[str, Any], record: dict[str, Any], path: str
+    ) -> str | None:
+        """The throwaway's root when its wtctl record is this round's own and the root is usable,
+        else None. Fields the documented record shape leaves null (``ref``, ``base_dir``) are not
+        compared."""
+        want = labels.throwaway_labels(role="round", round_id=self.rid).labels
+        if doc.get("reused") is True or not all(
+            labels.has_label(record.get("labels"), k, v) for k, v in want
+        ):
+            return None
+        ref = record.get("ref")
+        if ref is not None and ref != row.head_sha:
+            return None
+        base = record.get("base_dir")
+        if isinstance(base, str) and not Path(os.path.realpath(path)).is_relative_to(
+            os.path.realpath(base)
+        ):
+            return None
+        try:
+            root = check_throwaway_root(path, config_dir=self.config_dir, state_dir=self.state_dir)
+        except CliError:
+            return None
+        if len(sanitize(root).encode()) > SELECTION_ROOT_BYTES:
+            return None  # the real prompt could outgrow the one the comments were selected with
+        return root
 
     def _prepare_session(self, row: RoundRow, root: str) -> tuple[Path, Path, str | None]:
         base = row.base_agent_id
@@ -657,6 +706,9 @@ class Job:
             or not labels.has_label(agent.get("labels"), "round", self.rid)
         ):
             self._warn("agent_unusable")
+            if lineage.is_agent_id(agent_id) and agent_id != base:
+                assert isinstance(agent_id, str)
+                self._stop(agent_id)  # a session was started: do not leave it running
             return None
         assert isinstance(agent_id, str)
         self.rounds.record_agent(self.rid, agent_id, throwaway_id=tw_id)
@@ -666,10 +718,8 @@ class Job:
     # -- wait ----------------------------------------------------------------------------------
 
     def _stop(self, agent_id: str) -> None:
-        """``agent-spawn stop`` of an agent this tool recorded (never a searched or forged id)."""
-        if not lineage.is_recorded(self.store.conn, agent_id):
-            self._warn("stop_unrecorded")
-            return
+        """``agent-spawn stop`` of an agent id the job's own ``resume``/``launch`` answered (never a
+        searched id)."""
         audit = self.ctx.audit
         assert audit is not None
         attempt = audit.attempted("stop", self.pr, inputs={"round": self.rid})
@@ -681,9 +731,11 @@ class Job:
             code, status = None, "failed"
         audit.outcome(attempt, "stop", self.pr, {"status": status, "exit_code": code})
 
-    def _wait(self, agent_id: str, *, stopped: bool = False) -> Result | None:
-        """``agent-spawn wait`` in a thread, so a SIGTERM (or the flag of ``stop``) is acted on
-        while it blocks. None: the wait did not return in the budget after a SIGTERM."""
+    def _wait(self, agent_id: str, deadline: float | None = None) -> Result | None:
+        """``agent-spawn wait`` in a thread, so a SIGTERM is acted on while it blocks. ``deadline``
+        (the spawn clock's monotonic time) is set when the agent was already stopped; a SIGTERM
+        during the wait stops the agent and sets it to the receipt time plus the wait budget. None:
+        the wait did not return by the deadline."""
         box: list[Result | BaseException] = []
 
         def target() -> None:
@@ -694,17 +746,14 @@ class Job:
 
         thread = threading.Thread(target=target, name="wait", daemon=True)
         thread.start()
-        deadline: float | None = None
-        if stopped:
-            deadline = self.spawn_gw.clock.monotonic() + self.wait_budget
         clock = self.spawn_gw.clock
         while thread.is_alive():
             thread.join(WAIT_TICK)
-            if self.terminated and not stopped:
-                stopped = True
-                deadline = clock.monotonic() + self.wait_budget
+            if self.terminated and deadline is None:
+                deadline = self.terminated_at + self.wait_budget
                 self._stop(agent_id)
-            if deadline is not None and clock.monotonic() > deadline:
+            # the stop takes time: the wait may have returned meanwhile
+            if deadline is not None and clock.monotonic() > deadline and thread.is_alive():
                 self._warn("wait_abandoned")
                 return None
         got = box[0]
@@ -714,16 +763,33 @@ class Job:
             raise got
         return got
 
+    @staticmethod
+    def _is_stop_end(end: RunEnd) -> bool:
+        """The wait ended because the agent was stopped (or was signaled), or has no usable
+        result: after a SIGTERM that is the job's own ``sigterm`` end."""
+        return (
+            end.exit is None
+            or end.exit in _SIGNAL_EXITS
+            or (end.exit == 15 and end.end_reason in STOP_REASONS)
+        )
+
     def _wait_and_finish(self, agent_id: str) -> int:
-        early = self.terminated or self._row().cancel_requested_at is not None
-        if early:
-            self._stop(agent_id)  # a `stop` or a SIGTERM before the agent was recorded
-        res = self._wait(agent_id, stopped=early)
+        deadline: float | None = None
         if self.terminated:
+            deadline = self.terminated_at + self.wait_budget
+        elif self._row().cancel_requested_at is not None:
+            deadline = self.spawn_gw.clock.monotonic() + self.wait_budget
+        if deadline is not None:
+            self._stop(agent_id)  # a `stop` or a SIGTERM before the agent was recorded
+        res = self._wait(agent_id, deadline)
+        end: RunEnd | None = None
+        esc: tuple[str | None, str | None] = (None, None)
+        if res is not None:
+            end, esc = run_end_of("wait", res, started=self.started)
+        if self.terminated and (end is None or self._is_stop_end(end)):
             return self._finish(RunEnd("sigterm", started=self.started))
-        if res is None:
+        if end is None:
             return self._finish(RunEnd("wait", None, started=self.started))
-        end, esc = run_end_of("wait", res, started=self.started)
         if end.exit in _SIGNAL_EXITS:
             shown = parse_show(self._show(agent_id), agent_id)
             if shown is None or shown.live or shown.last is None:
@@ -756,9 +822,15 @@ class Job:
         """``finish_round`` for a run that ended ``done`` (the finalizer's too): leave a live
         agent to the finalizer, validate the artifact; a failure ends the round, a valid artifact
         stops here (module docstring: TODO(#28), TODO(#29))."""
+        outcome = end.outcome
+        if outcome is None and shown is not None and shown.last is not None:
+            outcome = _text(shown.last.get("outcome"))
+        if outcome not in (None, "done"):
+            # exit 0 of wait is the outcome `done`: any other is `internal` (Run outcomes)
+            return self._finish(dataclasses.replace(end, outcome=outcome))
         if shown is None:
             self._warn("show_failed")
-            return self._failed("internal")
+            return self._failed_internal()
         if shown.live:
             self._warn("left_running")
             return 0

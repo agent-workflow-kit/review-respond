@@ -33,6 +33,7 @@ class Call:
     flags: dict[str, Any]
     positionals: dict[str, Any]
     tail: list[str]
+    pid: int = 0  # the fake process that answered (to reap it exactly)
 
     @property
     def tokens(self) -> list[str]:
@@ -175,6 +176,7 @@ class Fakes:
                 flags=parsed.get("flags", {}),
                 positionals=parsed.get("positionals", {}),
                 tail=parsed.get("tail", []),
+                pid=int(rec.get("pid", 0)),
             )
             if (tool is None or call.tool == tool) and (command is None or call.command == command):
                 out.append(call)
