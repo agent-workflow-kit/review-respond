@@ -852,7 +852,7 @@ None in 0.x. A `browse` command (`--focus`, `--result-file`) is a 1.x item and f
 ## Objects
 
 - **PR state** (`list`, `show`): `pr`, `repo`, `state`, `waiting_reason`, `block` (`reason`, `set_at`), `head_sha`, `head_ref`, `base_ref`, `is_fork`, `base_agent`, `rounds`, `unhandled`, `seen`, `ineligible`, `edited`, `pending_id`, `updated`.
-- **Round** (`respond`, `show`, `list --json`): `id`, `pr`, `number`, `state`, `head_sha`, `agent_id`, `base_agent_id`, `job_id`, `comment_ids`, `delivered` (comment ids), `counted`, `cancel_requested_at`, `cancel_reason` (`stopped`, `pr_closed`, `nothing_to_respond`, `read_failed`), `note_sha256`, `include_existing`, `escalation` (`{reason, summary}` or null, untrusted), `failure` (`reason`, `detail`), `started`, `ended`, `warnings`.
+- **Round** (`respond`, `show`, `list --json`): `id`, `pr`, `number`, `state`, `head_sha` (null until the job starts the round), `agent_id`, `base_agent_id`, `job_id`, `comment_ids`, `delivered` (comment ids), `counted`, `cancel_requested_at`, `cancel_reason` (`stopped`, `pr_closed`, `nothing_to_respond`, `read_failed`), `note_sha256`, `include_existing`, `escalation` (`{reason, summary}` or null, untrusted), `failure` (`reason`, `detail`), `started`, `ended`, `warnings`.
 - **Pending confirmation**: Pending confirmations, Record.
 - **Comment record** (`show --json`): `id`, `author_id` (null when the host gave none), `eligible`, `reason`, `state`, `delivered_sha256`, `delivered_from`, `handled_reason`, `first_seen_at`, `edited`, `thread_id`, `path`, `line`, `body` (untrusted, sanitized).
 
