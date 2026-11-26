@@ -111,7 +111,12 @@ def test_valid_unicode_bodies_paths_and_message() -> None:
 
 
 def test_validate_golden_json_text_with_unicode_escapes() -> None:
-    raw = b'{"skill_marker": "' + MARKER.encode() + b'", "replies": [{"comment_id": "gh:rc:AAA", "body": "\\u00e9\\n"}], "changed_files": [], "deleted_files": [], "commit_message": ""}'
+    raw = (
+        b'{"skill_marker": "'
+        + MARKER.encode()
+        + b'", "replies": [{"comment_id": "gh:rc:AAA", "body": "\\u00e9\\n"}], '
+        + b'"changed_files": [], "deleted_files": [], "commit_message": ""}'
+    )
     result = parse(raw)
     assert result.ok and result.artifact is not None
     assert result.artifact.replies[0].body == "é\n"
@@ -207,9 +212,13 @@ def test_frozen_file_huge_file_refused_before_reading(tmp_path: Path) -> None:
 
 def test_frozen_file_exactly_at_cap_is_read(tmp_path: Path) -> None:
     pad = "x" * (art.MAX_ARTIFACT_BYTES - len(dump(good() | {"commit_message": ""})) - 20)
-    raw = dump(good() | {"commit_message": "", "replies": [{"comment_id": "gh:rc:AAA", "body": "a"}]})
+    raw = dump(
+        good() | {"commit_message": "", "replies": [{"comment_id": "gh:rc:AAA", "body": "a"}]}
+    )
     assert len(raw) < art.MAX_ARTIFACT_BYTES
-    assert pad  # the cap itself is exercised by the huge-file test; this one proves a small file reads
+    assert (
+        pad
+    )  # the cap itself is exercised by the huge-file test; this one proves a small file reads
     assert run(freeze(tmp_path, raw)).ok
 
 
@@ -221,7 +230,7 @@ def test_frozen_file_negative_or_bad_ref_fields(tmp_path: Path) -> None:
 
 
 def test_frozen_file_grown_after_stat_is_not_read_past_size(tmp_path: Path) -> None:
-    """A file whose real length differs from the reported size is refused by the read, not trusted."""
+    """A file whose real length differs from the reported size is refused, not trusted."""
     raw = dump(good())
     path = tmp_path / "a.json"
     path.write_bytes(raw + b" " * 50)
@@ -282,7 +291,12 @@ def test_json_duplicate_keys_refused() -> None:
 
 
 def test_json_duplicate_key_in_nested_object() -> None:
-    raw = b'{"skill_marker": "' + MARKER.encode() + b'", "replies": [{"comment_id": "gh:rc:AAA", "body": "a", "body": "b"}], "changed_files": [], "deleted_files": [], "commit_message": ""}'
+    raw = (
+        b'{"skill_marker": "'
+        + MARKER.encode()
+        + b'", "replies": [{"comment_id": "gh:rc:AAA", "body": "a", "body": "b"}], '
+        + b'"changed_files": [], "deleted_files": [], "commit_message": ""}'
+    )
     invalid(parse(raw), "json")
 
 
@@ -334,7 +348,9 @@ def test_schema_top_level_not_an_object() -> None:
         invalid(parse(raw), "schema")
 
 
-@pytest.mark.parametrize("key", ["skill_marker", "replies", "changed_files", "deleted_files", "commit_message"])
+@pytest.mark.parametrize(
+    "key", ["skill_marker", "replies", "changed_files", "deleted_files", "commit_message"]
+)
 def test_schema_missing_required_key(key: str) -> None:
     doc = good()
     del doc[key]
@@ -384,7 +400,16 @@ def test_schema_type_and_shape_errors(key: str, value: object) -> None:
 
 @pytest.mark.parametrize(
     "comment_id",
-    ["-x", " gh:rc:AAA", "gh:rc:AAA ", "gh rc", "gh:rc:AAA\n", "x" * 257, "gа:rc:AAA", "gh:rc:A\x00"],
+    [
+        "-x",
+        " gh:rc:AAA",
+        "gh:rc:AAA ",
+        "gh rc",
+        "gh:rc:AAA\n",
+        "x" * 257,
+        "gа:rc:AAA",
+        "gh:rc:A\x00",
+    ],
 )
 def test_schema_comment_id_pattern(comment_id: str) -> None:
     doc = good()
@@ -457,7 +482,9 @@ def test_replies_body_at_the_byte_limit_is_valid() -> None:
 
 
 def test_replies_limit_counts_utf8_bytes_not_characters() -> None:
-    body = "é" * (REPLY_BYTES // 2 + 1)  # 2 bytes each: over the limit in bytes, under in characters
+    body = "é" * (
+        REPLY_BYTES // 2 + 1
+    )  # 2 bytes each: over the limit in bytes, under in characters
     doc = good() | {"replies": [{"comment_id": "gh:rc:AAA", "body": body}]}
     invalid(parse(dump(doc)), "replies")
 
@@ -465,9 +492,7 @@ def test_replies_limit_counts_utf8_bytes_not_characters() -> None:
 def test_replies_body_over_the_schema_character_cap_with_a_huge_limit() -> None:
     body = "a" * 65537
     doc = good() | {"replies": [{"comment_id": "gh:rc:AAA", "body": body}]}
-    result = parse_artifact_bytes(
-        dump(doc), delivered_ids=IDS, marker=MARKER, reply_bytes=1 << 20
-    )
+    result = parse_artifact_bytes(dump(doc), delivered_ids=IDS, marker=MARKER, reply_bytes=1 << 20)
     invalid(result, "replies")
 
 
@@ -592,7 +617,9 @@ def test_paths_exact_duplicate_refused() -> None:
 
 def test_paths_case_fold_duplicates_refused() -> None:
     invalid(parse(dump(good() | {"changed_files": ["Readme", "README"]})), "paths")
-    invalid(parse(dump(good() | {"changed_files": ["d/ß", "d/SS"]})), "paths")  # sharp s folds to ss
+    invalid(
+        parse(dump(good() | {"changed_files": ["d/ß", "d/SS"]})), "paths"
+    )  # sharp s folds to ss
 
 
 def test_paths_unicode_normalization_duplicates_refused() -> None:
@@ -609,7 +636,9 @@ def test_paths_prefix_directory_of_another_refused() -> None:
     invalid(parse(dump(good() | {"changed_files": ["a", "a/b"]})), "paths")
     invalid(parse(dump(good() | {"changed_files": ["a/b"], "deleted_files": ["A"]})), "paths")
     invalid(parse(dump(good() | {"changed_files": ["x/y/z", "x/Y"]})), "paths")
-    assert parse(dump(good() | {"changed_files": ["a", "ab", "a.b"]})).ok  # a string prefix is not a directory
+    assert parse(
+        dump(good() | {"changed_files": ["a", "ab", "a.b"]})
+    ).ok  # a string prefix is not a directory
 
 
 def test_paths_unicode_in_ids_does_not_pass_the_pattern() -> None:
@@ -659,9 +688,14 @@ def test_steps_run_in_the_interface_order() -> None:
 def test_every_detail_but_path_state_comes_out_of_validate(tmp_path: Path) -> None:
     seen: set[str] = set()
     seen.add(str(run(FrozenRef(str(tmp_path / "x"), 1, "0" * 64)).detail))
-    for raw in (b"{", dump(good() | {"extra": 1}), dump(good() | {"skill_marker": "z"}),
-                dump(good() | {"replies": [{"comment_id": "gh:rc:Q", "body": "x"}]}),
-                dump(good() | {"changed_files": ["/a"]}), dump(good() | {"commit_message": "a" * 9000})):
+    for raw in (
+        b"{",
+        dump(good() | {"extra": 1}),
+        dump(good() | {"skill_marker": "z"}),
+        dump(good() | {"replies": [{"comment_id": "gh:rc:Q", "body": "x"}]}),
+        dump(good() | {"changed_files": ["/a"]}),
+        dump(good() | {"commit_message": "a" * 9000}),
+    ):
         seen.add(str(parse(raw).detail))
     assert seen == set(FAILURE_DETAILS) - {"path_state"}
 
@@ -807,9 +841,19 @@ def test_path_state_rechecks_the_path_rules(tree: Path) -> None:
 def test_path_state_special_paths_fixture(tmp_path: Path) -> None:
     sp = adversarial.make_special_paths(tmp_path / "t", tmp_path / "o")
     assert ps(sp.tree, ["regular.txt"], []).ok
-    for name in ("link_outside", "link_dangling", "link_dotdot", "link_absolute_etc", "link_loop",
-                 "hardlink_outside", "hardlink_inside_a", "hardlink_inside_b", "fifo",
-                 "dir_symlink_outside", "socket"):
+    for name in (
+        "link_outside",
+        "link_dangling",
+        "link_dotdot",
+        "link_absolute_etc",
+        "link_loop",
+        "hardlink_outside",
+        "hardlink_inside_a",
+        "hardlink_inside_b",
+        "fifo",
+        "dir_symlink_outside",
+        "socket",
+    ):
         if name in sp.entries:
             invalid(ps(sp.tree, [name], []), "path_state")
 
@@ -838,7 +882,7 @@ def test_escalation_text_lone_surrogate() -> None:
 
 
 def test_read_uses_one_descriptor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The size check, the read and the hash all come from one open file: the path is opened once."""
+    """The size check, the read and the hash come from one open file."""
     ref = freeze(tmp_path, dump(good()))
     opened: list[str] = []
     real = os.open
@@ -877,14 +921,21 @@ def mutate(rng: random.Random, doc: dict[str, Any]) -> dict[str, Any]:
     doc = json.loads(json.dumps(doc))
     for _ in range(rng.randint(1, 3)):
         op = rng.choice(["drop", "replace", "add", "reply", "paths"])
-        key = rng.choice(["skill_marker", "replies", "changed_files", "deleted_files", "commit_message"])
+        key = rng.choice(
+            ["skill_marker", "replies", "changed_files", "deleted_files", "commit_message"]
+        )
         if op == "drop":
             doc.pop(key, None)
         elif op == "replace":
             doc[key] = rng.choice(HOSTILE_VALUES)
         elif op == "add":
             doc[rng.choice(["x", "Skill_marker", "comment_id", ""])] = rng.choice(HOSTILE_VALUES)
-        elif op == "reply" and isinstance(doc.get("replies"), list) and doc["replies"] and isinstance(doc["replies"][0], dict):
+        elif (
+            op == "reply"
+            and isinstance(doc.get("replies"), list)
+            and doc["replies"]
+            and isinstance(doc["replies"][0], dict)
+        ):
             doc["replies"][0][rng.choice(["comment_id", "body", "z"])] = rng.choice(HOSTILE_VALUES)
         elif op == "paths":
             doc[rng.choice(["changed_files", "deleted_files"])] = [

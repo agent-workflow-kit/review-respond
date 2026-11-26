@@ -410,7 +410,9 @@ def parse_artifact_bytes(
     for item in doc["replies"]:
         cid: str = item["comment_id"]
         if cid not in delivered_ids:
-            return _invalid("replies", f"a reply names a comment that was not delivered ({_q(cid)})")
+            return _invalid(
+                "replies", f"a reply names a comment that was not delivered ({_q(cid)})"
+            )
         if cid in seen:
             return _invalid("replies", f"a comment has two replies ({_q(cid)})")
         seen.add(cid)
@@ -456,7 +458,9 @@ def validate_artifact(
     raw, why = _read_frozen(artifact)
     if raw is None:
         return _invalid("frozen_file", why)
-    return parse_artifact_bytes(raw, delivered_ids=delivered_ids, marker=marker, reply_bytes=reply_bytes)
+    return parse_artifact_bytes(
+        raw, delivered_ids=delivered_ids, marker=marker, reply_bytes=reply_bytes
+    )
 
 
 # ---- path-state checks --------------------------------------------------------------------
@@ -493,7 +497,9 @@ def _probe(root_fd: int, path: str) -> str:
             os.close(fd)
 
 
-def check_path_state(root: Path, *, changed: Sequence[str], deleted: Sequence[str]) -> ArtifactResult:
+def check_path_state(
+    root: Path, *, changed: Sequence[str], deleted: Sequence[str]
+) -> ArtifactResult:
     """Path-state checks (``artifact_invalid`` detail ``path_state``): by a no-follow walk from
     ``root`` (the round throwaway; a symlink there is refused), each changed path is a regular file
     with one link and each deleted path is absent (ENOENT). The path rules run again first, so a
