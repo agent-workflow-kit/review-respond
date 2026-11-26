@@ -25,10 +25,6 @@ Seams owned by later issues (``RoundFacts`` carries them, all defaulting to "non
 - TODO(#29): ``record_open`` (a record pending, pushing or pushed) comes from the records table.
 - TODO(#19): ``agent_busy`` and the writer of ``prs.base_agent`` (``resolve_base``).
 - TODO(#37): ``post-attention`` ``round_limit`` fires once when ``apply`` reports ``new_block``.
-- TODO(#17): ``check`` calls ``load_inputs`` and ``apply`` per PR under the PR lease, and
-  ``list`` and ``show`` print ``derive_state``. ``Block.set_at`` is stored as epoch seconds while
-  schemas/defs.json types ``block.set_at`` as ``ts`` (RFC 3339): ``list`` and ``show`` must print
-  it through ``audit.format_ts``.
 - TODO(#25): ``respond`` calls ``clear_block`` with ``human_respond`` or ``human_force``.
 """
 

@@ -107,6 +107,7 @@ class _Pass:
         self.gateway = Gateway(child_env(dict(os.environ), tokens))
         self.on_event = ctx.log.lease_callback() if ctx.log is not None else None
         self.leases: dict[str, Lease] = {}  # the PR leases held right now
+        self.report = _Report()  # what the pass has found so far (printed if it stops at exit 12)
         self.before = self._states()
 
     def now(self) -> float:
@@ -124,9 +125,7 @@ class _Pass:
     @contextlib.contextmanager
     def scope(self, pr: str) -> Iterator[bool]:
         """The PR's lease, taken without waiting (False: another command holds it)."""
-        held = self.store.try_acquire(
-            pr_lease_key(pr_digest(pr)), heartbeat=None, on_event=self.on_event
-        )
+        held = self.store.try_acquire(pr_lease_key(pr_digest(pr)), on_event=self.on_event)
         if held is None:
             yield False
             return
@@ -157,6 +156,7 @@ class _Pass:
     def evaluate(self, pr: str, pr_lease: Lease | None, errors: list[str]) -> _PrResult:
         """The due rule for one PR under its lease (None: the lease is held elsewhere, the state
         is only derived and nothing is written), then the derived state."""
+        self.lease.renew()  # a lost pass lease is exit 1 lease_lost, never a quiet success
         result = _PrResult(pr, "idle", lease_held=pr_lease is None, errors=list(errors))
         conn = self.store.conn
         open_pr = get_pr(conn, pr)
@@ -189,7 +189,7 @@ class _Pass:
     # -- the pass -------------------------------------------------------------------------
 
     def run(self) -> _Report:
-        report = _Report()
+        report = self.report
         try:
             detected = self.detection().run()
         except CliError as error:
@@ -199,6 +199,7 @@ class _Pass:
             # own error is kept (`lower_error`) rather than folded into `all_hosts_failed`.
             report.error = error
             return report
+        self.lease.renew()
         for host in detected.hosts:
             report.hosts.append(_host_document(host))
             if not host.ok:
@@ -218,7 +219,7 @@ class _Pass:
 
     def run_one(self, pr: str) -> _Report:
         """`check --pr`: `forgectl show`, then the one comment read, then the due rule."""
-        report = _Report()
+        report = self.report
         host = host_of(pr)
         detection = self.detection()
         with self.scope(pr) as free:
@@ -236,9 +237,9 @@ class _Pass:
                     raise CliError("not_found", "the host does not know this PR") from None
                 return self._host_failed(report, host, str(code))
             if refreshed.stored is None and not refreshed.account_known:
-                return self._host_failed(report, host, "identity_unknown")
-            report.hosts.append({"host": host, "ok": True, "code": None, "warnings": []})
+                return self._host_failed(report, host, refreshed.account_code or "identity_unknown")
             if refreshed.stored is None:  # not yours: nothing is stored and no read is made
+                report.hosts.append({"host": host, "ok": True, "code": None, "warnings": []})
                 report.prs.append(_PrResult(pr, "idle", errors=["refused"]))
                 return report
             errors: list[str] = []
@@ -250,11 +251,14 @@ class _Pass:
                     if error.code != "lower_failed":
                         raise
                     errors.append("lower_failed")
+            warnings = ["read_failed"] if errors else []
+            report.hosts.append({"host": host, "ok": True, "code": None, "warnings": warnings})
             report.prs.append(self.evaluate(pr, self.leases[pr], errors))
         return report
 
-    @staticmethod
-    def _host_failed(report: _Report, host: str, code: str) -> _Report:
+    def _host_failed(self, report: _Report, host: str, code: str) -> _Report:
+        if self.ctx.log is not None:
+            self.ctx.log.emit("host_failed", {"host": host, "code": code}, level="warn")
         report.hosts.append({"host": host, "ok": False, "code": code, "warnings": []})
         report.error = CliError("all_hosts_failed", "no host could be read")
         return report
@@ -333,7 +337,15 @@ def handle(ctx: Context, args: argparse.Namespace) -> Outcome:
         return _finish(ctx, _Report(already_running=True), started)
     try:
         current = _Pass(ctx, settings, store, lease)
-        report = current.run() if pr is None else current.run_one(pr)
+        try:
+            report = current.run() if pr is None else current.run_one(pr)
+        except CliError as error:
+            if error.code != "state_unsafe":
+                raise
+            # found once the pass has started: the result so far, with the error (exit 12)
+            report = current.report
+            report.error = error
+        lease.renew()  # the result is only reported while the pass lease is still ours
     finally:
         lease.release()
     return _finish(ctx, report, started)

@@ -768,6 +768,8 @@ class Refreshed:
     # False: your account id is unknown, nothing was stored and ``not_yours`` means nothing; the
     # caller treats it as a failure (``identity_unknown``)
     account_known: bool = True
+    # the failure code of the account resolution when ``account_known`` is false
+    account_code: str | None = None
 
 
 OnRead = Callable[[StoredPr, CommentRead], None]
@@ -1063,10 +1065,14 @@ class Detection:
                 else {"code": outcome}
             )
             raise CliError("lower_failed", f"forgectl show failed ({code})", lower=lower)
-        account = self.account_id(facts.host)
+        account, account_code = self._resolve_account(facts.host)
         if account is None:
             return Refreshed(
-                stored=None, author_id=facts.author_id, not_yours=False, account_known=False
+                stored=None,
+                author_id=facts.author_id,
+                not_yours=False,
+                account_known=False,
+                account_code=account_code or "identity_unknown",
             )
         if facts.author_id != account:
             return Refreshed(stored=None, author_id=facts.author_id, not_yours=True)

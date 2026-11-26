@@ -25,13 +25,23 @@ MAX_BODY_CHARS: Final = 65536  # schemas/defs.json comment_record.body
 MAX_PATH_CHARS: Final = 4096
 
 
+def _tampered(what: str) -> CliError:
+    return CliError("state_unsafe", f"the state database holds {what} that is not valid")
+
+
 def ts(epoch: float) -> str:
-    return format_ts(datetime.fromtimestamp(epoch, UTC))
+    try:
+        return format_ts(datetime.fromtimestamp(epoch, UTC))
+    except (TypeError, ValueError, OverflowError, OSError):
+        raise _tampered("a time") from None
 
 
 def host_ts(text: str) -> str:
     """A host's RFC 3339 instant (any offset) as the UTC form the schemas use."""
-    return format_ts(parse_instant(text))
+    try:
+        return format_ts(parse_instant(text))
+    except (TypeError, ValueError, OverflowError, CliError):
+        raise _tampered("an instant") from None
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,8 @@ def pr_object(
 
 def comment_object(store: Store, record: CommentRecord) -> dict[str, Any]:
     """One comment record (schemas/defs.json comment_record); the text is sanitized and cut."""
+    if record.body_file is None:
+        raise _tampered("a comment without its stored text")
     body = stored_body(store, record.pr, record.id)
     path = None if record.path is None else sanitize_line(record.path)[:MAX_PATH_CHARS]
     return {

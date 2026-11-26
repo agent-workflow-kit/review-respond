@@ -7,14 +7,16 @@ import json
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from review_respond import check as check_module
 from review_respond.cli import main
-from review_respond.store import Store, open_state_dir, pr_digest, pr_lease_key
+from review_respond.store import Store, open_state_dir, pass_lease_key, pr_digest, pr_lease_key
 from tests.harness import builders, schemas
 from tests.harness.builders import HOST, HOST_B, REVIEWER, pr_item, pr_ref
 from tests.harness.fakes import Fakes
@@ -602,6 +604,36 @@ def test_check_pr_when_the_host_fails_is_exit_12_with_the_result_object(
     valid("check", doc)
 
 
+def test_check_pr_when_the_host_fails_logs_host_failed(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    world.fakes.script(
+        "forgectl", "show", json=builders.error_envelope("network_error", "down"), exit=1
+    )
+    run(capsys, "check", "--pr", PR7, config=config)
+    assert [(e["host"], e["code"]) for e in log_events(world) if e["event"] == "host_failed"] == [
+        (HOST, "network_error")
+    ]
+
+
+def test_check_pr_reports_the_whoami_failure_code_of_an_unknown_account(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_config(world, me={"accounts": {}})
+    script_show(world.fakes)
+    world.fakes.script(
+        "forgectl", "whoami",
+        json=builders.forgectl_whoami_hosts(
+            HOST_B, errors=[builders.host_error(HOST, "auth_required")]
+        ),
+        exit=12, schema=False,
+    )  # fmt: skip
+    code, doc, _ = run(capsys, "check", "--pr", PR7, config=config)
+    assert code == 12 and doc["error"]["code"] == "all_hosts_failed"
+    assert doc["hosts"][0]["code"] == "auth_required"
+    assert sql(world, "SELECT count(*) FROM prs") == [(0,)]
+
+
 def test_check_pr_of_a_pr_the_host_does_not_know_is_exit_10_not_found(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
@@ -630,6 +662,7 @@ def test_check_pr_with_a_failing_read_reports_lower_failed(
     )
     code, doc, _ = run(capsys, "check", "--pr", PR7, config=config)
     assert code == 0 and doc["prs"][0]["errors"] == ["lower_failed"]
+    assert doc["hosts"] == [{"host": HOST, "ok": True, "code": None, "warnings": ["read_failed"]}]
 
 
 def test_check_pr_with_a_held_pr_lease_is_lease_held(
@@ -699,6 +732,104 @@ def test_a_failed_host_is_logged(
     assert [e["code"] for e in log_events(world) if e["event"] == "host_failed"] == [
         "auth_required"
     ]
+
+
+# ---- a lost pass lease, PR lease heartbeat, tampered state ------------------------------------
+
+
+def lose_the_pass_lease_inside_evaluate(world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    original = check_module._Pass.evaluate  # pyright: ignore[reportPrivateUsage]
+
+    def evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sql(world, "DELETE FROM leases WHERE key = ?", pass_lease_key())
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(check_module._Pass, "evaluate", evaluate)  # pyright: ignore
+
+
+def test_a_pass_that_lost_its_lease_exits_1_lease_lost(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_prs(world.fakes, [pr_item(7), pr_item(8)])
+    script_comments(world.fakes, PR7, [])
+    script_comments(world.fakes, PR8, [])
+    lose_the_pass_lease_inside_evaluate(world, monkeypatch)
+    code, doc, _ = run(capsys, "check", config=config)
+    assert code == 1 and doc["error"]["code"] == "lease_lost"
+
+
+def test_check_pr_that_lost_its_lease_exits_1_lease_lost(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_show(world.fakes)
+    script_comments(world.fakes, PR7, [])
+    lose_the_pass_lease_inside_evaluate(world, monkeypatch)
+    code, doc, _ = run(capsys, "check", "--pr", PR7, config=config)
+    assert code == 1 and doc["error"]["code"] == "lease_lost"
+
+
+def test_a_pr_lease_has_a_heartbeat_that_stops_on_release(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+    original = check_module._Pass.evaluate  # pyright: ignore[reportPrivateUsage]
+
+    def evaluate(self: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.append([t.name for t in threading.enumerate() if t.name.startswith("lease-pr:")])
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(check_module._Pass, "evaluate", evaluate)  # pyright: ignore
+    one_pr_pass(world, capsys, config)
+    assert len(seen) == 1 and len(seen[0]) == 1
+    assert [t for t in threading.enumerate() if t.name.startswith("lease-")] == []
+
+
+def test_a_tampered_body_file_met_during_a_pass_is_exit_12_state_unsafe_with_the_result(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    one_pr_pass(world, capsys, config)
+    root = Path(world.env["XDG_STATE_HOME"]) / "review-respond"
+    for path in [p for p in root.rglob("*") if p.is_file() and len(p.name) == 64]:
+        path.write_text("tampered")
+    script_prs(world.fakes, [pr_item(7)])
+    # a new comment with the text of a stored one meets the tampered file
+    script_comments(world.fakes, PR7, one_comment() + one_comment("gh:rc:c2"))
+    code, doc, _ = run(capsys, "check", config=config)
+    assert code == 12 and doc["error"]["code"] == "state_unsafe"
+    assert doc["hosts"] == [] and doc["prs"] == []
+    valid("check", doc)
+
+
+@pytest.mark.parametrize(
+    ("statement", "command"),
+    [
+        ("UPDATE prs SET updated_at = 'garbage'", "list"),
+        ("UPDATE comments SET first_seen_at = 'x'", "show"),
+        ("UPDATE comments SET first_seen_at = 1e300", "show"),
+        ("UPDATE comments SET body_file = NULL", "show"),
+    ],
+)
+def test_tampered_state_values_are_exit_12_state_unsafe(
+    statement: str,
+    command: str,
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    config: Path,
+) -> None:
+    one_pr_pass(world, capsys, config)
+    sql(world, statement)
+    argv = ["list"] if command == "list" else ["show", PR7]
+    code, doc, _ = run(capsys, *argv, config=config)
+    assert code == 12 and doc["error"]["code"] == "state_unsafe"
 
 
 # ---- list --------------------------------------------------------------------------------------
@@ -815,28 +946,33 @@ def test_show_pr_lists_comments_including_the_ineligible_ones(
     gold(golden, "show-pr", doc)
 
 
-def test_show_accepts_a_url_and_a_reference_without_the_host(
+def test_show_accepts_a_url(world: World, capsys: pytest.CaptureFixture[str], config: Path) -> None:
+    two_prs(world, capsys, config)
+    code, doc, _ = run(capsys, "show", f"https://{HOST}/org/repo/pull/7", config=config)
+    assert code == 0 and doc["pr"]["pr"] == PR7
+
+
+def test_show_of_a_reference_without_the_host_is_not_found(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
     two_prs(world, capsys, config)
-    for name in (f"https://{HOST}/org/repo/pull/7", "org/repo#7"):
-        code, doc, _ = run(capsys, "show", name, config=config)
-        assert code == 0 and doc["pr"]["pr"] == PR7
+    code, doc, _ = run(capsys, "show", "org/repo#7", config=config)
+    assert code == 10 and doc["error"]["code"] == "not_found"
 
 
-def test_show_of_a_host_less_reference_matching_several_prs_is_exit_21_ambiguous(
+def test_show_of_a_pr_on_a_host_named_like_an_id_prefix_is_a_pr(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    config = write_config(world, hosts_to_check=[HOST, HOST_B])
-    script_prs(world.fakes, [pr_item(7)], host=HOST)
-    script_prs(world.fakes, [pr_item(7, host=HOST_B)], host=HOST_B)
-    script_comments(world.fakes, PR7, [])
-    script_comments(world.fakes, pr_ref(7, host=HOST_B), [])
-    run(capsys, "check", config=config)
-    code, doc, _ = run(capsys, "show", "org/repo#7", config=config)
-    assert code == 21 and doc["error"]["code"] == "ambiguous"
-    code, doc, _ = run(capsys, "show", PR7, config=config)  # the full reference is exact
-    assert code == 0
+    host = "rd-git.example.test"
+    config = write_config(world, hosts_to_check=[host], me={"accounts": {host: "acct-me"}})
+    ref = pr_ref(1, host=host)
+    script_prs(world.fakes, [pr_item(1, host=host)], host=host)
+    script_comments(world.fakes, ref, [])
+    assert run(capsys, "check", config=config)[0] == 0
+    code, doc, _ = run(capsys, "show", ref, config=config)
+    assert code == 0 and doc["pr"]["pr"] == ref
+    code, doc, _ = run(capsys, "show", pr_ref(2, host=host), config=config)
+    assert code == 10 and doc["error"]["code"] == "not_found"
 
 
 @pytest.mark.parametrize("ref", [pr_ref(99), "org/none#1", "rd-aaaaaaaa", "rp-bbbbbbbb"])

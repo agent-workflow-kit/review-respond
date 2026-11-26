@@ -16,7 +16,7 @@ from typing import Any, Final
 from . import prstate
 from .errors import CliError
 from .output import Context, Outcome, sanitize_line
-from .prref import PR_REF_RE, REPO_ID_RE, parse_pr
+from .prref import REPO_ID_RE, parse_pr
 from .store import Store
 
 _OBJECT_ID_RE: Final = re.compile(r"r[dp]-[a-z2-7]{4,8}")
@@ -62,22 +62,9 @@ def handle_list(ctx: Context, args: argparse.Namespace) -> Outcome:
 
 
 def _resolve_pr(store: Store, text: str) -> str:
-    """The stored PR a `show` argument names: the reference or URL, or (when no stored PR has
-    exactly that reference) a reference without its host, which must match one stored PR."""
-    stored = [p.pr for p in prstate.stored_prs(store.conn)]
-    if PR_REF_RE.fullmatch(text) and text in stored:
-        return text
-    if PR_REF_RE.fullmatch(text):
-        found = [p for p in stored if p.endswith("/" + text)]
-        if len(found) > 1:
-            raise CliError(
-                "ambiguous", f"{text} matches {len(found)} stored PRs; give the host too"
-            )
-        if found:
-            return found[0]
-        raise CliError("not_found", "no stored PR matches")
+    """The stored PR a `show` argument names: a reference or an https URL."""
     reference = parse_pr(text)
-    if reference not in stored:
+    if reference not in [p.pr for p in prstate.stored_prs(store.conn)]:
         raise CliError("not_found", "no stored PR matches")
     return reference
 
@@ -93,10 +80,10 @@ def handle_show(ctx: Context, args: argparse.Namespace) -> Outcome:
     store = _store(ctx)
     assert ctx.settings is not None
     text: str = args.ref
-    if text.startswith(("rd-", "rp-")):
-        if not _OBJECT_ID_RE.fullmatch(text):
-            raise CliError("usage", "a round or pending id is rd-/rp- plus 4 to 8 characters")
+    if _OBJECT_ID_RE.fullmatch(text):
         raise CliError("not_found", "no round or pending record matches")  # TODO(#18, #29)
+    if text.startswith(("rd-", "rp-")) and "/" not in text and "#" not in text:
+        raise CliError("usage", "a round or pending id is rd-/rp- plus 4 to 8 characters")
     pr = _resolve_pr(store, text)
     stored = prstate.stored_prs_by_ref(store.conn, pr)
     now = store.clock.now().timestamp()
