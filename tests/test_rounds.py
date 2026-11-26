@@ -1182,7 +1182,7 @@ def test_the_database_refuses_to_lower_counted(env: Env) -> None:
     assert env.row(rid).counted is True
 
 
-@pytest.mark.parametrize("to", ["queued", "running", "pending", "failed", "escalated", "canceled"])
+@pytest.mark.parametrize("to", ["queued", "running", "failed", "escalated", "canceled"])
 def test_the_database_lets_a_pending_round_only_follow_its_record(env: Env, to: str) -> None:
     rid = env.reach("pending")
     with env.store.transaction() as conn, pytest.raises(sqlite3.IntegrityError):
@@ -1191,6 +1191,13 @@ def test_the_database_lets_a_pending_round_only_follow_its_record(env: Env, to: 
             " cancel_reason = 'stopped' WHERE id = ?",
             (to, rid),
         )
+    assert env.row(rid).state == "pending"
+
+
+def test_the_database_lets_a_pending_round_take_a_same_state_update(env: Env) -> None:
+    rid = env.reach("pending")
+    with env.store.transaction() as conn:
+        conn.execute("UPDATE rounds SET rev = rev + 1, warnings = ? WHERE id = ?", ('["w"]', rid))
     assert env.row(rid).state == "pending"
 
 

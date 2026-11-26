@@ -237,7 +237,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         WHEN NEW.counted < OLD.counted
         BEGIN SELECT RAISE(ABORT, 'a counted round stays counted'); END""",
         """CREATE TRIGGER rounds_pending_follows_its_record BEFORE UPDATE ON rounds
-        WHEN OLD.state = 'pending'
+        WHEN OLD.state = 'pending' AND NEW.state != OLD.state
             AND NEW.state NOT IN ('confirmed', 'rejected', 'expired', 'closed')
         BEGIN SELECT RAISE(ABORT, 'a pending round is settled by its record'); END""",
     ),
