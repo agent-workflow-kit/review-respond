@@ -535,7 +535,8 @@ def test_token_env_unset_or_empty_fails(
         golden.check("cli/validate-credentials-failed", doc, "review-respond/cli/validate.json")
     assert main(["validate", "--config", str(path)]) == 12
     text = capsys.readouterr().out
-    assert "github.com" in text and "RR_TEST_TOKEN" in text
+    words = text.split()
+    assert "github.com:" in words and "RR_TEST_TOKEN" in words
 
 
 def test_token_command_resolving_is_ok_and_is_not_run(
