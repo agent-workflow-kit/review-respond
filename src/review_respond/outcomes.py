@@ -41,6 +41,16 @@ ARTIFACT_FAILURES: Final = (
     "empty_result",
     "diff_failed",
 )
+FAILURE_DETAILS: Final = (
+    "frozen_file",
+    "json",
+    "schema",
+    "skill_marker",
+    "replies",
+    "paths",
+    "commit_message",
+    "path_state",
+)
 COMMANDS: Final = ("resume", "launch", "wait", "wtctl_create", "sigterm", "job_gone")
 _AGENT_SPAWN: Final = ("resume", "launch", "wait")
 _STOP_REASONS: Final = ("stopped", "forwarded_term", "forwarded_hup", "forwarded_int")
@@ -49,7 +59,8 @@ _STOP_REASONS: Final = ("stopped", "forwarded_term", "forwarded_hup", "forwarded
 @dataclass(frozen=True)
 class RunEnd:
     """What happened. ``started`` is Counting's second signal (``first_working_at`` is set);
-    ``artifact_failure`` is the validation or diff failure of a ``done`` run, if there was one."""
+    ``artifact_failure`` is the validation or diff failure of a ``done`` run, if there was one;
+    ``detail`` is the closed ``failure.detail`` of ``artifact_invalid`` (and of nothing else)."""
 
     command: str
     exit: int | None = None
@@ -59,12 +70,17 @@ class RunEnd:
     cancel_requested: bool = False
     started: bool = False
     artifact_failure: str | None = None
+    detail: str | None = None
 
     def __post_init__(self) -> None:
         if self.command not in COMMANDS:
             raise ValueError(f"unknown command {self.command!r}")
         if self.artifact_failure is not None and self.artifact_failure not in ARTIFACT_FAILURES:
             raise ValueError("artifact_failure is not an artifact failure reason")
+        if (self.artifact_failure == "artifact_invalid") != (self.detail is not None):
+            raise ValueError("a detail belongs to artifact_invalid, and artifact_invalid has one")
+        if self.detail is not None and self.detail not in FAILURE_DETAILS:
+            raise ValueError("detail is not a closed failure detail")
 
 
 @dataclass(frozen=True)

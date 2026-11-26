@@ -23,6 +23,7 @@ from .store import Store
 
 MAX_BODY_CHARS: Final = 65536  # schemas/defs.json comment_record.body
 MAX_PATH_CHARS: Final = 4096
+MAX_UNTRUSTED_CHARS: Final = 4096  # schemas/defs.json round.escalation reason and summary
 
 
 def _tampered(what: str) -> CliError:
@@ -101,10 +102,19 @@ def pr_object(
 
 
 def _untrusted(text: str | None) -> str | None:
-    """Agent-written text, cut and sanitized line by line (a newline stays a newline)."""
+    """Agent-written text, sanitized (a newline stays a newline) and then cut to at most 4096
+    characters, never inside a ``<U+XXXX>`` marker."""
     if text is None:
         return None
-    return "\n".join(sanitize_line(line) for line in text[:4096].split("\n"))
+    out: list[str] = []
+    size = 0
+    for ch in text:
+        piece = ch if ch == "\n" else sanitize_line(ch)
+        if size + len(piece) > MAX_UNTRUSTED_CHARS:
+            break
+        out.append(piece)
+        size += len(piece)
+    return "".join(out)
 
 
 def round_object(conn: sqlite3.Connection, row: rounds.RoundRow) -> dict[str, Any]:

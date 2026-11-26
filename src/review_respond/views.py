@@ -89,7 +89,7 @@ def _show_round(ctx: Context, store: Store, round_id: str) -> Outcome:
     comments = [
         prstate.comment_object(store, r)
         for r in prstate.comment_records(store, row.pr)
-        if r.id in row.comment_ids and r.body_file is not None
+        if r.id in row.comment_ids
     ]
     # TODO(#24): the finalizer runs here for a running round whose holder is gone; null until then
     payload: dict[str, Any] = {

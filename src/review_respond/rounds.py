@@ -16,8 +16,9 @@ through ``Store.try_acquire``, never by writing the row). Nothing here takes a l
 Seams owned by later issues:
 
 - TODO(#23): the job calls ``start``, ``record_job``, ``record_agent``, ``note_started`` and
-  ``finish_run``; its failed PR or comment reads must be recorded in ``prs.read_failures``
-  (``detect`` does) before ``cancel_read_failed``, which reads that count and never writes it.
+  ``finish_run``; its failed PR read (not only its comment read) must increment
+  ``prs.read_failures`` (``detect`` does for comment reads) before ``cancel_read_failed``, which
+  reads that count and never writes it.
 - TODO(#24): job placement, the queued reconcile (``reconcile_lost`` is its write) and the
   finalizer (``finish_run`` is its write); ``show``'s ``finalize`` member stays null until then.
 - TODO(#29): ``to_pending(extra=...)`` runs the pending record's insert in the transaction;
@@ -25,7 +26,11 @@ Seams owned by later issues:
   derived from the round state ``pending`` (a round stays pending while its record is pending,
   pushing or pushed) until the records table exists.
 - TODO(#37): ``post-pending`` and ``post-attention`` (``escalated``, ``failed``, ``job_lost``,
-  the third ``read_failed``) are queued by the callers of the transitions that set the blocks.
+  the third ``read_failed``) are queued by the ``extra`` step of the ending transition
+  (``to_escalated``, ``to_failed``, ``to_canceled``, ``finish_run``, ``reconcile_lost``,
+  ``cancel_read_failed``, ``cancel_flagged``, ``start``'s ``nothing_to_respond``): it runs in the
+  same transaction after the block is set and is told whether this call set it (``new_block``,
+  also on ``Transition``); the post is queued only for a new block.
 - TODO(#19): ``agent_busy`` and the forks rows; TODO(#25): ``respond`` clears blocks.
 """
 
@@ -43,27 +48,23 @@ from typing import Any, Final, Protocol
 from . import due
 from .audit import ROUND_STATES
 from .errors import CliError
-from .gateway import SystemClock
 from .handled import HandledSet
-from .outcomes import ARTIFACT_FAILURES, FAILURE_REASONS, Mapped, RunEnd, map_run_end
+from .outcomes import (
+    ARTIFACT_FAILURES,
+    FAILURE_DETAILS,
+    FAILURE_REASONS,
+    Mapped,
+    RunEnd,
+    map_run_end,
+)
 from .store import Lease, cas_update, pr_digest, pr_lease_key, round_lease_key
 
 TERMINAL_STATES: Final = frozenset(
     {"confirmed", "rejected", "expired", "closed", "escalated", "failed", "canceled"}
 )
 SETTLED_BY_RECORD: Final = ("confirmed", "rejected", "expired", "closed")
-FAILURE_DETAILS: Final = (
-    "frozen_file",
-    "json",
-    "schema",
-    "skill_marker",
-    "replies",
-    "paths",
-    "commit_message",
-    "path_state",
-)
 CANCEL_REQUESTS: Final = ("stopped", "pr_closed")
-MAX_ESCALATION_CHARS: Final = 4096
+MAX_ESCALATION_BYTES: Final = 4096
 MAX_ACTIVE_ATTEMPTS: Final = 8
 READ_FAILURE_LIMIT: Final = 3  # the third consecutive read_failed sets block failed
 
@@ -222,25 +223,43 @@ def count_rounds(conn: sqlite3.Connection, pr: str) -> int:
 @dataclass(frozen=True)
 class Transition:
     """``changed`` is False when the round was not in a state the move starts from (or lost the
-    race); ``row`` is the stored row after the call."""
+    race); ``row`` is the stored row after the call. ``new_block`` is True when the call set the
+    PR's block (False when none was set or one already existed): the caller queues
+    ``post-attention`` only for a new block."""
 
     changed: bool
     row: RoundRow
+    new_block: bool = False
+
+
+@dataclass(frozen=True)
+class _Plan:
+    """What a transition writes: the row's columns, the reason logged, whether it ended the round
+    (``extra`` runs for an end) and whether it set the PR's block."""
+
+    changes: dict[str, object]
+    why: str
+    ends: bool = False
+    new_block: bool = False
 
 
 class _Log(Protocol):
     def emit(self, event: str, fields: Mapping[str, object], *, level: str = ...) -> bool: ...
 
 
-Body = Callable[[sqlite3.Connection, RoundRow], tuple[dict[str, object], str] | None]
+Body = Callable[[sqlite3.Connection, RoundRow], _Plan | None]
 RecordStep = Callable[[sqlite3.Connection, RoundRow], None]
+# Runs inside the transaction of a transition that ends the round, after the block is set, with
+# the stored row and whether this call set the PR's block (post-attention is queued only then).
+EndStep = Callable[[sqlite3.Connection, RoundRow, bool], None]
 
 
 def _scrub(text: str | None) -> str | None:
+    """Unpaired surrogates become escapes; the text is cut to 4096 UTF-8 bytes at a character."""
     if text is None:
         return None
-    clean = text.encode("utf-8", "backslashreplace").decode("utf-8")
-    return clean[:MAX_ESCALATION_CHARS]
+    clean = text.encode("utf-8", "backslashreplace")[:MAX_ESCALATION_BYTES]
+    return clean.decode("utf-8", "ignore")
 
 
 class Rounds:
@@ -266,7 +285,13 @@ class Rounds:
             self.log.emit("round_state", {"round": row.id, "from": frm, "to": to, "reason": why})
 
     def _run(
-        self, round_id: str, frm: frozenset[str], body: Body, *, rev: int | None = None
+        self,
+        round_id: str,
+        frm: frozenset[str],
+        body: Body,
+        *,
+        rev: int | None = None,
+        extra: EndStep | None = None,
     ) -> Transition:
         with self.lease.transaction() as conn:
             row = get_round(conn, round_id)
@@ -278,28 +303,42 @@ class Rounds:
             planned = body(conn, row)
             if planned is None:
                 return Transition(False, row)
-            changes, why = planned
             if not cas_update(
-                conn, "rounds", "id", row.id, row.rev, changes, where={"state": row.state}
+                conn, "rounds", "id", row.id, row.rev, planned.changes, where={"state": row.state}
             ):
                 # cannot happen: the row was read under the write lock of this transaction
                 raise CliError("internal", f"round {row.id} changed under the write lock")
             after = get_round(conn, row.id)
             assert after is not None
+            if planned.ends and extra is not None:
+                extra(conn, after, planned.new_block)
         if after.state != row.state:
-            self._emit(after, row.state, after.state, why)
-        return Transition(True, after)
+            self._emit(after, row.state, after.state, planned.why)
+        return Transition(True, after, planned.new_block)
 
-    def _block(self, conn: sqlite3.Connection, row: RoundRow, reason: str) -> None:
-        due.set_block_in(conn, row.pr, reason, due.eligible_ids(conn, row.pr), now=self._now())
+    def _block(self, conn: sqlite3.Connection, row: RoundRow, reason: str) -> bool:
+        """Set the PR's block; True when this call set it (an existing block stays)."""
+        return due.set_block_in(
+            conn, row.pr, reason, due.eligible_ids(conn, row.pr), now=self._now()
+        )
 
-    def _end(self, row: RoundRow, to: str, counted: bool, **more: object) -> dict[str, object]:
-        return {
+    def _end(
+        self,
+        row: RoundRow,
+        to: str,
+        counted: bool,
+        why: str,
+        *,
+        new_block: bool = False,
+        **more: object,
+    ) -> _Plan:
+        changes: dict[str, object] = {
             "state": to,
             "ended_at": self._now(),
             "counted": int(row.counted or counted),
             **more,
         }
+        return _Plan(changes, why, ends=True, new_block=new_block)
 
     # -- (none) -> queued ---------------------------------------------------------------------
 
@@ -371,32 +410,35 @@ class Rounds:
         changes: dict[str, object] = (
             {"job_id": job_id} if job_id is not None else {"detached_started_at": detached_at}
         )
-        return self._run(round_id, frozenset({"queued"}), lambda c, r: (changes, "job"))
+        return self._run(round_id, frozenset({"queued"}), lambda c, r: _Plan(changes, "job"))
 
     def record_agent(
         self, round_id: str, agent_id: str, *, throwaway_id: str | None = None
     ) -> Transition:
-        """Store the agent (and throwaway) of a running round; an agent id is never replaced."""
+        """Store the agent (and throwaway) of a running round. The same agent id again changes
+        nothing; a different one is ``internal`` (an agent id is never replaced)."""
         if not _AGENT_RE.fullmatch(agent_id):
             raise ValueError("agent_id is an agent id")
         if throwaway_id is not None and not _THROWAWAY_RE.fullmatch(throwaway_id):
             raise ValueError("throwaway_id is not a plain identifier")
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             if row.agent_id is not None:
+                if row.agent_id != agent_id:
+                    raise CliError("internal", f"round {row.id} already has another agent")
                 return None
             changes: dict[str, object] = {"agent_id": agent_id}
             if throwaway_id is not None:
                 changes["throwaway_id"] = throwaway_id
-            return changes, "agent"
+            return _Plan(changes, "agent")
 
         return self._run(round_id, frozenset({"running"}), body)
 
     def note_started(self, round_id: str) -> Transition:
         """Counting: the run reached ``working``; the round counts toward ``max_rounds``."""
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
-            return None if row.counted else ({"counted": 1}, "run_started")
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
+            return None if row.counted else _Plan({"counted": 1}, "run_started")
 
         return self._run(round_id, frozenset({"running"}), body)
 
@@ -405,10 +447,12 @@ class Rounds:
         if reason not in CANCEL_REQUESTS:
             raise ValueError("a cancel request is stopped or pr_closed")
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             if row.cancel_requested_at is not None:
                 return None
-            return {"cancel_requested_at": self._now(), "cancel_reason": reason}, "cancel_requested"
+            return _Plan(
+                {"cancel_requested_at": self._now(), "cancel_reason": reason}, "cancel_requested"
+            )
 
         return self._run(round_id, frozenset({"queued", "running"}), body)
 
@@ -416,56 +460,64 @@ class Rounds:
 
     def _canceled(
         self, conn: sqlite3.Connection, row: RoundRow, reason: str, counted: bool = False
-    ) -> tuple[dict[str, object], str]:
+    ) -> _Plan:
         """End as canceled; a stored cancel reason (a flag set before) wins over ``reason``."""
         final = row.cancel_reason or reason
         if row.state == "running":
             self._handled.release(row.pr, row.id, conn=conn)
+        new_block = False
         if final == "stopped":
-            self._block(conn, row, "stopped")
+            new_block = self._block(conn, row, "stopped")
         elif final == "read_failed":
             failures = conn.execute(
                 "SELECT read_failures FROM prs WHERE pr = ?", (row.pr,)
             ).fetchone()[0]
             if failures >= READ_FAILURE_LIMIT:
-                self._block(conn, row, "failed")
-        return self._end(row, "canceled", counted, cancel_reason=final), final
+                new_block = self._block(conn, row, "failed")
+        return self._end(row, "canceled", counted, final, new_block=new_block, cancel_reason=final)
 
-    def cancel_flagged(self, round_id: str) -> Transition:
+    def cancel_flagged(self, round_id: str, *, extra: EndStep | None = None) -> Transition:
         """``_job`` finds the cancel flag, or ``stop`` / the closed-PR sweep ends a queued round
         whose job is canceled or never submitted: canceled with the stored reason."""
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             if row.cancel_requested_at is None or row.cancel_reason is None:
                 raise ValueError("the round has no cancel flag")
             return self._canceled(conn, row, row.cancel_reason)
 
-        return self._run(round_id, frozenset({"queued"}), body)
+        return self._run(round_id, frozenset({"queued"}), body, extra=extra)
 
-    def _cancel_with(self, round_id: str, reason: str) -> Transition:
-        return self._run(round_id, frozenset({"queued"}), lambda c, r: self._canceled(c, r, reason))
+    def _cancel_with(self, round_id: str, reason: str, extra: EndStep | None) -> Transition:
+        return self._run(
+            round_id,
+            frozenset({"queued"}),
+            lambda c, r: self._canceled(c, r, reason),
+            extra=extra,
+        )
 
-    def cancel_pr_closed(self, round_id: str) -> Transition:
-        return self._cancel_with(round_id, "pr_closed")
+    def cancel_pr_closed(self, round_id: str, *, extra: EndStep | None = None) -> Transition:
+        return self._cancel_with(round_id, "pr_closed", extra)
 
-    def cancel_nothing(self, round_id: str) -> Transition:
-        return self._cancel_with(round_id, "nothing_to_respond")
+    def cancel_nothing(self, round_id: str, *, extra: EndStep | None = None) -> Transition:
+        return self._cancel_with(round_id, "nothing_to_respond", extra)
 
-    def cancel_read_failed(self, round_id: str) -> Transition:
+    def cancel_read_failed(self, round_id: str, *, extra: EndStep | None = None) -> Transition:
         """The job's PR or comment read failed. No block until the third consecutive failure of
         the PR (``prs.read_failures``, written by the failed reads, not here)."""
-        return self._cancel_with(round_id, "read_failed")
+        return self._cancel_with(round_id, "read_failed", extra)
 
-    def reconcile_lost(self, round_id: str) -> Transition:
+    def reconcile_lost(self, round_id: str, *, extra: EndStep | None = None) -> Transition:
         """The queued reconcile: the job is terminal or gone and the round is still queued."""
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             if row.cancel_requested_at is not None and row.cancel_reason is not None:
                 return self._canceled(conn, row, row.cancel_reason)
-            self._block(conn, row, "failed")
-            return self._end(row, "failed", False, failure_reason="job_lost"), "job_lost"
+            new_block = self._block(conn, row, "failed")
+            return self._end(
+                row, "failed", False, "job_lost", new_block=new_block, failure_reason="job_lost"
+            )
 
-        return self._run(round_id, frozenset({"queued"}), body)
+        return self._run(round_id, frozenset({"queued"}), body, extra=extra)
 
     # -- queued -> running ----------------------------------------------------------------------
 
@@ -477,19 +529,20 @@ class Rounds:
         head_sha: str,
         expected: Mapping[str, str] | None = None,
         rev: int | None = None,
+        extra: EndStep | None = None,
     ) -> Transition:
         """``_job`` re-read the PR and the comments and selected ``comment_ids``: deliver them
         (``expected`` maps ids to the body hash shown; an edited one is skipped) and go
         ``running``. When nothing could be delivered the round ends canceled
-        ``nothing_to_respond`` in the same transaction. ``rev`` makes it a strict compare-and-set
-        on the revision the caller decided on."""
+        ``nothing_to_respond`` in the same transaction (``extra`` runs then, and only then). ``rev``
+        makes it a strict compare-and-set on the revision the caller decided on."""
         if not isinstance(head_sha, str) or not _SHA_RE.fullmatch(head_sha):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ValueError("head_sha is 40 lowercase hex characters")
         ids = list(dict.fromkeys(comment_ids))
         if not all(isinstance(i, str) and i for i in ids):  # pyright: ignore[reportUnnecessaryIsInstance]
             raise ValueError("a comment id is a non-empty string")
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             delivered = self._handled.deliver(
                 row.pr,
                 ids,
@@ -505,24 +558,25 @@ class Rounds:
                 " WHERE pr = ? AND read_failures != 0",
                 (row.pr,),
             )
-            return {
-                "state": "running",
-                "head_sha": head_sha,
-                "comment_ids": json.dumps(list(delivered)),
-                "started_at": self._now(),
-            }, "started"
+            return _Plan(
+                {
+                    "state": "running",
+                    "head_sha": head_sha,
+                    "comment_ids": json.dumps(list(delivered)),
+                    "started_at": self._now(),
+                },
+                "started",
+            )
 
-        return self._run(round_id, frozenset({"queued"}), body, rev=rev)
+        return self._run(round_id, frozenset({"queued"}), body, rev=rev, extra=extra)
 
     # -- running -> ... -------------------------------------------------------------------------
 
-    def _pending(
-        self, conn: sqlite3.Connection, row: RoundRow, extra: RecordStep | None
-    ) -> tuple[dict[str, object], str]:
+    def _pending(self, conn: sqlite3.Connection, row: RoundRow, extra: RecordStep | None) -> _Plan:
         self._handled.mark_handled(row.pr, row.id, conn=conn)
         if extra is not None:
             extra(conn, dataclasses.replace(row, state="pending", counted=True))
-        return {"state": "pending", "counted": 1}, "done"
+        return _Plan({"state": "pending", "counted": 1}, "done")
 
     def _escalated(
         self,
@@ -532,19 +586,21 @@ class Rounds:
         summary: str | None,
         counted: bool,
         cause: str | None,
-    ) -> tuple[dict[str, object], str]:
+    ) -> _Plan:
         if cause not in (None, "hook"):
             raise ValueError("cause is hook or none")
         self._handled.release(row.pr, row.id, conn=conn)
-        self._block(conn, row, "escalated")
+        new_block = self._block(conn, row, "escalated")
         return self._end(
             row,
             "escalated",
             counted,
+            "escalated",
+            new_block=new_block,
             escalation_reason=_scrub(reason),
             escalation_summary=_scrub(summary),
             escalation_cause=cause,
-        ), "escalated"
+        )
 
     def _failed(
         self,
@@ -553,7 +609,7 @@ class Rounds:
         reason: str,
         detail: str | None,
         counted: bool,
-    ) -> tuple[dict[str, object], str]:
+    ) -> _Plan:
         if reason not in FAILURE_REASONS:
             raise ValueError("failure reason is not a closed reason")
         if (reason == "artifact_invalid") != (detail is not None):
@@ -561,14 +617,18 @@ class Rounds:
         if detail is not None and detail not in FAILURE_DETAILS:
             raise ValueError("failure detail is not a closed detail")
         self._handled.release(row.pr, row.id, conn=conn)
-        self._block(conn, row, "failed")
+        new_block = self._block(conn, row, "failed")
         return self._end(
-            row, "failed", counted, failure_reason=reason, failure_detail=detail
-        ), reason
+            row,
+            "failed",
+            counted,
+            reason,
+            new_block=new_block,
+            failure_reason=reason,
+            failure_detail=detail,
+        )
 
-    def _running_canceled(
-        self, conn: sqlite3.Connection, row: RoundRow, counted: bool
-    ) -> tuple[dict[str, object], str]:
+    def _running_canceled(self, conn: sqlite3.Connection, row: RoundRow, counted: bool) -> _Plan:
         if row.cancel_requested_at is None or row.cancel_reason is None:
             raise ValueError("the round has no cancel flag")
         return self._canceled(conn, row, row.cancel_reason, counted)
@@ -587,26 +647,40 @@ class Rounds:
         summary: str | None,
         counted: bool,
         cause: str | None = None,
+        extra: EndStep | None = None,
     ) -> Transition:
         return self._run(
             round_id,
             frozenset({"running"}),
             lambda c, r: self._escalated(c, r, reason, summary, counted, cause),
+            extra=extra,
         )
 
-    def to_canceled(self, round_id: str, *, counted: bool) -> Transition:
+    def to_canceled(
+        self, round_id: str, *, counted: bool, extra: EndStep | None = None
+    ) -> Transition:
         """The flag is set and the run ended stopped, or the job saw it before the agent."""
         return self._run(
-            round_id, frozenset({"running"}), lambda c, r: self._running_canceled(c, r, counted)
+            round_id,
+            frozenset({"running"}),
+            lambda c, r: self._running_canceled(c, r, counted),
+            extra=extra,
         )
 
     def to_failed(
-        self, round_id: str, reason: str, *, detail: str | None = None, counted: bool = False
+        self,
+        round_id: str,
+        reason: str,
+        *,
+        detail: str | None = None,
+        counted: bool = False,
+        extra: EndStep | None = None,
     ) -> Transition:
         return self._run(
             round_id,
             frozenset({"running"}),
             lambda c, r: self._failed(c, r, reason, detail, counted),
+            extra=extra,
         )
 
     def finish_run(
@@ -615,20 +689,24 @@ class Rounds:
         end: RunEnd,
         *,
         escalation: tuple[str | None, str | None] = (None, None),
-        detail: str | None = None,
+        extra: EndStep | None = None,
     ) -> Transition:
         """Apply the run-outcome table to a running round (``outcomes.map_run_end``). The cancel
-        flag is read from the row, not from ``end``. A signal exit of ``wait`` is a ``ValueError``:
-        the caller re-reads ``agent-spawn show`` and maps the last run."""
+        flag is read from the row, not from ``end``; the detail of ``artifact_invalid`` is
+        ``end.detail``. ``extra`` runs when the round ends (not for a run that only started or for
+        ``pending``). A signal exit of ``wait`` is a ``ValueError``: the caller re-reads
+        ``agent-spawn show`` and maps the last run."""
 
-        def body(conn: sqlite3.Connection, row: RoundRow) -> tuple[dict[str, object], str] | None:
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
             flagged = dataclasses.replace(end, cancel_requested=row.cancel_requested_at is not None)
             mapped: Mapped = map_run_end(flagged)
             if mapped.to == "reread":
                 raise ValueError("a signal exit is never an outcome: re-read agent-spawn show")
             if mapped.to == "running":
                 return (
-                    None if row.counted or not mapped.counted else ({"counted": 1}, "run_started")
+                    None
+                    if row.counted or not mapped.counted
+                    else _Plan({"counted": 1}, "run_started")
                 )
             if mapped.to == "pending":
                 return self._pending(conn, row, None)
@@ -639,18 +717,26 @@ class Rounds:
             if mapped.to == "canceled":
                 return self._running_canceled(conn, row, mapped.counted)
             assert mapped.failure_reason is not None
-            use = detail if mapped.failure_reason == "artifact_invalid" else None
-            return self._failed(conn, row, mapped.failure_reason, use, mapped.counted)
+            return self._failed(conn, row, mapped.failure_reason, end.detail, mapped.counted)
 
-        return self._run(round_id, frozenset({"running"}), body)
+        return self._run(round_id, frozenset({"running"}), body, extra=extra)
+
+    def settle_pending(self, conn: sqlite3.Connection, round_id: str, to: str) -> bool:
+        """``settle_pending`` with the lease's clock; it logs the ``round_state`` event when it
+        changed the round (the caller's transaction is the one that commits it)."""
+        if not settle_pending(conn, round_id, to, now=self._now()):
+            return False
+        row = get_round(conn, round_id)
+        assert row is not None
+        self._emit(row, "pending", to, "settled")
+        return True
 
 
-def settle_pending(
-    conn: sqlite3.Connection, round_id: str, to: str, *, now: float | None = None
-) -> bool:
+def settle_pending(conn: sqlite3.Connection, round_id: str, to: str, *, now: float) -> bool:
     """``pending`` follows its record to ``confirmed``, ``rejected``, ``expired`` or ``closed``,
-    inside the record's own transaction (the caller holds the lease that transaction checked).
-    False when the round is not pending (nothing is written)."""
+    inside the record's own transaction (the caller holds the lease that transaction checked and
+    gives its clock's ``now``; ``Rounds.settle_pending`` does both). False when the round is not
+    pending (nothing is written)."""
     if to not in SETTLED_BY_RECORD:
         raise ValueError("a pending round ends confirmed, rejected, expired or closed")
     row = get_round(conn, round_id)
@@ -658,9 +744,8 @@ def settle_pending(
         raise CliError("not_found", "no round matches")
     if row.state != "pending":
         return False
-    stamp = SystemClock().now().timestamp() if now is None else now
     return cas_update(
-        conn, "rounds", "id", row.id, row.rev, {"state": to, "ended_at": stamp},
+        conn, "rounds", "id", row.id, row.rev, {"state": to, "ended_at": now},
         where={"state": "pending"},
     )  # fmt: skip
 

@@ -50,6 +50,7 @@ ROWS: list[tuple[str, dict[str, Any], str, str | None, bool, int | None]] = [
                 outcome="done",
                 end_reason="normal",
                 artifact_failure=why,
+                detail="schema" if why == "artifact_invalid" else None,
             ),
             "failed",
             why,
@@ -168,7 +169,7 @@ ROWS: list[tuple[str, dict[str, Any], str, str | None, bool, int | None]] = [
             command="wait",
             exit=15,
             outcome="killed",
-            end_reason="signal_kill",
+            end_reason="internal_error",
             cancel_requested=True,
         ),
         "failed",
@@ -177,8 +178,8 @@ ROWS: list[tuple[str, dict[str, Any], str, str | None, bool, int | None]] = [
         12,
     ),  # fmt: skip
     (
-        "wait-15-killed-no-reason",
-        dict(command="wait", exit=15, outcome="killed", end_reason="user_exit"),
+        "wait-15-killed-by-a-signal-no-flag",
+        dict(command="wait", exit=15, outcome="killed", end_reason="signal_term"),
         "failed",
         "agent_failed",
         True,
@@ -313,11 +314,15 @@ def test_an_unknown_command_is_refused() -> None:
         RunEnd(command="stop", exit=0)
 
 
-def test_every_failure_reason_the_table_can_produce_is_a_closed_reason() -> None:
-    produced = {row[3] for row in ROWS if row[3] is not None}
-    assert produced <= set(FAILURE_REASONS)
+def test_the_rows_produce_every_closed_failure_reason_and_only_those() -> None:
+    produced = {
+        mapped.failure_reason
+        for _, args, *_ in ROWS
+        if (mapped := map_run_end(RunEnd(**args))).failure_reason is not None
+    }
     # the table's closed list, written out from the interface
-    assert set(FAILURE_REASONS) == {
+    assert produced == set(FAILURE_REASONS)
+    assert produced == {
         "throwaway_failed", "launch_failed", "vetoed", "refused", "agent_gone", "unreported",
         "agent_failed", "agent_lost", "timeout", "job_terminated", "job_lost", "artifact_missing",
         "artifact_invalid", "implicit_done", "empty_result", "diff_failed", "internal",
@@ -327,3 +332,30 @@ def test_every_failure_reason_the_table_can_produce_is_a_closed_reason() -> None
 def test_sigterm_with_the_cancel_flag_ends_canceled_not_failed() -> None:
     got = map_run_end(RunEnd(command="sigterm", cancel_requested=True))
     assert (got.to, got.failure_reason, got.job_exit) == ("canceled", None, 0)
+
+
+def test_artifact_invalid_carries_its_detail_in_the_run_end() -> None:
+    end = RunEnd(
+        command="wait", exit=0, outcome="done", artifact_failure="artifact_invalid", detail="json"
+    )
+    assert end.detail == "json"
+
+
+def test_artifact_invalid_without_a_detail_is_refused_when_the_run_end_is_built() -> None:
+    with pytest.raises(ValueError, match="detail"):
+        RunEnd(command="wait", exit=0, outcome="done", artifact_failure="artifact_invalid")
+
+
+@pytest.mark.parametrize(
+    "failure", [None, *[a for a in ARTIFACT_FAILURES if a != "artifact_invalid"]]
+)
+def test_a_detail_with_anything_but_artifact_invalid_is_refused(failure: str | None) -> None:
+    with pytest.raises(ValueError, match="detail"):
+        RunEnd(command="wait", exit=0, outcome="done", artifact_failure=failure, detail="json")
+
+
+def test_an_open_detail_is_refused() -> None:
+    with pytest.raises(ValueError, match="detail"):
+        RunEnd(
+            command="wait", exit=0, outcome="done", artifact_failure="artifact_invalid", detail="x"
+        )

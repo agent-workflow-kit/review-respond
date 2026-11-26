@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,7 @@ import pytest
 
 from review_respond import due
 from review_respond.cli import main
-from review_respond.rounds import Rounds, get_round, round_facts, settle_pending
+from review_respond.rounds import Rounds, get_round, round_facts
 from review_respond.store import Store, open_state_dir, pr_digest, pr_lease_key
 from tests.harness.plugin import World
 from tests.test_check import (
@@ -108,7 +109,7 @@ def test_a_pending_round_makes_the_pr_pending_and_a_terminal_one_gives_the_block
     _, doc, _ = run(capsys, "list", config=config)
     assert pr_row(doc)["state"] == "pending"
     with seeded.store.transaction() as conn:
-        settle_pending(conn, rid, "rejected")
+        seeded.rounds.settle_pending(conn, rid, "rejected")
     _, doc, _ = run(capsys, "list", config=config)
     assert pr_row(doc)["state"] != "pending" and pr_row(doc)["rounds"] == 1
 
@@ -279,3 +280,35 @@ def test_list_and_show_do_not_write_the_state_when_rounds_exist(
     run(capsys, "list", config=config)
     run(capsys, "show", rid, config=config)
     assert get_round(seeded.store.conn, rid) == before
+
+
+@pytest.mark.parametrize("lead", ["", "a"])
+def test_a_question_of_control_characters_prints_within_4096_characters_and_validates(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path, seeded: Harness, lead: str
+) -> None:
+    rid = seeded.rounds.create(PR7).id
+    seeded.rounds.start(rid, (C1,), head_sha=HEAD)
+    seeded.rounds.to_escalated(
+        rid, reason=lead + "\x01" * 4096, summary="\x1b" * 5000, counted=True
+    )
+    for ref in (rid, PR7):
+        code, doc, _ = run(capsys, "show", ref, config=config)
+        assert code == 0
+        valid("show", doc)
+        shown = doc["round"] if ref == rid else doc["rounds"][0]
+        reason = shown["escalation"]["reason"]
+        assert len(reason) <= 4096
+        assert re.fullmatch(rf"{lead}(<U\+0001>)+", reason)  # a marker is never cut in two
+        assert re.fullmatch(r"(<U\+001B>)+", shown["escalation"]["summary"])
+
+
+def test_show_of_a_round_whose_comment_lost_its_stored_text_is_state_unsafe(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path, seeded: Harness
+) -> None:
+    rid = seeded.rounds.create(PR7).id
+    seeded.rounds.start(rid, (C1,), head_sha=HEAD)
+    sql(world, "UPDATE comments SET body_file = NULL WHERE comment_id = ?", C1)
+    code, doc, _ = run(capsys, "show", rid, config=config)
+    assert code == 12 and doc["error"]["code"] == "state_unsafe"
+    code, doc, _ = run(capsys, "show", PR7, config=config)
+    assert code == 12 and doc["error"]["code"] == "state_unsafe"

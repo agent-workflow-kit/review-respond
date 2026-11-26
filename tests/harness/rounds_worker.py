@@ -17,7 +17,7 @@ from pathlib import Path
 
 from review_respond.errors import CliError
 from review_respond.outcomes import RunEnd
-from review_respond.rounds import Rounds, get_round, settle_pending
+from review_respond.rounds import Rounds, get_round
 from review_respond.store import Store, open_state_dir
 
 HEAD = "e" * 40
@@ -49,7 +49,7 @@ def main(argv: list[str]) -> int:
     try:
         if action.startswith("settle_"):
             with lease.transaction() as conn:
-                changed = settle_pending(conn, rid, action.removeprefix("settle_"))
+                changed = rounds.settle_pending(conn, rid, action.removeprefix("settle_"))
         else:
             moves = {
                 "start": lambda: rounds.start(rid, ("gh:rc:c1",), head_sha=HEAD),

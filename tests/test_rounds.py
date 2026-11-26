@@ -32,7 +32,6 @@ from review_respond.rounds import (
     new_round_id,
     resolve_round_id,
     round_facts,
-    settle_pending,
 )
 from review_respond.store import Lease, Store, open_state_dir, pr_digest, pr_lease_key
 from tests.harness import builders
@@ -138,7 +137,7 @@ class Env:
         else:
             self.rounds.to_pending(rid)
             with self.store.transaction() as conn:
-                assert settle_pending(conn, rid, state)
+                assert self.rounds.settle_pending(conn, rid, state)
         return rid
 
 
@@ -546,7 +545,6 @@ def test_a_running_round_records_its_agent_once(env: Env) -> None:
     assert env.rounds.record_agent(rid, AGENT, throwaway_id="wt-1").changed
     assert env.row(rid).agent_id == AGENT and env.row(rid).throwaway_id == "wt-1"
     assert env.rounds.record_agent(rid, AGENT).changed is False  # same value: no change
-    assert not env.rounds.record_agent(rid, "ag-zzzzzzzz").changed  # never overwritten
     assert env.row(rid).agent_id == AGENT
     with pytest.raises(ValueError):
         env.rounds.record_agent(rid, "agent-1")
@@ -609,12 +607,23 @@ def test_a_hook_escalation_is_not_counted_and_records_its_cause(env: Env) -> Non
     assert (row.counted, row.escalation_cause) == (False, "hook")
 
 
-def test_the_stored_question_is_cut_to_4096_characters_and_scrubbed(env: Env) -> None:
+def test_the_stored_question_is_cut_to_4096_bytes_and_scrubbed(env: Env) -> None:
     rid = env.running()
     env.rounds.to_escalated(rid, reason="x" * 5000, summary="\udc80bad", counted=True)
     row = env.row(rid)
     assert row.escalation_reason is not None and len(row.escalation_reason) == 4096
     assert row.escalation_summary is not None and "\udc80" not in row.escalation_summary
+
+
+def test_the_stored_question_is_cut_at_a_character_boundary_within_4096_bytes(env: Env) -> None:
+    rid = env.running()
+    # 3-byte characters: 1365 of them are 4095 bytes, the 1366th would cross 4096
+    env.rounds.to_escalated(rid, reason="\u20ac" * 2000, summary="a\u20ac" * 3000, counted=True)
+    row = env.row(rid)
+    assert row.escalation_reason == "\u20ac" * 1365
+    assert row.escalation_summary is not None
+    assert len(row.escalation_summary.encode("utf-8")) <= 4096
+    assert row.escalation_summary.encode("utf-8").decode("utf-8") == row.escalation_summary
 
 
 def test_running_to_canceled_after_a_stop_releases_and_blocks_stopped(env: Env) -> None:
@@ -714,9 +723,14 @@ def test_finish_run_wait_done_valid_goes_pending(env: Env) -> None:
 def test_finish_run_wait_done_with_an_invalid_artifact_fails_with_its_detail(env: Env) -> None:
     rid = env.running()
     end = RunEnd(
-        command="wait", exit=0, phase="session", outcome="done", artifact_failure="artifact_invalid"
+        command="wait",
+        exit=0,
+        phase="session",
+        outcome="done",
+        artifact_failure="artifact_invalid",
+        detail="skill_marker",
     )
-    got = env.rounds.finish_run(rid, end, detail="skill_marker")
+    got = env.rounds.finish_run(rid, end)
     assert (got.row.state, got.row.failure_reason, got.row.failure_detail) == (
         "failed", "artifact_invalid", "skill_marker",
     )  # fmt: skip
@@ -802,7 +816,7 @@ def test_finish_run_of_a_queued_round_changes_nothing(env: Env) -> None:
 def test_a_pending_round_follows_its_record_to_a_terminal_state(env: Env, to: str) -> None:
     rid = env.reach("pending")
     with env.store.transaction() as conn:
-        assert settle_pending(conn, rid, to) is True
+        assert env.rounds.settle_pending(conn, rid, to) is True
     row = env.row(rid)
     assert row.state == to and row.ended_at is not None and row.counted is True
 
@@ -813,21 +827,21 @@ def test_a_pending_round_follows_its_record_to_a_terminal_state(env: Env, to: st
 def test_a_pending_round_cannot_go_to_another_state_by_its_record(env: Env, to: str) -> None:
     rid = env.reach("pending")
     with env.store.transaction() as conn, pytest.raises(ValueError):
-        settle_pending(conn, rid, to)
+        env.rounds.settle_pending(conn, rid, to)
 
 
 def test_settle_pending_of_a_round_in_another_state_changes_nothing(env: Env) -> None:
     rid = env.reach("running")
     with env.store.transaction() as conn:
-        assert settle_pending(conn, rid, "confirmed") is False
+        assert env.rounds.settle_pending(conn, rid, "confirmed") is False
     assert env.row(rid).state == "running"
 
 
 def test_settle_pending_twice_changes_it_once(env: Env) -> None:
     rid = env.reach("pending")
     with env.store.transaction() as conn:
-        assert settle_pending(conn, rid, "rejected") is True
-        assert settle_pending(conn, rid, "closed") is False
+        assert env.rounds.settle_pending(conn, rid, "rejected") is True
+        assert env.rounds.settle_pending(conn, rid, "closed") is False
     assert env.row(rid).state == "rejected"
 
 
@@ -896,7 +910,7 @@ def test_a_terminal_round_never_changes_again(env: Env, state: str) -> None:
     ):
         assert not call().changed
     with env.store.transaction() as conn:
-        assert settle_pending(conn, rid, "confirmed") is False
+        assert env.rounds.settle_pending(conn, rid, "confirmed") is False
     assert env.row(rid) == before
 
 
@@ -923,7 +937,7 @@ def test_round_facts_follow_the_rounds_of_the_pr(env: Env) -> None:
     facts = round_facts(conn, env.pr)
     assert (facts.running, facts.counted, facts.record_open) == (False, 1, True)
     with env.store.transaction() as c:
-        settle_pending(c, rid, "rejected")
+        env.rounds.settle_pending(c, rid, "rejected")
     facts = round_facts(conn, env.pr)
     assert (facts.record_open, facts.counted) == (False, 1)  # a rejected round still counts
 
@@ -1014,3 +1028,244 @@ def test_every_change_of_state_logs_one_round_state_event_after_commit(
         ("round_state", "running", "failed", "timeout"),
     ]
     assert all(f["round"] == rid for _, f in log.events)
+
+
+# ---- the end of a round queues its post-attention in the same transaction -----------------------
+
+
+def _stop_then(move: Callable[[Env, str], Any]) -> Callable[[Env, str], Any]:
+    def run(env: Env, rid: str) -> Any:
+        env.rounds.request_cancel(rid, "stopped")
+        return move(env, rid)
+
+    return run
+
+
+def _failures_then(move: Callable[[Env, str], Any]) -> Callable[[Env, str], Any]:
+    def run(env: Env, rid: str) -> Any:
+        with env.store.transaction() as conn:
+            conn.execute("UPDATE prs SET read_failures = 3")
+        return move(env, rid)
+
+    return run
+
+
+# name -> (state it starts from, the move given its extra step, sets a block)
+EndMove = Callable[[Env, str, Any], Any]
+ENDS: dict[str, tuple[str, EndMove, bool]] = {
+    "escalated": (
+        "running",
+        lambda e, r, x: e.rounds.to_escalated(r, reason="r", summary="s", counted=True, extra=x),
+        True,
+    ),
+    "failed": (
+        "running",
+        lambda e, r, x: e.rounds.to_failed(r, "timeout", counted=True, extra=x),
+        True,
+    ),
+    "job_lost": ("queued", lambda e, r, x: e.rounds.reconcile_lost(r, extra=x), True),
+    "third_read_failed": (
+        "queued",
+        lambda e, r, x: _failures_then(lambda e2, r2: e2.rounds.cancel_read_failed(r2, extra=x))(
+            e, r
+        ),
+        True,
+    ),
+    "flagged_stopped": (
+        "queued",
+        lambda e, r, x: _stop_then(lambda e2, r2: e2.rounds.cancel_flagged(r2, extra=x))(e, r),
+        True,
+    ),
+    "running_stopped": (
+        "running",
+        lambda e, r, x: _stop_then(lambda e2, r2: e2.rounds.to_canceled(r2, counted=True, extra=x))(
+            e, r
+        ),
+        True,
+    ),
+    "finish_run": (
+        "running",
+        lambda e, r, x: e.rounds.finish_run(r, RunEnd(command="wait", exit=18), extra=x),
+        True,
+    ),
+    "pr_closed": ("queued", lambda e, r, x: e.rounds.cancel_pr_closed(r, extra=x), False),
+    "nothing": ("queued", lambda e, r, x: e.rounds.cancel_nothing(r, extra=x), False),
+    "start_nothing": (
+        "queued",
+        lambda e, r, x: e.rounds.start(r, (), head_sha=HEAD, extra=x),
+        False,
+    ),
+}
+
+
+def _block_text(conn: sqlite3.Connection, pr: str) -> str | None:
+    return conn.execute("SELECT block FROM prs WHERE pr = ?", (pr,)).fetchone()[0]
+
+
+@pytest.mark.parametrize("name", sorted(ENDS))
+def test_an_ending_transition_runs_extra_in_its_transaction_after_the_block_is_set(
+    env: Env, name: str
+) -> None:
+    state, move, sets_block = ENDS[name]
+    rid = env.reach(state)
+    seen: list[tuple[str, bool, bool]] = []
+
+    def extra(conn: sqlite3.Connection, row: RoundRow, new_block: bool) -> None:
+        seen.append((row.state, new_block, _block_text(conn, row.pr) is not None))
+
+    got = move(env, rid, extra)
+    assert got.changed and got.new_block is sets_block
+    assert seen == [(got.row.state, sets_block, sets_block)]
+    assert got.row.state in TERMINAL_STATES
+
+
+@pytest.mark.parametrize("name", sorted(ENDS))
+def test_an_extra_that_raises_rolls_back_the_state_change_and_the_block(
+    env: Env, name: str
+) -> None:
+    state, move, _ = ENDS[name]
+    rid = env.reach(state)
+
+    def boom(conn: sqlite3.Connection, row: RoundRow, new_block: bool) -> None:
+        raise CliError("internal", "no post")
+
+    with pytest.raises(CliError):
+        move(env, rid, boom)
+    assert env.row(rid).state == state and env.block() is None
+    assert env.row(rid).ended_at is None
+
+
+@pytest.mark.parametrize("name", sorted(n for n, (_, _, blocks) in ENDS.items() if blocks))
+def test_new_block_is_false_when_the_pr_already_had_a_block(env: Env, name: str) -> None:
+    state, move, _ = ENDS[name]
+    rid = env.reach(state)
+    with env.store.transaction() as conn:
+        conn.execute(
+            "UPDATE prs SET block = ?",
+            (json.dumps({"reason": "no_agent", "set_at": 5, "comment_set_sha256": "0" * 64}),),
+        )
+    seen: list[bool] = []
+    got = move(env, rid, lambda conn, row, new_block: seen.append(new_block))
+    assert got.changed and got.new_block is False and seen == [False]
+    block = env.block()
+    assert block is not None and block["reason"] == "no_agent"
+
+
+def test_a_transition_that_does_not_end_the_round_never_runs_extra(env: Env) -> None:
+    rid = env.queued()
+    seen: list[bool] = []
+    got = env.rounds.start(rid, (C1,), head_sha=HEAD, extra=lambda conn, row, nb: seen.append(nb))
+    assert got.row.state == "running" and seen == [] and got.new_block is False
+
+
+# ---- the database keeps the state table's rules ------------------------------------------------
+
+
+@pytest.mark.parametrize("state", sorted(TERMINAL_STATES))
+def test_the_database_refuses_any_update_of_a_terminal_round(env: Env, state: str) -> None:
+    rid = env.reach(state)
+    for sql in (
+        "UPDATE rounds SET warnings = '[]' WHERE id = ?",
+        "UPDATE rounds SET state = 'queued' WHERE id = ?",
+        "UPDATE rounds SET rev = rev + 1 WHERE id = ?",
+    ):
+        with env.store.transaction() as conn, pytest.raises(sqlite3.IntegrityError):
+            conn.execute(sql, (rid,))
+    assert env.row(rid).state == state
+
+
+def test_the_database_refuses_to_lower_counted(env: Env) -> None:
+    rid = env.running()
+    env.rounds.note_started(rid)
+    with env.store.transaction() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute("UPDATE rounds SET counted = 0 WHERE id = ?", (rid,))
+    assert env.row(rid).counted is True
+
+
+@pytest.mark.parametrize("to", ["queued", "running", "pending", "failed", "escalated", "canceled"])
+def test_the_database_lets_a_pending_round_only_follow_its_record(env: Env, to: str) -> None:
+    rid = env.reach("pending")
+    with env.store.transaction() as conn, pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "UPDATE rounds SET state = ?, ended_at = 1, failure_reason = 'timeout',"
+            " cancel_reason = 'stopped' WHERE id = ?",
+            (to, rid),
+        )
+    assert env.row(rid).state == "pending"
+
+
+@pytest.mark.parametrize("to", ["confirmed", "rejected", "expired", "closed"])
+def test_the_database_lets_a_pending_round_settle(env: Env, to: str) -> None:
+    rid = env.reach("pending")
+    with env.store.transaction() as conn:
+        conn.execute("UPDATE rounds SET state = ?, ended_at = 1 WHERE id = ?", (to, rid))
+    assert env.row(rid).state == to
+
+
+# ---- an agent id is never replaced -------------------------------------------------------------
+
+
+def test_recording_a_different_agent_is_internal_and_changes_nothing(env: Env) -> None:
+    rid = env.running()
+    env.rounds.record_agent(rid, AGENT)
+    before = env.row(rid)
+    with pytest.raises(CliError) as err:
+        env.rounds.record_agent(rid, "ag-zzzzzzzz")
+    assert err.value.code == "internal"
+    assert env.row(rid) == before
+
+
+# ---- the lease clock ----------------------------------------------------------------------------
+
+
+def test_settle_pending_stamps_the_lease_clock_and_logs_the_state_change(
+    env: Env, store: Store
+) -> None:
+    rid = env.reach("pending")
+    log = FakeLog()
+    assert env.lease is not None
+    rounds = Rounds(env.lease, log=log)  # type: ignore[arg-type]
+    store.clock.advance(5000)  # type: ignore[attr-defined]
+    with store.transaction() as conn:
+        assert rounds.settle_pending(conn, rid, "rejected") is True
+        assert rounds.settle_pending(conn, rid, "closed") is False
+    assert env.row(rid).ended_at == store.clock.now().timestamp()
+    assert [(e, f["from"], f["to"]) for e, f in log.events] == [
+        ("round_state", "pending", "rejected")
+    ]
+
+
+# ---- a stored cancel flag wins over what the job saw ---------------------------------------------
+
+
+@pytest.mark.parametrize("seen", ["cancel_pr_closed", "cancel_nothing", "cancel_read_failed"])
+def test_a_stored_stop_flag_wins_over_the_reason_the_job_saw(env: Env, seen: str) -> None:
+    rid = env.queued()
+    env.rounds.request_cancel(rid, "stopped")
+    got = getattr(env.rounds, seen)(rid)
+    assert got.changed and got.row.cancel_reason == "stopped"
+    block = env.block()
+    assert block is not None and block["reason"] == "stopped" and got.new_block is True
+
+
+def test_a_stored_pr_closed_flag_wins_over_the_third_failed_read(env: Env) -> None:
+    rid = env.queued()
+    env.rounds.request_cancel(rid, "pr_closed")
+    with env.store.transaction() as conn:
+        conn.execute("UPDATE prs SET read_failures = 3")
+    got = env.rounds.cancel_read_failed(rid)
+    assert got.row.cancel_reason == "pr_closed" and got.new_block is False
+    assert env.block() is None
+
+
+@pytest.mark.parametrize(("flag", "blocks"), [("stopped", True), ("pr_closed", False)])
+def test_a_flagged_start_with_no_selection_ends_canceled_with_the_flag_reason(
+    env: Env, flag: str, blocks: bool
+) -> None:
+    rid = env.queued()
+    env.rounds.request_cancel(rid, flag)
+    got = env.rounds.start(rid, (), head_sha=HEAD)
+    assert got.changed and got.row.state == "canceled" and got.row.cancel_reason == flag
+    block = env.block()
+    assert (block is not None and block["reason"] == "stopped") is blocks
+    assert (block is None) is not blocks

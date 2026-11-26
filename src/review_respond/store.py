@@ -227,6 +227,19 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             CHECK (state != 'canceled' OR cancel_reason IS NOT NULL)
         ) WITHOUT ROWID""",
         "CREATE UNIQUE INDEX rounds_one_active ON rounds (pr) WHERE state IN ('queued', 'running')",
+        # The state table's rules, kept by the database as well as by rounds.py: a terminal round
+        # is immutable, `counted` never goes back, and a `pending` round only follows its record.
+        """CREATE TRIGGER rounds_terminal_is_immutable BEFORE UPDATE ON rounds
+        WHEN OLD.state IN ('confirmed', 'rejected', 'expired', 'closed', 'escalated', 'failed',
+            'canceled')
+        BEGIN SELECT RAISE(ABORT, 'a terminal round is immutable'); END""",
+        """CREATE TRIGGER rounds_counted_never_decreases BEFORE UPDATE ON rounds
+        WHEN NEW.counted < OLD.counted
+        BEGIN SELECT RAISE(ABORT, 'a counted round stays counted'); END""",
+        """CREATE TRIGGER rounds_pending_follows_its_record BEFORE UPDATE ON rounds
+        WHEN OLD.state = 'pending'
+            AND NEW.state NOT IN ('confirmed', 'rejected', 'expired', 'closed')
+        BEGIN SELECT RAISE(ABORT, 'a pending round is settled by its record'); END""",
     ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
