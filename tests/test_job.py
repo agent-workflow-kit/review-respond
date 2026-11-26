@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 
 from review_respond.cli import main
-from review_respond.rounds import Rounds
+from review_respond.rounds import Rounds, get_round
 from review_respond.store import Store, open_state_dir, pr_digest, pr_lease_key
 from tests.harness import builders
 from tests.harness.agents import wt_record
@@ -118,20 +118,33 @@ def make_round(
     script_prs(world.fakes, [builders.pr_item(7)])
     world.fakes.script("agent-spawn", "list", json={"agents": []}, schema=False)
     script_comments(world.fakes, PR7, comments if comments is not None else one_comment())
+    # a fresh-session opt-in makes the PR due at once: `check` then places a round itself (detached,
+    # recorded and not started) and the scene uses it
+    fresh = bool(config.get("repos"))
+    if fresh:
+        world.drop_tool("jobsctl")
     assert main(["check", "--json", "--config", str(cfg)]) == 0
     capsys.readouterr()
+    if fresh:
+        world.fakes.install()  # jobsctl is back for the tests that script it
     state = Path(world.env["XDG_STATE_HOME"]) / "review-respond"
     store = Store.open(open_state_dir(state), write=True, close_state=True)
     try:
-        lease = store.try_acquire(pr_lease_key(pr_digest(PR7)), heartbeat=None)
-        assert lease is not None
-        note_sha = None
-        if note is not None:
-            note_sha = store.source.put_file(pr_digest(PR7), note)  # type: ignore[union-attr]
-        row = Rounds(lease).create(
-            PR7, base_agent_id=base, note_sha256=note_sha, include_existing=include_existing
-        )
-        lease.release()
+        started = store.conn.execute("SELECT id FROM rounds").fetchone()
+        if started is not None:
+            assert note is None and not include_existing
+            row = get_round(store.conn, started[0])
+            assert row is not None
+        else:
+            lease = store.try_acquire(pr_lease_key(pr_digest(PR7)), heartbeat=None)
+            assert lease is not None
+            note_sha = None
+            if note is not None:
+                note_sha = store.source.put_file(pr_digest(PR7), note)  # type: ignore[union-attr]
+            row = Rounds(lease).create(
+                PR7, base_agent_id=base, note_sha256=note_sha, include_existing=include_existing
+            )
+            lease.release()
     finally:
         store.close()
     conn = sqlite3.connect(state / "state.db")

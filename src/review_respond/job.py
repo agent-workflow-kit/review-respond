@@ -54,6 +54,7 @@ from .gateway import AgentSpawn, Gateway, GatewayError, Result
 from .handled import HandledSet, body_digest
 from .outcomes import STOP_REASONS, RunEnd, map_run_end
 from .output import Context, Outcome
+from .placement import remove_output
 from .prompt import (
     BuiltPrompt,
     PromptComment,
@@ -278,6 +279,31 @@ class Job:
         self.pr = ""
         self.repo = ""
 
+    @classmethod
+    def adopt(
+        cls,
+        ctx: Context,
+        settings: Config,
+        store: Store,
+        row: RoundRow,
+        lease: Lease,
+        *,
+        repo: str,
+        root: str | None,
+    ) -> Job:
+        """A ``Job`` the finalizer drives for a ``running`` round whose ``_job`` is gone: it holds
+        the round's lease (taken over from the verified-gone holder), knows the recorded agent and
+        the throwaway root (None when it cannot be found), and uses ``finish`` and ``check_done``
+        exactly as ``_job`` does after its ``wait``."""
+        job = cls(ctx, settings, store, row.id)
+        job.lease = lease
+        job.rounds = Rounds(lease, log=job.log)
+        job.pr, job.repo = row.pr, repo
+        job.agent_id = row.agent_id
+        job.started = row.counted
+        job.root = root
+        return job
+
     # -- plumbing ---------------------------------------------------------------------------
 
     def _on_signal(self, _signum: int, _frame: FrameType | None) -> None:
@@ -311,16 +337,17 @@ class Job:
             return self._run(on_event)
         finally:
             try:
-                self._cleanup_files()
+                self.cleanup_files()
             finally:
                 if installed:
                     signal.signal(signal.SIGTERM, previous)
                 lease.release()
 
-    def _cleanup_files(self) -> None:
+    def cleanup_files(self) -> None:
         """Remove the prompt and profile of the round once nothing needs them: the round ended,
         or the job never launched an agent, or the agent's run ended. A live agent left to the
-        finalizer keeps them (TODO(#24): the finalizer removes them when it ends the round)."""
+        finalizer keeps them (the finalizer removes them when it ends the round or finds the
+        agent's run over)."""
         try:
             row = get_round(self.store.conn, self.rid)
         except Exception:  # the database is unreadable: leave the files for the cleanup
@@ -331,6 +358,8 @@ class Job:
                     remove(self.state, self.rid)
                 except (OSError, CliError):
                     self._warn("temp_file_left")
+            if row is not None and row.state in TERMINAL_STATES:
+                remove_output(self.state, self.rid, self.log)  # a detached job's output file
 
     # -- queued ----------------------------------------------------------------------------
 
@@ -556,9 +585,9 @@ class Job:
         except Exception:
             self._warn("job_internal_unrecorded")
 
-    def _finish(self, end: RunEnd, escalation: tuple[str | None, str | None] = (None, None)) -> int:
+    def finish(self, end: RunEnd, escalation: tuple[str | None, str | None] = (None, None)) -> int:
         """``finish_round`` for a run that did not end ``done``: apply the table, answer the
-        job's exit code. TODO(#37): the ``post-attention`` extra step."""
+        job's exit code (the finalizer's too). TODO(#37): the ``post-attention`` extra step."""
         moved: Transition = self.rounds.finish_run(self.rid, end, escalation=escalation)
         self.agent_done = True
         if not moved.changed:
@@ -575,14 +604,14 @@ class Job:
 
     def _running(self, row: RoundRow) -> int:
         if self.terminated:
-            return self._finish(RunEnd("sigterm", started=self.started))
+            return self.finish(RunEnd("sigterm", started=self.started))
         created = self._create_throwaway(row)
         if isinstance(created, int):
             return created
         tw_id, root = created
         prompt_file, profile_file, base = self._prepare_session(row, root)
         if self.terminated:
-            return self._finish(RunEnd("sigterm", started=self.started))
+            return self.finish(RunEnd("sigterm", started=self.started))
         if self._row().cancel_requested_at is not None:
             self.rounds.to_canceled(self.rid, counted=False)
             self.agent_done = True
@@ -590,7 +619,7 @@ class Job:
         launch = self._launch(row, root, base, prompt_file, profile_file)
         end, esc = run_end_of("launch" if base is None else "resume", launch)
         if end.exit != 0:
-            return self._finish(end, esc)
+            return self.finish(end, esc)
         agent_id = self._record_agent(row, launch, base, tw_id)
         if agent_id is None:
             return self._failed_internal()
@@ -614,7 +643,7 @@ class Job:
             result, code = None, 1
         if code != 0 or result is None:
             self._warn("throwaway_failed")
-            return self._finish(RunEnd("wtctl_create", exit=code))
+            return self.finish(RunEnd("wtctl_create", exit=code))
         doc = _dict(result.json)
         record = _dict(doc.get("record"))
         tw_id, path = _text(record.get("id")), _text(record.get("path"))
@@ -808,9 +837,9 @@ class Job:
         if res is not None:
             end, esc = run_end_of("wait", res, started=self.started)
         if self.terminated and (end is None or self._is_stop_end(end)):
-            return self._finish(RunEnd("sigterm", started=self.started))
+            return self.finish(RunEnd("sigterm", started=self.started))
         if end is None:
-            return self._finish(RunEnd("wait", None, started=self.started))
+            return self.finish(RunEnd("wait", None, started=self.started))
         if end.exit in _SIGNAL_EXITS:
             shown = parse_show(self._show(agent_id), agent_id)
             if shown is None or shown.live or shown.last is None:
@@ -821,7 +850,7 @@ class Job:
         if end.exit == 0:
             shown = parse_show(self._show(agent_id), agent_id)
             return self._after_wait(end, esc, shown)
-        return self._finish(end, esc)
+        return self.finish(end, esc)
 
     def _show(self, agent_id: str) -> Result:
         try:
@@ -836,7 +865,7 @@ class Job:
         shown: ShownRun | None,
     ) -> int:
         if end.exit != 0:
-            return self._finish(end, esc)
+            return self.finish(end, esc)
         return self.check_done(end, shown)
 
     def check_done(self, end: RunEnd, shown: ShownRun | None) -> int:
@@ -848,7 +877,7 @@ class Job:
             outcome = _text(shown.last.get("outcome"))
         if outcome not in (None, "done"):
             # exit 0 of wait is the outcome `done`: any other is `internal` (Run outcomes)
-            return self._finish(dataclasses.replace(end, outcome=outcome))
+            return self.finish(dataclasses.replace(end, outcome=outcome))
         if shown is None:
             self._warn("show_failed")
             return self._failed_internal()
@@ -856,7 +885,7 @@ class Job:
             self._warn("left_running")
             return 0
         if shown.last is None:
-            return self._finish(dataclasses.replace(end, artifact_failure="artifact_missing"))
+            return self.finish(dataclasses.replace(end, artifact_failure="artifact_missing"))
         implicit, ref = frozen_ref(shown.last)
         row = self._row()
         result = validate_artifact(
@@ -874,7 +903,7 @@ class Job:
             )
         if not result.ok:
             self._warn(result.failure or "artifact_invalid")
-            return self._finish(
+            return self.finish(
                 dataclasses.replace(end, artifact_failure=result.failure, detail=result.detail)
             )
         # TODO(#28): build the stored diff in a clean checkout (empty_result, diff_failed).

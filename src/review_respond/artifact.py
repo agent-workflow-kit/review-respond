@@ -512,7 +512,7 @@ def check_path_state(
             return _invalid("path_state", f"{problem} ({_q(path)})")
     try:
         root_fd = os.open(root, _DIR_FLAGS)
-    except OSError as exc:
+    except (OSError, ValueError, UnicodeError) as exc:
         return _invalid("path_state", f"cannot open the throwaway ({type(exc).__name__})")
     try:
         for path in changed:

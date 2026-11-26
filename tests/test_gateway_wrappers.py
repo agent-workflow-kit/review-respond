@@ -202,12 +202,30 @@ def test_jobsctl_wrappers(gateway: Gateway, fakes: Fakes) -> None:
          "--max-retries", "0", "--timeout", "none", "--kill-grace", "125s",
          "--env", "XDG_CONFIG_HOME=/c", "--pass-env", "TOKEN_NAME", "--label", "round=r-1",
          "--json", "--", "/bin/review-respond", "_job", "r-1"],
-        ["show", "jb-aaaaaaaa", "--json"],
+        ["show", "jb-aaaaaaaa", "--no-output", "--json"],
         ["cancel", "jb-aaaaaaaa", "--json"],
         ["resolve", "jb-aaaaaaaa", "--as", "done", "--actor", "auto:review-respond", "--json"],
     ]  # fmt: skip
     with pytest.raises(GatewayError):
         gateway.jobsctl.add([], queue="respond", unique_key="k", cwd="/state")
+
+
+def test_every_jobsctl_wrapper_caps_its_output(
+    gateway: Gateway, fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from review_respond import gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "JOBSCTL_OUTPUT_CAP", 2048)
+    for command in ("add", "show", "cancel", "resolve"):
+        fakes.script("jobsctl", command, stdout="x" * 20000, schema=False)
+    answers = [
+        gateway.jobsctl.add(["/bin/review-respond", "_job", "r-1"], queue="q", unique_key="k",
+                            cwd="/state"),
+        gateway.jobsctl.show("jb-aaaaaaaa"),
+        gateway.jobsctl.cancel("jb-aaaaaaaa"),
+        gateway.jobsctl.resolve("jb-aaaaaaaa"),
+    ]  # fmt: skip
+    assert all(a.overflow and len(a.stdout) <= 4096 for a in answers)
 
 
 def test_claude_session_kinds(gateway: Gateway, fakes: Fakes) -> None:

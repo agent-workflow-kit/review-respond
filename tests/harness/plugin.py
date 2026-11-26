@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,6 +46,14 @@ class World:
         self.fakes = fakes
         self.procs = procs
         self.env = private_env(root, fakes)
+        # What ``Gateway.start_detached`` was asked to start (no process is started, unless the
+        # test carries the ``real_detached`` marker): argv, cwd, the env and the output path.
+        self.detached: list[dict[str, Any]] = []
+
+    def drop_tool(self, name: str) -> None:
+        """Remove a fake sibling from the PATH of this world (jobsctl is optional: without it a
+        round's job runs detached)."""
+        (self.fakes.bin_dir / name).unlink()
 
     @property
     def home(self) -> Path:
@@ -84,6 +93,37 @@ def world(
     # even when the code under test swallowed the exception.
     if request.node.get_closest_marker("provokes_guard") is None:
         guard.assert_no_violations(state)
+
+
+@pytest.fixture(autouse=True)
+def detached_recorder(
+    request: pytest.FixtureRequest, world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``Gateway.start_detached`` records its call and starts nothing, so a test that makes
+    ``check`` place a round never leaves a real process behind. Tests that want the real process
+    carry the ``real_detached`` marker."""
+    if request.node.get_closest_marker("real_detached") is not None:
+        return
+
+    def record(
+        self: Gateway,
+        argv: Sequence[str],
+        *,
+        cwd: str | os.PathLike[str],
+        out_fd: int,
+        env: Mapping[str, str] | None = None,
+    ) -> int:
+        world.detached.append(
+            {
+                "argv": list(argv),
+                "cwd": os.fspath(cwd),
+                "env": dict(self.env if env is None else env),
+                "out": os.readlink(f"/proc/self/fd/{out_fd}"),
+            }
+        )
+        return 2**22 + len(world.detached)  # a pid that no test process has
+
+    monkeypatch.setattr(Gateway, "start_detached", record)
 
 
 @pytest.fixture

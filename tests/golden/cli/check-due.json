@@ -16,6 +16,13 @@
       "pr": "git.example.test/org/repo#7",
       "started_round": null,
       "state": "waiting"
+    },
+    {
+      "errors": [],
+      "lease_held": false,
+      "pr": "git.example.test/org/repo#8",
+      "started_round": "rd-abcdefgh",
+      "state": "queued"
     }
   ]
 }

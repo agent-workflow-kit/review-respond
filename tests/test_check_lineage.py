@@ -32,6 +32,12 @@ def config(world: World) -> Path:
     return write_config(world)
 
 
+@pytest.fixture(autouse=True)
+def detached(world: World) -> None:
+    """A due PR now gets a round: without jobsctl its job is placed detached (recorded only)."""
+    world.drop_tool("jobsctl")
+
+
 AG = "ag-cccccccc"
 WT = "wt-aaaaaaaa"
 
@@ -56,8 +62,10 @@ def test_an_original_agent_is_found_stored_and_the_pr_is_due(
     world.fakes.script("wtctl", "show", json=wt_record(WT, "feat/x"))
     code, doc = pass_with(world, capsys, config)
     assert code == 0
+    (started,) = sql(world, "SELECT id FROM rounds")
     assert pr_of(doc, PR7) == {
-        "pr": PR7, "state": "waiting", "started_round": None, "lease_held": False, "errors": [],
+        "pr": PR7, "state": "queued", "started_round": started[0], "lease_held": False,
+        "errors": [],
     }  # fmt: skip
     assert sql(world, "SELECT base_agent, agent_busy, block FROM prs") == [(AG, 0, None)]
 
@@ -89,7 +97,7 @@ def test_a_live_base_agent_keeps_the_pr_waiting_agent_live(
     pass_with(world, capsys, config)
     assert sql(world, "SELECT agent_busy FROM prs") == [(0,)]
     _, shown, _ = run(capsys, "show", PR7, config=config)
-    assert shown["pr"]["waiting_reason"] == "capacity"
+    assert shown["pr"]["state"] == "queued"  # due and started, no longer waiting
 
 
 def test_an_unreadable_agent_spawn_is_lower_failed_and_sets_no_block(

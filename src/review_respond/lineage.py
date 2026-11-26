@@ -384,6 +384,14 @@ def _store(
         )
 
 
+def reset_base(lease: Lease, pr: str, expect: str) -> bool:
+    """The PR's base agent ``expect`` is gone (a round ended ``agent_gone``): reset the stored
+    base, and mark its fork row torn down when it is ours. False when the stored base is no
+    longer ``expect`` (another command moved it)."""
+    _require_lease(lease, pr)
+    return _store(lease, pr, expect, None, False, lost=True)
+
+
 def mark_unreadable(lease: Lease, pr: str) -> None:
     """A sibling could not be asked at all (``GatewayError``): store ``agent_busy`` = 1 and keep the
     stored base, as for any unreadable agent-spawn answer."""

@@ -46,6 +46,10 @@ _TERM_GRACE = 2.0  # how long a group gets to exit after SIGTERM
 _KILL_WAIT = 2.0  # how long to wait for the pipes after SIGKILL (a member may have escaped)
 
 
+# Detached children this process started and has not seen end (``Gateway.start_detached``).
+_DETACHED: list[subprocess.Popen[bytes]] = []
+
+
 class GatewayError(Exception):
     """A call was refused before anything started (a malformed or unsafe argument)."""
 
@@ -239,6 +243,46 @@ class Gateway:
                 self._stop_group(proc)
             raise
         return self._result(tokens, proc.returncode, out, err, timed_out, overflow)
+
+    def start_detached(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: PathLike,
+        out_fd: int,
+        env: Mapping[str, str] | None = None,
+    ) -> int:
+        """Start ``argv`` as a detached process and return its pid without waiting for it.
+
+        The child is a session and process-group leader of its own (nothing a caller or its
+        terminal signals reaches it), reads ``/dev/null`` and writes stdout and stderr to
+        ``out_fd``; no shell, no inherited descriptor but those, and an environment that is exactly
+        ``env`` (default: the gateway's). ``on_spawn`` sees the pid like for any child. The child is
+        reaped by a later call of this method if this process is still running by then (a short
+        command that exits first leaves it to init): no zombie accumulates in a long-lived caller.
+        Raises ``SpawnError`` when the operating system refuses.
+        """
+        tokens = self._validate(argv, None, cwd, env)
+        child_env = dict(self.env if env is None else env)
+        for old in [p for p in _DETACHED if p.poll() is not None]:
+            _DETACHED.remove(old)
+        try:
+            proc = subprocess.Popen(
+                tokens,
+                stdin=subprocess.DEVNULL,
+                stdout=out_fd,
+                stderr=out_fd,
+                cwd=os.fspath(cwd),
+                env=child_env,
+                start_new_session=True,
+                close_fds=True,
+            )
+        except (OSError, ValueError) as exc:
+            raise SpawnError(f"cannot start {tokens[0]!r}: {exc}") from exc
+        _DETACHED.append(proc)
+        if self._on_spawn is not None:
+            self._on_spawn(proc.pid)
+        return proc.pid
 
     def _read_bounded(
         self, proc: subprocess.Popen[bytes], limit: float | None, cap: int
@@ -452,6 +496,7 @@ FORGECTL_COMMENTS_CAP = 64 * 1024 * 1024
 # a stream that passes it stops the process and the result is ``overflow`` (``internal``).
 AGENT_SPAWN_OUTPUT_CAP = 8 * 1024 * 1024
 WTCTL_OUTPUT_CAP = 8 * 1024 * 1024
+JOBSCTL_OUTPUT_CAP = 8 * 1024 * 1024  # the documents of ``jobsctl`` are small
 
 
 class Forgectl(_Tool):
@@ -778,17 +823,22 @@ class Jobsctl(_Tool):
             args += ["--pass-env", _arg(name, "env name")]
         args += _labels(labels)
         args += _actor_flags(actor, ())
-        return self._run([*args, "--json", "--", *job_argv])
+        return self._run([*args, "--json", "--", *job_argv], max_output=JOBSCTL_OUTPUT_CAP)
 
     def show(self, job_id: str) -> Result:
-        return self._run(["show", _arg(job_id, "job id"), "--json"])
+        """The job's record; only its status is read, so its output tail is not asked for."""
+        return self._run(
+            ["show", _arg(job_id, "job id"), "--no-output", "--json"],
+            max_output=JOBSCTL_OUTPUT_CAP,
+        )
 
     def cancel(self, job_id: str, *, actor: str | None = None) -> Result:
-        return self._run(["cancel", _arg(job_id, "job id"), *_actor_flags(actor, ()), "--json"])
+        args = ["cancel", _arg(job_id, "job id"), *_actor_flags(actor, ()), "--json"]
+        return self._run(args, max_output=JOBSCTL_OUTPUT_CAP)
 
     def resolve(self, job_id: str, *, as_: str = "done", actor: str | None = None) -> Result:
         args = ["resolve", _arg(job_id, "job id"), "--as", _arg(as_, "status")]
-        return self._run([*args, *_actor_flags(actor, ()), "--json"])
+        return self._run([*args, *_actor_flags(actor, ()), "--json"], max_output=JOBSCTL_OUTPUT_CAP)
 
 
 class ClaudeSession(_Tool):

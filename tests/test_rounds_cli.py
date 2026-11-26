@@ -14,7 +14,13 @@ import pytest
 from review_respond import due
 from review_respond.cli import main
 from review_respond.rounds import Rounds, get_round, round_facts
-from review_respond.store import Store, open_state_dir, pr_digest, pr_lease_key
+from review_respond.store import (
+    Store,
+    open_state_dir,
+    pr_digest,
+    pr_lease_key,
+    round_lease_key,
+)
 from tests.harness.plugin import World
 from tests.test_check import (
     HOST,
@@ -164,10 +170,13 @@ def test_show_of_a_round_by_id_and_by_prefix_validates(
     seeded.rounds.record_agent(rid, "ag-abcdefgh")
     seeded.rounds.note_started(rid)
     fixed_times(world)
+    # a live process holds the round (its job): `show` does not finalize it and says so
+    job = seeded.store.try_acquire(round_lease_key(rid), heartbeat=None)
+    assert job is not None
     code, doc, _ = run(capsys, "show", rid, config=config)
     assert code == 0
     valid("show", doc)
-    assert doc["object_type"] == "round" and doc["finalize"] is None
+    assert doc["object_type"] == "round" and doc["finalize"] == "busy"
     shown = doc["round"]
     assert (shown["id"], shown["state"], shown["number"], shown["counted"]) == (
         rid,
@@ -184,6 +193,7 @@ def test_show_of_a_round_by_id_and_by_prefix_validates(
     gold(golden, "show-round", gold_doc)
     code, again, _ = run(capsys, "show", rid[:7], config=config)
     assert code == 0 and again["round"]["id"] == rid
+    job.release()
 
 
 def test_show_of_a_queued_round_has_no_head_and_validates(

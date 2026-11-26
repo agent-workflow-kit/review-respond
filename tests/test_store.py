@@ -1152,3 +1152,24 @@ def test_a_failed_private_write_leaves_no_file_so_a_retry_works(
     assert not (state.path / "prompts" / "rd-abcdefgh.md").exists()
     path = state.write_private_file("prompts", "rd-abcdefgh.md", b"hello")
     assert path.read_bytes() == b"hello"
+
+
+def test_a_planted_fifo_as_the_job_log_is_refused_instead_of_blocking(tmp_path: Path) -> None:
+    import signal
+
+    state = open_state_dir(tmp_path / "state")
+    os.close(state.open_private_log("jobs", "rd-seed0000.log"))  # creates the directory
+    os.mkfifo(state.path / "jobs" / "rd-abcdefgh.log", 0o600)
+
+    def hung(_sig: int, _frame: object) -> None:
+        raise AssertionError("open_private_log blocked on a FIFO")
+
+    old = signal.signal(signal.SIGALRM, hung)
+    signal.alarm(10)
+    try:
+        with pytest.raises(CliError) as caught:
+            state.open_private_log("jobs", "rd-abcdefgh.log")
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+    assert caught.value.code == "state_unsafe"

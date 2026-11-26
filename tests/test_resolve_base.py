@@ -462,8 +462,8 @@ def test_the_base_of_a_confirmed_round_is_resolved_not_researched(
 def test_a_second_round_forks_the_first_fork_with_no_extra_flags(
     env: Env, tools: Tools, fakes: Fakes, tmp_path: Path
 ) -> None:
-    """todo(#24): acceptance criterion 4's end-to-end process test (a real job forking the base
-    through the second round) belongs to #24; this one covers the argv of the resume only."""
+    """The argv of the resume only: the end-to-end process test (a real job forking the base
+    through the second round) is tests/test_placement_process.py, which #24 owns."""
     from tests.harness.spawn_run import started_doc
 
     set_stored(env, C1)
