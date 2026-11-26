@@ -137,6 +137,7 @@ class _Pass:
             settings, store.source, self.gateway, config=ctx.config, log=ctx.log
         )
         self.results: dict[str, _PrResult] = {}
+        self.fresh: set[str] = set()  # the rounds this pass started: housekeeping leaves them be
 
     def now(self) -> float:
         return self.store.clock.now().timestamp()
@@ -302,6 +303,11 @@ class _Pass:
         decision = due.decide(inputs)
         if not decision.due or decision.set_block is not None or decision.clear is not None:
             return False  # changed since it was evaluated: the next pass decides
+        try:
+            self.placement.jobsctl_present()  # a too old jobsctl is found before the round exists
+        except CliError as error:
+            result.errors.append(error.code)
+            return False
         # TODO(#37): the `pre-round` hooks run here; a veto or an escalation creates no round.
         machine = rounds.Rounds(lease, log=self.ctx.log)
         try:
@@ -311,6 +317,7 @@ class _Pass:
                 return False
             raise
         result.started_round = row.id
+        self.fresh.add(row.id)
         try:
             self.placement.submit(machine, row)
         except CliError as error:
@@ -341,7 +348,7 @@ class _Pass:
                 f"SELECT id FROM rounds WHERE state = 'queued'{where} ORDER BY created_at, id", args
             )
         ]
-        for round_id in queued:
+        for round_id in (r for r in queued if r not in self.fresh):
             self.lease.renew()
             self._guard(round_id, lambda rid=round_id: self._reconcile(fin, rid))
         running = [

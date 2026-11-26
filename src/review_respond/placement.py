@@ -37,7 +37,7 @@ from .config import Config
 from .deps import BY_TOOL, probe, safe_path
 from .durations import parse_duration
 from .errors import CliError
-from .gateway import Gateway, GatewayError
+from .gateway import Gateway, GatewayError, Result
 from .rounds import RoundRow, Rounds
 from .store import StateDir, pr_digest
 
@@ -94,6 +94,15 @@ def job_env(environ: Mapping[str, str], pass_env: list[str]) -> dict[str, str]:
         if name in environ and not name.upper().startswith("REVIEW_RESPOND_"):
             env[name] = environ[name]
     return env
+
+
+def _lower_error(result: Result) -> dict[str, object]:
+    """The sibling's own error object, or a placeholder when it printed none."""
+    doc = result.json
+    error = doc.get("error") if isinstance(doc, dict) else None
+    if isinstance(error, dict):
+        return dict(error)  # pyright: ignore[reportUnknownArgumentType]
+    return {"code": "unknown", "message": f"jobsctl add exited {result.returncode}"}
 
 
 def remove_output(state: StateDir, round_id: str, log: LogWriter | None = None) -> None:
@@ -191,11 +200,17 @@ class Placement:
                 actor="auto:review-respond",
             )
         except GatewayError as exc:
-            raise CliError("lower_failed", f"jobsctl add was not run: {exc}") from None
+            raise CliError(
+                "lower_failed",
+                "jobsctl add was not run",
+                lower={"code": "unknown", "message": str(exc)},
+            ) from None
         job = result.json.get("job") if isinstance(result.json, dict) else None
         job_id = job.get("id") if isinstance(job, dict) else None
         if not result.ok or not isinstance(job_id, str) or not JOB_RE.fullmatch(job_id):
-            raise CliError("lower_failed", "jobsctl add did not take the job")
+            raise CliError(
+                "lower_failed", "jobsctl add did not take the job", lower=_lower_error(result)
+            )
         rounds.record_job(row.id, job_id=job_id)
         return Submitted("jobsctl", job_id)
 

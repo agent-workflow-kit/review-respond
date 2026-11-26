@@ -21,8 +21,8 @@ from typing import Any, Final
 
 from . import prstate, rounds
 from .audit import AuditLog, LogWriter, open_jsonl_files
-from .finalizer import Finalizer
 from .errors import CliError
+from .finalizer import Finalizer
 from .output import Context, Outcome, sanitize_line
 from .prref import REPO_ID_RE, parse_pr
 from .store import Store
