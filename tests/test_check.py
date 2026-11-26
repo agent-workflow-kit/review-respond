@@ -222,6 +222,58 @@ def test_a_due_pr_over_the_cap_waits_for_capacity(
     assert len(world.detached) == 1
 
 
+def _two_due_prs(world: World, capsys: pytest.CaptureFixture[str], config: Path, c8: Any) -> None:
+    """PR 7 and PR 8 are due; ``jobs.max_running`` is 1, so only one starts."""
+    world.drop_tool("jobsctl")
+    script_prs(world.fakes, [pr_item(7), pr_item(8)])
+    script_comments(world.fakes, PR7, one_comment())
+    script_comments(world.fakes, PR8, c8)
+    run(capsys, "check", config=config)
+    set_agent(world, PR7)
+    set_agent(world, PR8)
+
+
+def _second_pass(world: World, capsys: pytest.CaptureFixture[str], config: Path, c8: Any) -> Any:
+    script_prs(world.fakes, [pr_item(7), pr_item(8)])
+    script_comments(world.fakes, PR7, one_comment())
+    script_comments(world.fakes, PR8, c8)
+    code, doc, _ = run(capsys, "check", config=config)
+    assert code == 0
+    return doc
+
+
+def test_due_prs_that_became_unhandled_together_start_in_pr_reference_order(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    c8 = one_comment("gh:rc:c8")
+    _two_due_prs(world, capsys, config, c8)
+    sql(world, "UPDATE comments SET unhandled_since = ?", OLD)
+    doc = _second_pass(world, capsys, config, c8)
+    assert pr_of(doc, PR7)["started_round"] is not None
+    assert pr_of(doc, PR8)["started_round"] is None
+
+
+def test_the_oldest_eligible_comment_of_a_pr_decides_when_it_starts(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    two = [
+        builders.thread(
+            "gh:rt:t8",
+            [
+                builders.comment("gh:rc:c8", "One.", created_at=LATER),
+                builders.comment("gh:rc:c9", "Two.", created_at=LATER),
+            ],
+        )
+    ]
+    _two_due_prs(world, capsys, config, two)
+    sql(world, "UPDATE comments SET unhandled_since = ? WHERE pr = ?", OLD + 100, PR7)
+    sql(world, "UPDATE comments SET unhandled_since = ? WHERE comment_id = 'gh:rc:c8'", OLD + 500)
+    sql(world, "UPDATE comments SET unhandled_since = ? WHERE comment_id = 'gh:rc:c9'", OLD)
+    doc = _second_pass(world, capsys, config, two)
+    assert pr_of(doc, PR8)["started_round"] is not None
+    assert pr_of(doc, PR7)["started_round"] is None
+
+
 def test_the_human_output_names_the_started_round_and_the_due_pr(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:

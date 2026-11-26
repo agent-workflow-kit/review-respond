@@ -12,9 +12,12 @@ from typing import Any
 
 import pytest
 
+from review_respond import check as check_module
 from review_respond import placement
 from review_respond.deps import DepStatus
+from review_respond.errors import CliError
 from review_respond.gateway import Gateway, SpawnError
+from review_respond.rounds import Rounds
 from review_respond.store import pr_digest
 from tests.harness import builders
 from tests.harness.fakes import assert_untrusted_only_in_files_or_stdin
@@ -112,6 +115,22 @@ def test_jobsctl_takes_the_job_with_every_documented_argument(
     assert world.detached == []
 
 
+def test_a_label_that_does_not_fit_is_left_off_with_a_warning(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = due_pr(world, capsys)
+    world.fakes.script("jobsctl", "add", json=add_doc())
+    monkeypatch.setattr(
+        placement.labels,
+        "job_labels",
+        lambda **_k: placement.labels.LabelSet((("owner", "review-respond"),), ("label_skipped",)),
+    )
+    next_pass(world, capsys, config)
+    (add,) = world.fakes.calls("jobsctl", "add")
+    assert add.flags["--label"] == ["owner=review-respond"]
+    assert any(e.get("code") == "label_skipped" for e in log_events(world))
+
+
 def test_the_job_command_line_and_environment_hold_no_untrusted_text(
     world: World, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -194,6 +213,57 @@ def test_a_jobsctl_that_prints_no_version_counts_as_absent_with_a_warning(
     next_pass(world, capsys, config)
     assert len(world.detached) == 1 and world.fakes.calls("jobsctl", "add") == []
     assert any(e.get("code") == "jobsctl_unusable" for e in log_events(world))
+
+
+def test_a_jobsctl_that_reads_version_zero_counts_as_absent_with_a_warning(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = due_pr(world, capsys)
+
+    def zero(*_a: Any, **_k: Any) -> DepStatus:
+        return DepStatus("jobsctl", False, "0.32.1", "0.0.0", True, None, True, "")
+
+    monkeypatch.setattr(placement, "probe", zero)
+    next_pass(world, capsys, config)
+    assert len(world.detached) == 1 and world.fakes.calls("jobsctl", "add") == []
+    assert any(e.get("code") == "jobsctl_unusable" for e in log_events(world))
+
+
+# ---- the due rule is decided again under the PR lease -------------------------------------------
+
+
+def test_a_pr_that_is_no_longer_due_under_its_lease_starts_no_round(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = due_pr(world, capsys)
+    original = check_module._Pass.start_rounds  # pyright: ignore[reportPrivateUsage]
+
+    def start_rounds(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # evaluate saw the PR due; a human command (here: its records going stale) changes that
+        sql(world, "UPDATE prs SET records_current = 0")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(check_module._Pass, "start_rounds", start_rounds)  # pyright: ignore
+    code, doc, _ = next_pass(world, capsys, config)
+    assert code == 0
+    assert pr_of(doc, PR7)["started_round"] is None
+    assert rounds_of(world) == [] and world.detached == []
+    assert world.fakes.calls("jobsctl", "add") == []
+
+
+def test_a_round_that_became_active_under_the_lease_is_not_an_error(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = due_pr(world, capsys)
+
+    def refuse(self: Any, *_a: Any, **_k: Any) -> Any:
+        raise CliError("refused", "a round is active", reason="round_active")
+
+    monkeypatch.setattr(Rounds, "create", refuse)
+    code, doc, _ = next_pass(world, capsys, config)
+    assert code == 0 and doc.get("error") is None
+    assert pr_of(doc, PR7)["started_round"] is None and pr_of(doc, PR7)["errors"] == []
+    assert rounds_of(world) == [] and world.detached == []
 
 
 # ---- detached -----------------------------------------------------------------------------------
@@ -340,6 +410,17 @@ def test_the_program_is_this_interpreter_when_no_script_is_found(
 ) -> None:
     monkeypatch.setattr(sys, "argv", ["pytest"])
     monkeypatch.setenv("PATH", "/nonexistent-dir")
+    assert placement.program() == [os.path.abspath(sys.executable), "-m", "review_respond"]
+
+
+def test_an_unrelated_script_on_the_path_is_not_the_program(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    other = tmp_path / "review-respond"
+    other.write_text("#!/bin/sh\n")
+    other.chmod(0o755)
+    monkeypatch.setattr(sys, "argv", ["/some/where/else.py"])
+    monkeypatch.setenv("PATH", str(tmp_path))
     assert placement.program() == [os.path.abspath(sys.executable), "-m", "review_respond"]
 
 

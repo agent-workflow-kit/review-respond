@@ -71,10 +71,13 @@ def program() -> list[str]:
     argv0 = sys.argv[0] if sys.argv else ""
     if os.path.basename(argv0) == PROGRAM and os.path.isabs(os.path.realpath(argv0)):
         return [os.path.abspath(argv0)]
+    # a `python -m review_respond` or editable run must not pick up an unrelated script on PATH
+    if sys.executable:
+        return [os.path.abspath(sys.executable), "-m", "review_respond"]
     found = shutil.which(PROGRAM, path=safe_path(os.environ.get("PATH")))
     if found is not None:
         return [os.path.abspath(found)]
-    return [os.path.abspath(sys.executable), "-m", "review_respond"]
+    raise CliError("internal", "cannot determine how to start review-respond")
 
 
 def job_argv(round_id: str, config: Path | None) -> list[str]:
@@ -152,8 +155,8 @@ class Placement:
             status = probe(self.gw, BY_TOOL["jobsctl"], required=False)
             if status.code == "tool_too_old":
                 raise CliError("tool_too_old", status.message)
-            self._jobsctl = status.found is not None
-            if status.unreadable and not self._jobsctl:
+            self._jobsctl = status.found is not None and not status.unreadable
+            if status.unreadable:
                 # on the PATH but silent or garbled: not usable, the job runs detached
                 self._warn("jobsctl_unusable")
         return self._jobsctl

@@ -496,6 +496,7 @@ FORGECTL_COMMENTS_CAP = 64 * 1024 * 1024
 # a stream that passes it stops the process and the result is ``overflow`` (``internal``).
 AGENT_SPAWN_OUTPUT_CAP = 8 * 1024 * 1024
 WTCTL_OUTPUT_CAP = 8 * 1024 * 1024
+JOBSCTL_OUTPUT_CAP = 8 * 1024 * 1024  # the documents of ``jobsctl`` are small
 
 
 class Forgectl(_Tool):
@@ -822,17 +823,22 @@ class Jobsctl(_Tool):
             args += ["--pass-env", _arg(name, "env name")]
         args += _labels(labels)
         args += _actor_flags(actor, ())
-        return self._run([*args, "--json", "--", *job_argv])
+        return self._run([*args, "--json", "--", *job_argv], max_output=JOBSCTL_OUTPUT_CAP)
 
     def show(self, job_id: str) -> Result:
-        return self._run(["show", _arg(job_id, "job id"), "--json"])
+        """The job's record; only its status is read, so its output tail is not asked for."""
+        return self._run(
+            ["show", _arg(job_id, "job id"), "--no-output", "--json"],
+            max_output=JOBSCTL_OUTPUT_CAP,
+        )
 
     def cancel(self, job_id: str, *, actor: str | None = None) -> Result:
-        return self._run(["cancel", _arg(job_id, "job id"), *_actor_flags(actor, ()), "--json"])
+        args = ["cancel", _arg(job_id, "job id"), *_actor_flags(actor, ()), "--json"]
+        return self._run(args, max_output=JOBSCTL_OUTPUT_CAP)
 
     def resolve(self, job_id: str, *, as_: str = "done", actor: str | None = None) -> Result:
         args = ["resolve", _arg(job_id, "job id"), "--as", _arg(as_, "status")]
-        return self._run([*args, *_actor_flags(actor, ()), "--json"])
+        return self._run([*args, *_actor_flags(actor, ()), "--json"], max_output=JOBSCTL_OUTPUT_CAP)
 
 
 class ClaudeSession(_Tool):

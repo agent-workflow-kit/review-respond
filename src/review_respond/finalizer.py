@@ -344,7 +344,7 @@ class Finalizer:
         doc = result.json
         record = doc.get("record", doc) if isinstance(doc, dict) else None
         path = record.get("path") if isinstance(record, dict) else None
-        if result.ok and isinstance(path, str) and os.path.isabs(path):
+        if result.ok and _usable_path(path):
             return path, "ok"
         return None, "unreadable"
 
@@ -363,7 +363,14 @@ class Finalizer:
         if not listed.ok or not isinstance(agents, list):
             self.log.warning("list_failed", round=row.id)
             return None
-        root = self._throwaway(row)[0] if row.base_agent_id is None else None
+        root: str | None = None
+        if row.base_agent_id is None:
+            root, found = self._throwaway(row)
+            if row.throwaway_id is not None and found == "unreadable":
+                # the throwaway cannot be asked: a live fresh agent cannot be told from none
+                self.log.warning("throwaway_unreadable", round=row.id)
+                self._step(row.id, "left_running")
+                return None
         accepted = [
             a["agent_id"]
             for a in agents  # pyright: ignore[reportUnknownVariableType]
@@ -407,6 +414,20 @@ class Finalizer:
             and isinstance(cwd, str)
             and cwd == os.path.realpath(root)
         )
+
+
+def _usable_path(path: object) -> bool:
+    """An absolute, normalized path with no control characters that the OS can encode: a record
+    path wtctl hands back is data, never trusted to be openable."""
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return False
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        return False
+    try:
+        path.encode("utf-8")  # a lone surrogate cannot be encoded
+    except UnicodeEncodeError:
+        return False
+    return os.path.normpath(path) == path or path == "/"
 
 
 def _error_code(doc: dict[str, Any]) -> str | None:

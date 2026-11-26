@@ -375,6 +375,9 @@ class _Pass:
         except GatewayError as exc:
             if self.ctx.log is not None:
                 self.ctx.log.warning("housekeeping_failed", key=f"{what}:{type(exc).__name__}")
+        except Exception as exc:  # noqa: BLE001 - one hostile answer must not stop the pass
+            if self.ctx.log is not None:
+                self.ctx.log.warning("housekeeping_failed", key=f"{what}:{type(exc).__name__}")
 
     def _reconcile(self, fin: Finalizer, round_id: str) -> None:
         row = rounds.get_round(self.store.conn, round_id)

@@ -16,7 +16,9 @@ from typing import Any
 import pytest
 
 from review_respond.cli import main
-from review_respond.store import Store, open_state_dir, round_lease_key
+from review_respond.finalizer import Finalizer
+from review_respond.store import Store, open_state_dir, pr_digest, round_lease_key
+from tests.harness.builders import pr_ref
 from tests.harness.jobsctl import JOB, add_doc, job_doc
 from tests.harness.plugin import World
 from tests.harness.spawn_run import outcome_doc
@@ -125,6 +127,24 @@ def test_a_queued_round_with_no_job_that_is_young_is_left_alone(
     assert calls(scene, "jobsctl") == [] and scene.world.detached == []
 
 
+def test_a_queued_round_with_no_job_is_left_alone_just_inside_the_submit_grace(
+    scene: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    age(scene, 110)
+    assert check(scene, capsys)[0] == 0
+    assert scene.round()["state"] == "queued" and scene.round()["job_id"] is None
+    assert calls(scene, "jobsctl") == [] and scene.world.detached == []
+
+
+def test_a_queued_round_with_no_job_is_submitted_again_just_past_the_submit_grace(
+    scene: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    age(scene, 130)
+    scene.fakes.script("jobsctl", "add", json=add_doc(created=False))
+    assert check(scene, capsys)[0] == 0
+    assert scene.round()["job_id"] == JOB
+
+
 def test_a_queued_round_with_no_job_is_submitted_again_with_jobsctl(
     scene: Scene, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -173,6 +193,7 @@ def test_a_jobsctl_job_that_is_not_over_keeps_the_round_queued(
     scene.fakes.script("jobsctl", "show", json=job_doc(status=held_status, detail=True))
     assert check(scene, capsys)[0] == 0
     assert scene.round()["state"] == "queued" and block(scene) is None
+    assert not {"jobsctl_unreadable", "jobsctl_unavailable"} & set(warnings(scene.world))
 
 
 JOB_ENDS = [
@@ -200,6 +221,39 @@ def test_a_jobsctl_job_that_ended_without_running_the_job_fails_the_round_job_lo
         "queued", "failed", "job_lost",
     )  # fmt: skip
     assert len(calls(scene, "jobsctl", "show")) == 1
+
+
+def test_check_for_one_pr_leaves_the_rounds_and_held_jobs_of_another_alone(
+    scene: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pr_b = pr_ref(8)
+    job_b, held_b = "jb-bbbbbbb2", "jb-ccccccc2"
+    scene.sql("UPDATE rounds SET job_id = ?", JOB)
+    scene.sql(
+        "INSERT INTO prs (pr, digest, host, repo, number, host_state, head_sha, head_ref,"
+        " head_repo, is_fork, base_ref, created_at, updated_at)"
+        " SELECT ?, ?, host, repo, 8, host_state, head_sha, head_ref, head_repo, is_fork,"
+        " base_ref, created_at, updated_at FROM prs WHERE pr = ?",
+        pr_b, pr_digest(pr_b), PR7,
+    )  # fmt: skip
+    insert = (
+        "INSERT INTO rounds (id, pr, number, state, trigger_kind, job_id, created_at, ended_at)"
+        " VALUES (?, ?, ?, ?, 'check', ?, ?, ?)"
+    )
+    scene.sql(insert, "rd-bbbbbbb2", pr_b, 2, "queued", job_b, OLD, None)
+    scene.sql(insert, "rd-bbbbbbb3", pr_b, 1, "escalated", held_b, OLD, time.time())
+    scene.fakes.script(
+        "jobsctl", "show", json=job_doc(status="failed", reason="lost", detail=True),
+        match={"positionals": {"job": JOB}},
+    )  # fmt: skip
+    script_reads(scene)
+    assert main(["check", "--json", "--config", str(scene.config), "--pr", PR7]) == 0
+    capsys.readouterr()
+    assert scene.round()["failure_reason"] == "job_lost"  # the checked PR was reconciled
+    assert scene.sql("SELECT state FROM rounds WHERE id = 'rd-bbbbbbb2'") == [("queued",)]
+    assert scene.sql("SELECT state FROM rounds WHERE id = 'rd-bbbbbbb3'") == [("escalated",)]
+    shown = [c.positionals["job"] for c in calls(scene, "jobsctl", "show")]
+    assert shown == [JOB] and calls(scene, "jobsctl", "resolve") == []
 
 
 def test_a_canceled_job_of_a_flagged_round_ends_it_canceled_with_the_stored_reason(
@@ -250,6 +304,19 @@ def test_an_answer_jobsctl_cannot_give_decides_nothing(
     assert check(scene, capsys)[0] == 0
     assert scene.round()["state"] == "queued" and block(scene) is None
     assert {"jobsctl_unreadable"} & set(warnings(scene.world))
+
+
+def test_an_oversized_jobsctl_answer_decides_nothing(
+    scene: Scene, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.gateway as gateway_mod
+
+    monkeypatch.setattr(gateway_mod, "JOBSCTL_OUTPUT_CAP", 2048)
+    scene.sql("UPDATE rounds SET job_id = ?", JOB)
+    scene.fakes.script("jobsctl", "show", stdout="x" * 20000, exit=10, schema=False)
+    assert check(scene, capsys)[0] == 0
+    assert scene.round()["state"] == "queued" and block(scene) is None
+    assert "jobsctl_unreadable" in warnings(scene.world)
 
 
 def test_a_stored_job_with_jobsctl_gone_from_the_machine_decides_nothing(
@@ -485,6 +552,56 @@ def test_a_done_run_whose_throwaway_cannot_be_asked_is_decided_next_pass(
     assert "throwaway_unreadable" in warnings(running.world)
 
 
+HOSTILE_PATHS = [
+    ("/tmp/a\x00b", "nul"),
+    ("/tmp/a\ud800b", "surrogate"),
+    ("/tmp/a\x01b", "control"),
+    ("/tmp/../a", "not-normalized"),
+]
+
+
+@pytest.mark.parametrize("path", [p for p, _ in HOSTILE_PATHS], ids=[i for _, i in HOSTILE_PATHS])
+def test_a_done_run_whose_throwaway_path_is_hostile_is_left_for_the_next_pass(
+    running: Scene, capsys: pytest.CaptureFixture[str], path: str
+) -> None:
+    ref = artifact_file(running, good_artifact())
+    script_show(running, show_after(running, artifact=ref))
+    wt_show(running, path=path)
+    code, doc = check(running, capsys)
+    assert code == 0 and doc.get("error") is None
+    assert running.round()["state"] == "running" and running.temp_files() != []
+    assert "throwaway_unreadable" in warnings(running.world)
+    assert "housekeeping_failed" not in warnings(running.world)
+
+
+@pytest.mark.parametrize(
+    "path", [p for p, _ in HOSTILE_PATHS[:2]], ids=[i for _, i in HOSTILE_PATHS[:2]]
+)
+def test_a_fresh_candidate_with_a_hostile_throwaway_path_leaves_the_round_running(
+    world: World, capsys: pytest.CaptureFixture[str], path: str
+) -> None:
+    sc = dead_before_agent(world, capsys)
+    sc.sql("UPDATE rounds SET base_agent_id = NULL")
+    wt_show(sc, path=path)
+    list_answer(sc, candidate(sc, forked_from=None, run_kind="respond", cwd=str(sc.root)))
+    code, _ = check(sc, capsys)
+    assert code == 0 and sc.round()["state"] == "running"
+    assert "throwaway_unreadable" in warnings(world)
+
+
+def test_an_unexpected_error_of_one_round_does_not_stop_the_pass(
+    running: Scene, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(*_a: Any, **_k: Any) -> None:
+        raise ValueError("embedded null byte")
+
+    monkeypatch.setattr(Finalizer, "finalize", boom)
+    code, _ = check(running, capsys)
+    assert code == 0
+    assert running.round()["state"] == "running"
+    assert "housekeeping_failed" in warnings(running.world)
+
+
 def test_a_live_agent_leaves_the_round_running_with_its_files(
     running: Scene, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -629,6 +746,17 @@ def test_several_candidates_record_none_and_warn_ambiguous_fork(
     assert calls(sc, "agent-spawn", "teardown") == [] and calls(sc, "agent-spawn", "stop") == []
 
 
+def test_no_more_than_ten_ambiguous_agent_ids_are_logged(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sc = dead_before_agent(world, capsys)
+    ids = [f"ag-fffffff{c}" for c in "2345672345"] + ["ag-ffffff22", "ag-ffffff23"]
+    list_answer(sc, *(candidate(sc, i) for i in ids))
+    assert check(sc, capsys)[0] == 0
+    (warn,) = [e for e in events(world, "warning") if e["code"] == "ambiguous_fork"]
+    assert warn["key"] == ",".join(sorted(ids)[:10]) and len(warn["key"].split(",")) == 10
+
+
 @pytest.mark.parametrize(
     "bad",
     [
@@ -724,6 +852,33 @@ def test_a_fresh_candidate_outside_the_throwaway_is_not_accepted(
     assert sc.round()["failure_reason"] == "job_lost"
 
 
+def test_a_fresh_candidate_with_an_unreadable_throwaway_leaves_the_round_running(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sc = dead_before_agent(world, capsys)
+    sc.sql("UPDATE rounds SET base_agent_id = NULL")
+    list_answer(sc, candidate(sc, forked_from=None, run_kind="respond", cwd=str(sc.root)))
+    sc.fakes.script(
+        "wtctl", "show", json={"error": {"code": "internal", "message": "x", "reason": None,
+        "details": None, "lower_error": None}}, exit=1, schema=False,
+    )  # fmt: skip
+    assert check(sc, capsys)[0] == 0
+    row = sc.round()
+    assert (row["state"], row["agent_id"]) == ("running", None)
+    assert "throwaway_unreadable" in warnings(world) and "left_running" in steps(world)
+    assert sc.temp_files() != []
+
+
+def test_a_fresh_candidate_with_no_recorded_throwaway_is_not_accepted(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sc = dead_before_agent(world, capsys)
+    sc.sql("UPDATE rounds SET base_agent_id = NULL, throwaway_id = NULL")
+    list_answer(sc, candidate(sc, forked_from=None, run_kind="respond", cwd=str(sc.root)))
+    assert check(sc, capsys)[0] == 0
+    assert sc.round()["failure_reason"] == "job_lost"
+
+
 # ---- the base after agent_gone, and held jobs ---------------------------------------------------
 
 
@@ -775,6 +930,29 @@ def test_a_held_job_of_an_escalated_round_is_resolved_done(
     assert resolve.positionals["job"] == JOB and resolve.flags["--as"] == "done"
     assert resolve.flags["--actor"] == "auto:review-respond"
     assert steps(running.world)[-1] == "job_resolved"
+
+
+@pytest.mark.parametrize(("hours", "resolved"), [(23, 1), (25, 0)])
+def test_only_a_held_job_of_a_round_that_ended_in_the_last_day_is_resolved(
+    scene: Scene, capsys: pytest.CaptureFixture[str], hours: int, resolved: int
+) -> None:
+    scene.sql(
+        "UPDATE rounds SET job_id = ?, state = 'escalated', ended_at = ?",
+        JOB,
+        time.time() - hours * 3600,
+    )
+    list_answer(scene)  # the PR's base agent is looked up now that no round is active
+    if resolved:  # outside the window jobsctl is not asked at all
+        scene.fakes.script("jobsctl", "show", json=job_doc(status="held", detail=True))
+        scene.fakes.script(
+            "jobsctl", "resolve",
+            json={"job": job_doc(status="done", reason="resolved"), "changed": True,
+                  "warnings": []},
+            schema=False,
+        )  # fmt: skip
+    assert check(scene, capsys)[0] == 0
+    assert len(calls(scene, "jobsctl", "resolve")) == resolved
+    assert len(calls(scene, "jobsctl", "show")) == resolved
 
 
 def test_a_job_that_is_not_held_is_not_resolved(
@@ -912,6 +1090,18 @@ def test_an_exit_code_that_is_not_a_number_ends_the_round_internal(
 ) -> None:
     doc = final_run(running, "failed")
     doc["runs"][0]["outcome"]["exit_code"] = "18"
+    script_show(running, doc, schema=False)
+    assert check(running, capsys)[0] == 0
+    row = running.round()
+    assert (row["state"], row["failure_reason"]) == ("failed", "internal")
+
+
+@pytest.mark.parametrize("code", [130, 143])
+def test_a_signal_exit_is_never_an_outcome_it_ends_the_round_internal(
+    running: Scene, capsys: pytest.CaptureFixture[str], code: int
+) -> None:
+    doc = final_run(running, "failed")
+    doc["runs"][0]["outcome"]["exit_code"] = code
     script_show(running, doc, schema=False)
     assert check(running, capsys)[0] == 0
     row = running.round()

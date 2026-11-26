@@ -633,7 +633,12 @@ class StateDir:
         try:
             fd = os.open(
                 name,
-                os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_APPEND
+                | os.O_NOFOLLOW
+                | os.O_NONBLOCK  # a planted FIFO must fail (ENXIO), never block
+                | os.O_CLOEXEC,
                 0o600,
                 dir_fd=dfd,
             )
