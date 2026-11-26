@@ -1281,6 +1281,43 @@ def test_a_prompt_file_that_cannot_be_written_ends_the_round_failed_internal(sce
     assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
 
 
+def test_an_exception_after_the_agent_is_recorded_stops_the_agent_and_fails_the_round(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.job as job_mod
+
+    def boom(self: Any, agent_id: str, deadline: float | None = None) -> Any:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(job_mod.Job, "_wait", boom)
+    script_reads(scene)
+    script_throwaway(scene)
+    script_resume(scene)
+    scene.fakes.script("agent-spawn", "stop", json=STOP_DOC, schema=False)
+    assert scene.job() == 1
+    failed_internal(scene, counted=1)
+    assert scene.round()["agent_id"] == FORK
+    stops = scene.calls("agent-spawn", "stop")
+    assert len(stops) == 1 and FORK in str(stops[0].positionals)
+
+
+def test_an_internal_failure_logs_the_exception_type(
+    scene: Scene, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import review_respond.job as job_mod
+
+    def boom(*args: Any, **kw: Any) -> Any:
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(job_mod, "write_prompt_file", boom)
+    script_reads(scene)
+    script_throwaway(scene)
+    assert scene.job() == 1
+    failed_internal(scene)
+    line = next(ln for ln in log_text(scene).splitlines() if '"job_internal"' in ln)
+    assert "OSError" in line and "disk went away" in line
+
+
 # R2: after SIGTERM the wait's real result is mapped, only a stop end (or none) is a SIGTERM end
 
 
@@ -1344,7 +1381,7 @@ def test_a_cancel_flag_set_during_the_read_cancels_before_start_and_delivers_not
     assert scene.calls("wtctl") == []
 
 
-# R6 and R10: the throwaway root bound, and the throwaway is recorded before the root is judged
+# R6 and R10: the throwaway root bound; recorded once it is this round's, before the root is judged
 
 
 def root_of(sc: Scene, size: int) -> Path:
@@ -1395,12 +1432,25 @@ FORGED: dict[str, Callable[[Scene], dict[str, Any]]] = {
 }
 
 
-@pytest.mark.parametrize("make", list(FORGED.values()), ids=list(FORGED))
-def test_a_forged_throwaway_record_fails_the_round_internal_and_stays_recorded(
-    scene: Scene, make: Callable[[Scene], dict[str, Any]]
+IDENTITY_FORGED = ("no-labels", "other-round", "no-app-label", "other-ref")
+
+
+@pytest.mark.parametrize("name", IDENTITY_FORGED)
+def test_a_throwaway_record_that_is_not_this_rounds_is_not_recorded_and_fails_internal(
+    scene: Scene, name: str
 ) -> None:
     script_reads(scene)
-    script_throwaway(scene, make(scene))
+    script_throwaway(scene, FORGED[name](scene))
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert scene.round()["throwaway_id"] is None  # not ours: nothing to clean up
+    assert scene.calls("agent-spawn") == []
+    assert "throwaway_unusable" in log_text(scene)
+
+
+def test_a_record_outside_base_dir_fails_internal_and_stays_recorded(scene: Scene) -> None:
+    script_reads(scene)
+    script_throwaway(scene, FORGED["outside-base-dir"](scene))
     assert scene.job() == 1
     failed_internal(scene)
     assert scene.round()["throwaway_id"] == "wt-throwaa2"
@@ -1408,12 +1458,12 @@ def test_a_forged_throwaway_record_fails_the_round_internal_and_stays_recorded(
     assert "throwaway_unusable" in log_text(scene)
 
 
-def test_a_reused_throwaway_record_fails_the_round_internal(scene: Scene) -> None:
+def test_a_reused_throwaway_record_is_not_recorded_and_fails_internal(scene: Scene) -> None:
     script_reads(scene)
     script_throwaway(scene, reused=True, schema=False)  # not valid per the pinned schema
     assert scene.job() == 1
     failed_internal(scene)
-    assert scene.round()["throwaway_id"] == "wt-throwaa2"
+    assert scene.round()["throwaway_id"] is None
     assert scene.calls("agent-spawn") == []
 
 

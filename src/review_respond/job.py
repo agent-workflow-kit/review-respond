@@ -236,6 +236,11 @@ def _plain_env(environ: Mapping[str, str], tokens: set[str]) -> dict[str, str]:
     return child_env(environ, tokens)
 
 
+def _describe(exc: BaseException) -> str:
+    """The exception's type and a sanitized, length-capped message, for the log."""
+    return f"{type(exc).__name__}: {sanitize(str(exc), max_chars=200)}"[:256]
+
+
 class Job:
     def __init__(self, ctx: Context, settings: Config, store: Store, round_id: str) -> None:
         state = store.source
@@ -285,8 +290,8 @@ class Job:
             raise CliError("not_found", "no round matches")
         return row
 
-    def _warn(self, code: str) -> None:
-        self.log.warning(code, round=self.rid)
+    def _warn(self, code: str, detail: str | None = None) -> None:
+        self.log.warning(code, round=self.rid, key=detail)
 
     def run(self) -> int:
         on_event = self.log.lease_callback()
@@ -363,10 +368,11 @@ class Job:
             return self._running(started)
         except CliError as error:
             if error.code != "lease_lost":
-                self._fail_internal()
+                self._fail_internal(error)
             raise
-        except Exception:  # an OSError of a file write, a bug: the round must not stay running
-            self._fail_internal()
+        except Exception as exc:  # an OSError, a bug: the round must not stay running
+            self._stop_recorded_agent()  # a recorded agent would outlive the failed round
+            self._fail_internal(exc)
             return 1
 
     def _prepare_local(self, row: RoundRow, digest: str) -> int | None:
@@ -533,9 +539,18 @@ class Job:
 
     # -- running -----------------------------------------------------------------------------
 
-    def _fail_internal(self) -> None:
+    def _stop_recorded_agent(self) -> None:
+        """Best effort: stop the recorded agent unless its run is known to be over."""
+        if self.agent_id is None or self.agent_done:
+            return
+        try:
+            self._stop(self.agent_id)
+        except Exception as exc:
+            self._warn("job_stop_failed", _describe(exc))
+
+    def _fail_internal(self, exc: BaseException | None = None) -> None:
         """An unexpected failure after the round started: end it ``failed`` (``internal``)."""
-        self._warn("job_internal")
+        self._warn("job_internal", None if exc is None else _describe(exc))
         try:
             self.rounds.to_failed(self.rid, "internal", counted=self.started)
         except Exception:
@@ -606,8 +621,12 @@ class Job:
         if record.get("object_type") != "throwaway" or tw_id is None or path is None:
             self._warn("throwaway_unreadable")
             return self._failed_internal()
+        if not self._is_ours(row, doc, record):
+            self._warn("throwaway_unusable")  # not this round's: nothing of ours to clean up
+            return self._failed_internal()
         try:
-            # recorded before anything is judged: a refused throwaway is left for the cleanup (#26)
+            # recorded once it is this round's, before the root is judged: a refused throwaway
+            # is left for the cleanup (#26)
             self.rounds.record_throwaway(self.rid, tw_id)
         except ValueError:  # not a plain identifier: nothing to record
             self._warn("throwaway_unreadable")
@@ -619,20 +638,22 @@ class Job:
         self.root = root
         return tw_id, root
 
-    def _usable_root(
-        self, row: RoundRow, doc: dict[str, Any], record: dict[str, Any], path: str
-    ) -> str | None:
-        """The throwaway's root when its wtctl record is this round's own and the root is usable,
-        else None. Fields the documented record shape leaves null (``ref``, ``base_dir``) are not
-        compared."""
+    def _is_ours(self, row: RoundRow, doc: dict[str, Any], record: dict[str, Any]) -> bool:
+        """The wtctl record is this round's own: not ``reused``, this round's labels, and its
+        ``ref`` is the head sha when the record carries one."""
         want = labels.throwaway_labels(role="round", round_id=self.rid).labels
         if doc.get("reused") is True or not all(
             labels.has_label(record.get("labels"), k, v) for k, v in want
         ):
-            return None
+            return False
         ref = record.get("ref")
-        if ref is not None and ref != row.head_sha:
-            return None
+        return ref is None or ref == row.head_sha
+
+    def _usable_root(
+        self, row: RoundRow, doc: dict[str, Any], record: dict[str, Any], path: str
+    ) -> str | None:
+        """The throwaway's root when its path lies under the record's ``base_dir`` (when the record
+        carries one) and the root is usable, else None."""
         base = record.get("base_dir")
         if isinstance(base, str) and not Path(os.path.realpath(path)).is_relative_to(
             os.path.realpath(base)
