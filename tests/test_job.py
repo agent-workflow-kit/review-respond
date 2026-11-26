@@ -135,6 +135,10 @@ def make_round(
         lease.release()
     finally:
         store.close()
+    conn = sqlite3.connect(state / "state.db")
+    conn.execute("UPDATE prs SET block = NULL")  # the `no_agent` block of the check that set it up
+    conn.commit()
+    conn.close()
     root = world.root / "tw" / "throw1"
     root.mkdir(parents=True)
     root.chmod(0o700)
@@ -195,7 +199,9 @@ def waited(sc: Scene, outcome: str, **more: Any) -> dict[str, Any]:
 def script_wait(sc: Scene, outcome: str = "done", *, exit: int | None = None, **kw: Any) -> None:
     run = outcome_doc(outcome)
     code = run["exit_code"] if exit is None else exit
-    sc.fakes.script("agent-spawn", "wait", json=waited(sc, outcome), exit=code, **kw)
+    sc.fakes.script(
+        "agent-spawn", "wait", json=waited(sc, outcome), exit=code, schema="agent-spawn/cli/wait.json", **kw
+    )
 
 
 def artifact_file(sc: Scene, doc: dict[str, Any] | bytes) -> dict[str, Any]:
@@ -310,3 +316,108 @@ def test_the_session_flags_labels_and_cwd_of_the_fork(scene: Scene) -> None:
     (wait,) = scene.calls("agent-spawn", "wait")
     assert wait.positionals["agent_id"] == FORK
     assert not any("REVIEW_RESPOND" in k for c in scene.calls() for k in c.env)
+
+
+# ---- every run outcome, end to end ---------------------------------------------------------------
+
+
+def launch_error(exit: int, code: str, reason: str | None = None) -> Callable[[Scene], None]:
+    def go(sc: Scene) -> None:
+        script_reads(sc)
+        script_throwaway(sc)
+        sc.fakes.script("agent-spawn", "resume", json=error_doc(code, reason=reason), exit=exit)
+
+    return go
+
+
+def after_launch(outcome: str, **kw: Any) -> Callable[[Scene], None]:
+    def go(sc: Scene) -> None:
+        script_reads(sc)
+        script_throwaway(sc)
+        script_resume(sc, working=kw.pop("working", True))
+        script_wait(sc, outcome, **kw)
+
+    return go
+
+
+def wait_envelope(exit: int, code: str) -> Callable[[Scene], None]:
+    def go(sc: Scene) -> None:
+        script_reads(sc)
+        script_throwaway(sc)
+        script_resume(sc)
+        sc.fakes.script("agent-spawn", "wait", json=error_doc(code), exit=exit)
+
+    return go
+
+
+def wtctl_fails(sc: Scene) -> None:
+    script_reads(sc)
+    sc.fakes.script(
+        "wtctl", "create",
+        json={"error": {"code": "internal", "message": "boom", "reason": None,
+                        "details": None, "lower_error": None}},
+        exit=12, schema=False,
+    )  # fmt: skip
+
+
+def unknown_exit(sc: Scene) -> None:
+    script_reads(sc)
+    script_throwaway(sc)
+    script_resume(sc)
+    sc.fakes.script("agent-spawn", "wait", json=error_doc("internal"), exit=99, schema=False)
+
+
+# id, scripting, round state, failure reason, counted, job exit, comment state afterwards
+OUTCOME_CASES: list[tuple[str, Callable[[Scene], None], str, str | None, int, int, str]] = [
+    ("resume-10", launch_error(10, "not_found"), "failed", "agent_gone", 0, 12, "unhandled"),
+    ("resume-11", launch_error(11, "vetoed"), "failed", "vetoed", 0, 12, "unhandled"),
+    ("resume-12", launch_error(12, "launch_failed"), "failed", "launch_failed", 0, 12, "unhandled"),
+    ("resume-13-hook", launch_error(13, "escalated"), "escalated", None, 0, 13, "unhandled"),
+    ("resume-20-tainted", launch_error(20, "refused", "tainted"), "failed", "refused", 0, 12,
+     "unhandled"),
+    ("resume-20-live", launch_error(20, "refused", "live"), "failed", "refused", 0, 12,
+     "unhandled"),
+    ("resume-2", launch_error(2, "usage"), "failed", "internal", 0, 1, "unhandled"),
+    ("wtctl-12", wtctl_fails, "failed", "throwaway_failed", 0, 12, "unhandled"),
+    ("wait-13-blocked", after_launch("blocked"), "escalated", None, 1, 13, "unhandled"),
+    ("wait-13-needs-input", after_launch("needs-input"), "escalated", None, 1, 13, "unhandled"),
+    ("wait-14", after_launch("exited-unreported"), "failed", "unreported", 1, 12, "unhandled"),
+    ("wait-15", after_launch("killed"), "failed", "agent_failed", 1, 12, "unhandled"),
+    ("wait-16", after_launch("timeout"), "failed", "timeout", 1, 12, "unhandled"),
+    ("wait-17", after_launch("lost"), "failed", "agent_lost", 1, 12, "unhandled"),
+    ("wait-18", after_launch("failed"), "failed", "agent_failed", 1, 12, "unhandled"),
+    ("wait-18-not-working", after_launch("failed", working=False), "failed", "agent_failed",
+     1, 12, "unhandled"),
+    ("wait-10", wait_envelope(10, "not_found"), "failed", "agent_lost", 1, 12, "unhandled"),
+    ("wait-11", wait_envelope(11, "vetoed"), "failed", "vetoed", 1, 12, "unhandled"),
+    ("wait-12", wait_envelope(12, "launch_failed"), "failed", "launch_failed", 1, 12,
+     "unhandled"),
+    ("wait-99", unknown_exit, "failed", "internal", 1, 1, "unhandled"),
+]
+
+
+@pytest.mark.parametrize(
+    "script, state, reason, counted, job_exit, comment",
+    [c[1:] for c in OUTCOME_CASES],
+    ids=[c[0] for c in OUTCOME_CASES],
+)
+def test_every_run_outcome_ends_the_round_as_the_table_says(
+    scene: Scene,
+    script: Callable[[Scene], None],
+    state: str,
+    reason: str | None,
+    counted: int,
+    job_exit: int,
+    comment: str,
+) -> None:
+    script(scene)
+    assert scene.job() == job_exit
+    row = scene.round()
+    assert row["state"] == state
+    assert row["failure_reason"] == reason and row["counted"] == counted
+    assert scene.comment_states()[C1] == comment
+    assert scene.temp_files() == []  # the prompt and the profile are gone on every path
+    if state == "failed":
+        assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
+    if state == "escalated":
+        assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("escalated",)]
