@@ -621,6 +621,36 @@ class StateDir:
             os.close(dfd)
         return self.path / subdir / name
 
+    def open_private_log(self, subdir: str, name: str) -> int:
+        """Open (creating it 0600) ``<state>/<subdir>/<name>`` for appending and return the
+        descriptor, which the caller closes. For the output of a detached job. Never follows a
+        symlink; an existing file must be a regular, one-link file of this user (a restart of the
+        same round appends to it). ``subdir`` and ``name`` are single plain names."""
+        for part in (subdir, name):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", part):
+                raise ValueError("not a plain file name")
+        dfd = _open_dir(self.path / subdir, euid=self.euid, create=True, dir_fd=self.fd)
+        try:
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=dfd,
+            )
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != self.euid:
+                    raise _unsafe(f"{self.path / subdir / name} is not a plain file of this user")
+                os.fchmod(fd, 0o600)
+            except BaseException:
+                os.close(fd)
+                raise
+            return fd
+        except OSError:
+            raise _unsafe(f"cannot open {self.path / subdir / name}") from None
+        finally:
+            os.close(dfd)
+
     def remove_private_file(self, subdir: str, name: str) -> bool:
         """Delete ``<state>/<subdir>/<name>``; ``False`` when it or the directory is missing."""
         for part in (subdir, name):

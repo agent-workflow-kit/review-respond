@@ -6,9 +6,14 @@ It reports which PRs are due and starts nothing.
 
 Seams owned by later issues:
 
-- TODO(#24): start a round for each due PR (oldest due first, while capacity remains), with the
-  `pre-round` hooks; `started_round` is always null until then. A due PR is reported with the state
-  the PR state table derives for it (`waiting`, `capacity`) and listed in the human output.
+- Step 4 (#24): a round is started for each due PR, oldest due first (the oldest time an eligible
+  comment became unhandled), while `jobs.max_running` queued plus running rounds are not reached;
+  a due PR over the cap stays `waiting` (`capacity`), marked `DUE` in the human output. The job is
+  placed by `placement.Placement` (jobsctl or detached). TODO(#37): the `pre-round` hooks run
+  between the due rule and the round row; a PR whose hooks vetoed or escalated is `waiting`.
+- Step 5 (#24): housekeeping reconciles queued rounds, finalizes running rounds whose job is gone
+  and resolves held jobs of escalated rounds (`finalizer.py`). TODO(#25): the closed-PR stop;
+  TODO(#29): expiry and the `remote_moved` comparison; TODO(#26): the cleanup of throwaways.
 - Before the due rule, a PR with eligible comments and no round or record in progress gets
   `lineage.resolve_base` (agent-spawn `show`/`list`, wtctl `show`): it stores `prs.base_agent` and
   the `agent_busy` observation the rule reads. When agent-spawn cannot be read the PR reports
@@ -17,7 +22,7 @@ Seams owned by later issues:
   fires `post-attention` (it is logged as a warning meanwhile).
 - `RoundFacts` come from the rounds table (`rounds.round_facts`); TODO(#29): the open record
   comes from the records table; `pending_state` log events belong to #29.
-- Step 5 (housekeeping) and step 6 (hook delivery) arrive with the issues that own them.
+- Step 6 (hook delivery) arrives with TODO(#37).
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -34,9 +39,11 @@ from .audit import format_ts
 from .config import Config
 from .detect import Detection, HostResult, StoredPr, get_pr
 from .errors import EXIT_FAILED, EXIT_OK, CliError
+from .finalizer import Finalizer
 from .gateway import AgentSpawn, Gateway, GatewayError, Wtctl
 from .handled import HandledSet
 from .output import Context, Outcome, sanitize_line
+from .placement import Placement
 from .prref import host_of, parse_pr
 from .store import Lease, Store, pass_lease_key, pr_digest, pr_lease_key
 from .validate import child_env
@@ -50,12 +57,14 @@ class _PrResult:
     errors: list[str] = field(default_factory=lambda: [])
     due: bool = False
     why: str = ""
+    started_round: str | None = None
+    oldest_since: float = 0.0  # the oldest time an eligible comment became unhandled (step 4)
 
     def document(self) -> dict[str, Any]:
         return {
             "pr": self.pr,
             "state": self.state,
-            "started_round": None,  # TODO(#24)
+            "started_round": self.started_round,
             "lease_held": self.lease_held,
             "errors": list(dict.fromkeys(self.errors)),
         }
@@ -68,6 +77,7 @@ class _Report:
     error: CliError | None = None
     already_running: bool = False
     dry_run: bool = False
+    rounds_started: int = 0
 
     def payload(self) -> dict[str, Any]:
         doc: dict[str, Any] = {
@@ -89,11 +99,17 @@ class _Report:
             extra = "".join(f" [{w}]" for w in host["warnings"])
             lines.append(f"host {host['host']}{code}{extra}")
         for item in self.prs:
-            mark = (" DUE" if item.due else "") + (" lease_held" if item.lease_held else "")
+            mark = (
+                (f" started {item.started_round}" if item.started_round else "")
+                + (" DUE" if item.due and item.started_round is None else "")
+                + (" lease_held" if item.lease_held else "")
+            )
             errors = "".join(f" !{e}" for e in item.errors)
             lines.append(f"{item.pr} {item.state}{mark}{errors}")
-        due_count = sum(1 for p in self.prs if p.due)
-        lines.append(f"check: {len(self.prs)} PRs, {due_count} due")
+        due_count = sum(1 for p in self.prs if p.due and p.started_round is None)
+        lines.append(
+            f"check: {len(self.prs)} PRs, {self.rounds_started} rounds started, {due_count} due"
+        )
         if self.error is not None:
             lines.append(f"error: {self.error.code}: {self.error.message}")
         return "".join(sanitize_line(line) + "\n" for line in lines)
@@ -115,6 +131,12 @@ class _Pass:
         self.leases: dict[str, Lease] = {}  # the PR leases held right now
         self.report = _Report()  # what the pass has found so far (printed if it stops at exit 12)
         self.before = self._states()
+        if store.source is None:
+            raise CliError("internal", "check needs the state directory")
+        self.placement = Placement(
+            settings, store.source, self.gateway, config=ctx.config, log=ctx.log
+        )
+        self.results: dict[str, _PrResult] = {}
 
     def now(self) -> float:
         return self.store.clock.now().timestamp()
@@ -164,6 +186,7 @@ class _Pass:
         is only derived and nothing is written), then the derived state."""
         self.lease.renew()  # a lost pass lease is exit 1 lease_lost, never a quiet success
         result = _PrResult(pr, "idle", lease_held=pr_lease is None, errors=list(errors))
+        self.results[pr] = result
         conn = self.store.conn
         open_pr = get_pr(conn, pr)
         if open_pr is None:
@@ -179,6 +202,8 @@ class _Pass:
             )
             applied = due.apply(pr_lease, pr, inputs)
             result.due, result.why = applied.due, applied.why
+            if applied.due and inputs.eligible:
+                result.oldest_since = min(c.since for c in inputs.eligible)
         result.state = prstate.derive(conn, self.settings, pr, self.now()).state
         self._log_state(result)
         return result
@@ -221,19 +246,155 @@ class _Pass:
                 if item.refused:  # TODO(#37): post-attention teardown_refused
                     self.ctx.log.warning("teardown_refused", pr=item.pr)
 
-    def _log_state(self, result: _PrResult) -> None:
+    def _log_state(self, result: _PrResult, why: str | None = None) -> None:
         before = self.before.get(result.pr)
         if self.ctx.log is None or before == result.state:
             return
+        self.before[result.pr] = result.state
         self.ctx.log.emit(
             "pr_state",
             {
                 "pr": result.pr,
                 "from": before,
                 "to": result.state,
-                "reason": result.why or "listed",
+                "reason": why or result.why or "listed",
             },
         )
+
+    # -- step 4: start the due rounds ------------------------------------------------------
+
+    def _active_rounds(self) -> int:
+        return int(
+            self.store.conn.execute(
+                "SELECT count(*) FROM rounds WHERE state IN ('queued', 'running')"
+            ).fetchone()[0]
+        )
+
+    def start_rounds(self, only: str | None = None) -> None:
+        """Start a round for each due PR, oldest due first, while capacity remains. Each start
+        runs under the PR's lease (taken without waiting) and decides again from the stored rows:
+        a human command may have changed the PR since it was evaluated."""
+        report = self.report
+        candidates = sorted(
+            (r for r in self.results.values() if r.due and (only is None or r.pr == only)),
+            key=lambda r: (r.oldest_since, r.pr),
+        )
+        for result in candidates:
+            self.lease.renew()
+            if self._active_rounds() >= self.settings.jobs.max_running:
+                break  # over the cap the PR stays `waiting` (capacity)
+            with self.scope(result.pr) as free:
+                if not free:
+                    result.lease_held = True
+                    continue
+                if self._start_one(result, self.leases[result.pr]):
+                    report.rounds_started += 1
+
+    def _start_one(self, result: _PrResult, lease: Lease) -> bool:
+        conn = self.store.conn
+        inputs = due.load_inputs(
+            conn,
+            self.settings,
+            result.pr,
+            now=self.now(),
+            facts=rounds.round_facts(conn, result.pr),
+        )
+        decision = due.decide(inputs)
+        if not decision.due or decision.set_block is not None or decision.clear is not None:
+            return False  # changed since it was evaluated: the next pass decides
+        # TODO(#37): the `pre-round` hooks run here; a veto or an escalation creates no round.
+        machine = rounds.Rounds(lease, log=self.ctx.log)
+        try:
+            row = machine.create(result.pr, trigger="check", base_agent_id=inputs.base_agent)
+        except CliError as error:
+            if error.code == "refused" and error.reason == "round_active":
+                return False
+            raise
+        result.started_round = row.id
+        try:
+            self.placement.submit(machine, row)
+        except CliError as error:
+            if error.code in ("lease_lost", "state_unsafe", "version_skew"):
+                raise
+            # the round stays queued: the reconcile submits its job again once it is 2 minutes old
+            result.errors.append(error.code)
+            if self.ctx.log is not None:
+                self.ctx.log.warning("submit_failed", round=row.id, key=error.code)
+        result.state = prstate.derive(conn, self.settings, result.pr, self.now()).state
+        self._log_state(result, "round_started")
+        return True
+
+    # -- step 5: housekeeping ---------------------------------------------------------------
+
+    def housekeeping(self, only: str | None = None) -> None:
+        """Reconcile queued rounds, finalize running rounds whose job is gone and resolve held
+        jobs of escalated rounds. TODO(#25): stop the rounds of closed PRs; TODO(#29): end expired
+        and closed records and compare the head of a record's PR (`remote_moved`); TODO(#26): the
+        cleanup of throwaways and forks. A failure of one round is logged and does not stop the
+        others."""
+        fin = Finalizer(self.ctx, self.settings, self.store, placement=self.placement)
+        conn = self.store.conn
+        where, args = ("", ()) if only is None else (" AND pr = ?", (only,))
+        queued = [
+            r[0]
+            for r in conn.execute(
+                f"SELECT id FROM rounds WHERE state = 'queued'{where} ORDER BY created_at, id", args
+            )
+        ]
+        for round_id in queued:
+            self.lease.renew()
+            self._guard(round_id, lambda rid=round_id: self._reconcile(fin, rid))
+        running = [
+            r[0]
+            for r in conn.execute(
+                f"SELECT id FROM rounds WHERE state = 'running'{where} ORDER BY created_at, id",
+                args,
+            )
+        ]
+        for round_id in running:
+            self.lease.renew()
+            self._guard(round_id, lambda rid=round_id: fin.finalize(rid))
+        self._guard("jobs", lambda: fin.resolve_held_jobs(only))
+        self._guard("bases", lambda: self._reset_lost_bases(only))
+
+    def _guard(self, what: str, work: Callable[[], object]) -> None:
+        try:
+            work()
+        except CliError as error:
+            if error.code in ("lease_lost", "state_unsafe", "version_skew"):
+                raise
+            if self.ctx.log is not None:
+                self.ctx.log.warning("housekeeping_failed", key=f"{what}:{error.code}")
+        except GatewayError as exc:
+            if self.ctx.log is not None:
+                self.ctx.log.warning("housekeeping_failed", key=f"{what}:{type(exc).__name__}")
+
+    def _reconcile(self, fin: Finalizer, round_id: str) -> None:
+        row = rounds.get_round(self.store.conn, round_id)
+        if row is None or row.state != "queued":
+            return
+        with self.scope(row.pr) as free:
+            if not free:
+                return
+            row = rounds.get_round(self.store.conn, round_id)
+            if row is not None and row.state == "queued":
+                fin.reconcile_queued(row, self.leases[row.pr])
+
+    def _reset_lost_bases(self, only: str | None) -> None:
+        """A round that ended ``agent_gone`` (its base agent is gone) resets the PR's base, once
+        and only while the stored base is still that agent."""
+        where, args = ("", ()) if only is None else (" AND r.pr = ?", (only,))
+        found = self.store.conn.execute(
+            "SELECT DISTINCT r.pr, r.base_agent_id FROM rounds r JOIN prs p ON p.pr = r.pr"
+            " WHERE r.state = 'failed' AND r.failure_reason = 'agent_gone'"
+            f" AND r.base_agent_id IS NOT NULL AND p.base_agent = r.base_agent_id{where}",
+            args,
+        ).fetchall()
+        for pr, base in found:
+            with self.scope(pr) as free:
+                if free and lineage.reset_base(self.leases[pr], pr, base):
+                    if self.ctx.log is not None:
+                        self.ctx.log.warning("base_lost", pr=pr)
 
     # -- the pass -------------------------------------------------------------------------
 
@@ -262,7 +423,10 @@ class _Pass:
                     continue
                 with self.scope(pr) as free:
                     report.prs.append(self.evaluate(pr, self.leases[pr] if free else None, errors))
+        self.start_rounds()
+        self.housekeeping()
         self.teardown()
+        # TODO(#37): step 6, deliver the queued hook events
         if detected.all_failed:
             report.error = CliError("all_hosts_failed", "no host could be read")
         return report
@@ -304,6 +468,8 @@ class _Pass:
             warnings = ["read_failed"] if errors else []
             report.hosts.append({"host": host, "ok": True, "code": None, "warnings": warnings})
             report.prs.append(self.evaluate(pr, self.leases[pr], errors))
+        self.start_rounds(pr)
+        self.housekeeping(pr)
         return report
 
     def _host_failed(self, report: _Report, host: str, code: str) -> _Report:
@@ -361,7 +527,7 @@ def _finish(ctx: Context, report: _Report, started: str) -> Outcome:
                 "finished_at": format_ts(ctx.store.clock.now()) if ctx.store else started,
                 "already_running": report.already_running,
                 "prs": len(report.prs),
-                "rounds_started": 0,  # TODO(#24)
+                "rounds_started": report.rounds_started,
                 "errors": errors,
             },
             level="warn" if report.error is not None else "info",
