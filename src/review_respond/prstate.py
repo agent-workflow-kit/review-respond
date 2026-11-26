@@ -16,6 +16,7 @@ from . import due
 from .audit import format_ts
 from .config import Config
 from .detect import StoredPr, get_pr
+from .errors import CliError
 from .handled import CommentRecord, parse_instant, read_records, stored_body
 from .output import sanitize_line
 from .store import Store
@@ -64,7 +65,9 @@ def counts(conn: sqlite3.Connection, pr: str) -> dict[str, int]:
     return {"unhandled": row[0], "seen": row[1], "ineligible": row[2], "edited": row[3]}
 
 
-def pr_object(conn: sqlite3.Connection, config: Config, stored: StoredPr, now: float) -> dict[str, Any]:
+def pr_object(
+    conn: sqlite3.Connection, config: Config, stored: StoredPr, now: float
+) -> dict[str, Any]:
     """One PR state object (schemas/defs.json pr_state)."""
     derived = derive(conn, config, stored.pr, now)
     block = derived.inputs.block
@@ -113,6 +116,13 @@ def stored_prs(conn: sqlite3.Connection) -> list[StoredPr]:
     refs = [r[0] for r in conn.execute("SELECT pr FROM prs ORDER BY pr")]
     found = (get_pr(conn, ref) for ref in refs)
     return [row for row in found if row is not None]
+
+
+def stored_prs_by_ref(conn: sqlite3.Connection, pr: str) -> StoredPr:
+    found = get_pr(conn, pr)
+    if found is None:
+        raise CliError("not_found", "no stored PR matches")
+    return found
 
 
 def comment_records(store: Store, pr: str) -> list[CommentRecord]:

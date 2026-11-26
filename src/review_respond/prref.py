@@ -24,13 +24,16 @@ _URL_RE: Final = re.compile(
     rf"https://({_HOST})((?:/(?!\.\.?(?:/|$))[A-Za-z0-9._-]+)+?)(?:/-)?/(?:pull|merge_requests)"
     rf"/({_NUMBER})/?"
 )
-# `<project path>#N` without the host: resolved against the stored PRs by `show`
-SHORT_REF_RE: Final = re.compile(rf"(?!\.\.?(?:/|#))[A-Za-z0-9._-]+(?:/(?!\.\.?(?:/|#))[A-Za-z0-9._-]+)*#{_NUMBER}")
+REPO_ID_RE: Final = re.compile(f"{_HOST}{_PATH}")
 _MAX_CHARS: Final = 2048
 
 
 def _checked(text: str) -> str:
-    if not text or len(text) > _MAX_CHARS or any(not ch.isprintable() or ch.isspace() for ch in text):
+    if (
+        not text
+        or len(text) > _MAX_CHARS
+        or any(not ch.isprintable() or ch.isspace() for ch in text)
+    ):
         raise CliError("usage", "a PR reference is one line of printable text without spaces")
     return text
 

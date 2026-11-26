@@ -15,12 +15,14 @@ from typing import Any, NoReturn
 from . import __version__
 from .actor import check_decision_ids, check_human_only, default_actor, parse_actor
 from .audit import AuditLog, JsonlFile, LogWriter, open_jsonl_files
+from .check import handle as handle_check
 from .config import ConfigError, LoadedConfig, load_config
 from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
 from .output import PROG, Context, Outcome, emit, sanitize_line, warn
 from .store import Store, open_state_dir, state_dir_path
 from .validate import handle as handle_validate
+from .views import handle_list, handle_show
 
 DESCRIPTION = (
     "Respond to review comments on your own pull requests, with fixes and replies you confirm."
@@ -31,7 +33,12 @@ Handler = Callable[[Context, argparse.Namespace], Outcome]
 
 # Commands implemented so far, by canonical name. Each later issue registers its handler here
 # (one line each); a command with no handler exits 1 `internal` with a clear message.
-HANDLERS: dict[str, Handler] = {"validate": handle_validate}
+HANDLERS: dict[str, Handler] = {
+    "check": handle_check,
+    "list": handle_list,
+    "show": handle_show,
+    "validate": handle_validate,
+}
 
 PR_STATES = ("idle", "settling", "queued", "running", "pending", "waiting", "closed")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
