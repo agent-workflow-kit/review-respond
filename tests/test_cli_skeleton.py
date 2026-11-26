@@ -127,8 +127,9 @@ def test_job_is_hidden_from_top_level_help(capsys: pytest.CaptureFixture[str]) -
             assert name in out
 
 
-# validate is implemented (tests/test_validate.py), check, list and show in tests/test_check.py
-IMPLEMENTED = {"validate", "check", "list", "show"}
+# validate is implemented (tests/test_validate.py), check, list and show in tests/test_check.py,
+# the hidden _job in tests/test_job.py
+IMPLEMENTED = {"validate", "check", "list", "show", "_job"}
 
 
 @pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c not in IMPLEMENTED])
