@@ -487,7 +487,8 @@ def wait_for_call(fakes: Fakes, command: str, seconds: float = 30.0) -> None:
 
 def start_check(world: World, config: Path, *extra: str) -> subprocess.Popen[str]:
     proc = subprocess.Popen(
-        [sys.executable, "-m", "review_respond", "check", "--json", "--config", str(config), *extra],
+        [sys.executable, "-m", "review_respond", "check", "--json", "--config", str(config)]
+        + list(extra),
         env=world.env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, start_new_session=True,
     )  # fmt: skip

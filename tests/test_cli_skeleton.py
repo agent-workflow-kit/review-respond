@@ -127,8 +127,11 @@ def test_job_is_hidden_from_top_level_help(capsys: pytest.CaptureFixture[str]) -
             assert name in out
 
 
-# validate is implemented (tests/test_validate.py)
-@pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c != "validate"])
+# validate is implemented (tests/test_validate.py), check, list and show in tests/test_check.py
+IMPLEMENTED = {"validate", "check", "list", "show"}
+
+
+@pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c not in IMPLEMENTED])
 def test_unimplemented_command_exits_1_with_message(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -365,7 +368,7 @@ def test_explicit_auto_actor_on_tty_is_still_automatic(
 # ---- human_only: each of the four flags --------------------------------------------------
 
 HUMAN_ONLY_CASES = [
-    ("yes", ["check", "--yes"]),
+    ("yes", ["pending", "--yes"]),
     ("force", ["respond", "host/o/r#1", "--force"]),
     ("allow-sensitive", ["confirm", "rp-aaaaaaaa", "--allow-sensitive"]),
     ("allow-sensitive", ["approve", "rp-aaaaaaaa", "--allow-sensitive"]),
@@ -1110,7 +1113,8 @@ def test_dry_run_is_accepted_only_where_documented(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code = run(capsys, *argv_for(command, "--dry-run"))[0]
-    assert code == (1 if command in DRY_RUN else 2)
+    # `check --dry-run` is implemented: with no state directory it prints an empty result
+    assert code == (0 if command == "check" else 1 if command in DRY_RUN else 2)
 
 
 @pytest.mark.parametrize("command", [*COMMANDS, "_job"])

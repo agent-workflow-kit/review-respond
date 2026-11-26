@@ -539,7 +539,7 @@ def test_config_warnings_are_logged_even_under_quiet(
     world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("REVIEW_RESPOND_NOT_A_THING", "1")
-    assert main(["check", "--quiet"]) == 1  # no handler yet: internal
+    assert main(["reject", "rp-aaaaaaaa", "--quiet"]) == 1  # no handler yet: internal
     found = check_all(_state_path(world) / "log.jsonl", "review-respond/log.json")
     assert [(r["event"], r["code"], r["level"]) for r in found] == [
         ("warning", "env_ignored", "warn")
@@ -733,7 +733,7 @@ def test_no_fixture_comment_text_reaches_either_file(
             bad()
         assert SENTINEL not in str(caught.value)
     log_of(state).warning("env_ignored", key="REVIEW_RESPOND_NOT_A_THING")
-    main(["check", "--quiet"])
+    main(["reject", "rp-aaaaaaaa", "--quiet"])
     for name in ("audit.jsonl", "log.jsonl"):
         assert SENTINEL.encode() not in (state.path / name).read_bytes()
 
