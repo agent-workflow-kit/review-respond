@@ -89,6 +89,7 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             listed_at REAL NOT NULL DEFAULT 0,
             last_comments_read_at REAL,
             last_comments_attempt_at REAL,
+            last_show_attempt_at REAL,
             read_failures INTEGER NOT NULL DEFAULT 0,
             comment_count INTEGER NOT NULL DEFAULT 0,
             rev INTEGER NOT NULL DEFAULT 0

@@ -194,9 +194,12 @@ def pr_item(
     head_repo: str | None = ...,  # type: ignore[assignment]
     created_at: str = TS,
     updated_at: str = TS,
+    author: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """One `forgectl prs` item. `head_repo` defaults to the PR's repo (not a fork)."""
+    """One `forgectl prs` item. `head_repo` defaults to the PR's repo (not a fork). The author is
+    you: the account the tests configure for the host (`acct-me`, `acct-me-b` on `HOST_B`)."""
     full = f"{host}/{repo}"
+    mine = author or (ME if host != HOST_B else {**ME, "id": "acct-me-b"})
     return {
         "pr": f"{full}#{number}",
         "pr_id": f"PR_kwDOexample{number}",
@@ -204,7 +207,7 @@ def pr_item(
         "number": number,
         "url": f"https://{host}/{repo}/pull/{number}",
         "title": f"Change {number}",
-        "author": ME,
+        "author": mine,
         "state": state,
         "draft": False,
         "labels": [],

@@ -489,8 +489,18 @@ def test_an_error_code_that_is_not_a_plain_name_cannot_reach_the_log_or_result(
         schema=False,
         match={"flags": {"--host": HOST}},
     )
-    result = make(gateway, lease).run().hosts[0]
+    files = open_jsonl_files(store.source)  # type: ignore[arg-type]
+    log = LogWriter(files[1], clock=gateway.clock)
+    result = make(gateway, lease, log=log).run().hosts[0]
     assert result.code == "bad_output"
+    files[0].close()
+    files[1].close()
+    text = (store.state_path / "log.jsonl").read_text()
+    assert "INJECT" not in text
+    records = [json.loads(line) for line in text.splitlines()]
+    assert [(r["event"], r["host"], r["code"]) for r in records] == [
+        ("host_failed", HOST, "bad_output")
+    ]
 
 
 # ---- closed and merged PRs ---------------------------------------------------------------
@@ -561,14 +571,15 @@ def test_show_for_a_different_pr_than_asked_is_ignored(
     assert rows(store)[ref]["host_state"] == "open"
 
 
-def test_a_closed_pr_is_never_reopened_by_a_stale_listing_row(
+def test_a_listing_row_that_says_open_reopens_a_stored_closed_pr(
     gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
 ) -> None:
     ref = insert_pr(store, 8, host_state="closed")
     script_prs(fakes, [pr_item(8)])
     script_comments(fakes, ref)
     make(gateway, lease).run()
-    # the host lists it as open now (reopened): the listing is the newer fact
+    # a PR can be reopened on the host: a complete listing of open PRs that names it is the newer
+    # fact (the spec only forbids inferring a close from anything but closed or merged)
     assert rows(store)[ref]["host_state"] == "open"
 
 
@@ -770,7 +781,7 @@ def test_read_comments_failure_changes_no_record_but_counts_the_failure(
     assert row["last_comments_attempt_at"] == gateway.clock.now().timestamp()
 
 
-def test_lower_failed_reaches_the_cli_envelope_with_exit_12(
+def test_a_stubbed_handler_raising_lower_failed_prints_the_exit_12_error_envelope(
     gateway: Gateway,
     fakes: Fakes,
     store: Store,
@@ -784,6 +795,8 @@ def test_lower_failed_reaches_the_cli_envelope_with_exit_12(
                  exit=12)  # fmt: skip
     detection = make(gateway, lease)
 
+    # Only the error envelope is checked: a stubbed handler lets the CliError reach cli.main. This
+    # makes no claim about the result object of the real `check` command (#17).
     def check(_ctx: Context, _args: argparse.Namespace) -> Outcome:
         detection.read_comments(ref)
         return Outcome()
@@ -1068,7 +1081,10 @@ def test_refresh_pr_stores_the_show_facts(
 ) -> None:
     ref = pr_ref(7)
     fakes.script("forgectl", "show", json=builders.forgectl_show(pr=ref, head_sha=builders.HEAD_B))
-    stored = make(gateway, lease).refresh_pr(ref)
+    refreshed = make(gateway, lease).refresh_pr(ref)
+    stored = refreshed.stored
+    assert stored is not None and not refreshed.not_yours
+    assert refreshed.author_id == "acct-me"
     assert (stored.pr, stored.head_sha, stored.is_fork, stored.host_state) == (
         ref,
         builders.HEAD_B,
@@ -1101,3 +1117,671 @@ def test_refresh_pr_failure_is_lower_failed_and_stores_nothing(
     assert caught.value.code == "lower_failed"
     assert caught.value.lower is not None and caught.value.lower["code"] == lower_code
     assert rows(store) == {}
+
+
+# ---- review round 1: hardened parsers, rotation, guarded reads ------------------------------
+
+from review_respond import gateway as gateway_mod  # noqa: E402
+from review_respond.gateway import Result  # noqa: E402
+from tests.harness import schemas as pinned_schemas  # noqa: E402
+
+
+def as_result(doc: Any) -> Result:
+    return Result(argv=("forgectl", "x"), returncode=0, stdout="", stderr="", json=doc)
+
+
+def whoami_script(fakes: Fakes, doc: dict[str, Any], *, exit: int = 0) -> None:
+    fakes.script("forgectl", "whoami", json=doc, exit=exit, schema=False)
+
+
+# R1: a lone surrogate never reaches the database
+
+
+def test_text_refuses_a_string_that_does_not_encode() -> None:
+    with pytest.raises(detect_mod._Bad):
+        detect_mod._text("a\udc80b", "x", 10)
+    with pytest.raises(detect_mod._Bad):
+        detect_mod._opt_text("a\udc80b", "x", 10, one_line=True)
+    assert detect_mod._text("naïve 日本語", "x", 20) == "naïve 日本語"
+
+
+def test_a_lone_surrogate_in_a_listing_fails_only_that_host(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    script_prs(fakes, [pr_item(1, head_ref="a\udc80b")], schema=False)
+    other = pr_item(5, host=HOST_B)
+    script_prs(fakes, [other], host=HOST_B)
+    script_comments(fakes, other["pr"])
+    result = make(gateway, lease, config=settings(hosts=[HOST, HOST_B])).run()
+    failed, ok = result.hosts
+    assert (failed.ok, failed.code) == (False, "bad_output")
+    assert ok.ok and ok.attempted == (other["pr"],)
+    assert set(rows(store)) == {other["pr"]}
+
+
+def test_a_lone_surrogate_in_a_comment_fails_the_read_as_bad_output(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = insert_pr(store, 7, comment_count=2)
+    doc = builders.forgectl_comments(
+        [builders.thread("gh:rt:T1", [builders.comment("gh:rc:C1", "x\udc80y")])], pr=ref
+    )
+    fakes.script("forgectl", "comments", json=doc, schema=False)
+    with pytest.raises(CliError) as caught:
+        make(gateway, lease).read_comments(ref)
+    assert caught.value.lower is not None and caught.value.lower["code"] == "bad_output"
+    assert rows(store)[ref]["comment_count"] == 2
+
+
+@pytest.mark.parametrize("where", ["login", "path"])
+def test_a_lone_surrogate_in_a_comment_login_or_path_fails_the_read(
+    where: str, gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = insert_pr(store, 7)
+    author = {**builders.REVIEWER, "login": "bad\udc80"} if where == "login" else None
+    thread = builders.thread(
+        "gh:rt:T1",
+        [builders.comment("gh:rc:C1", "b", author=author)],
+        path="a\udc80" if where == "path" else "src/a.py",
+    )
+    fakes.script(
+        "forgectl", "comments", json=builders.forgectl_comments([thread], pr=ref), schema=False
+    )
+    with pytest.raises(CliError) as caught:
+        make(gateway, lease).read_comments(ref)
+    assert caught.value.lower is not None and caught.value.lower["code"] == "bad_output"
+
+
+def test_an_encode_error_inside_a_host_pass_fails_that_host_as_bad_output(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = detect_mod._parse_listing
+
+    def parse(result: Result, host: str, account: str | None = None) -> Any:
+        if host == HOST:
+            raise UnicodeEncodeError("utf-8", "\udc80", 0, 1, "surrogates not allowed")
+        return real(result, host, account)
+
+    monkeypatch.setattr(detect_mod, "_parse_listing", parse)
+    script_prs(fakes, [])
+    script_prs(fakes, [], host=HOST_B)
+    result = make(gateway, lease, config=settings(hosts=[HOST, HOST_B])).run()
+    assert [(h.host, h.ok, h.code) for h in result.hosts] == [
+        (HOST, False, "bad_output"),
+        (HOST_B, True, None),
+    ]
+
+
+# R2: parsers are as strict as the pinned schemas
+
+
+def _whoami_doc() -> dict[str, Any]:
+    doc = builders.forgectl_whoami_hosts(HOST)
+    doc["errors"] = [builders.host_error(HOST_B, "auth_required")]
+    return doc
+
+
+def _listing_parse(doc: Any) -> None:
+    detect_mod._parse_listing(as_result(doc), HOST)
+
+
+def _show_parse(doc: Any) -> None:
+    detect_mod._parse_facts(doc, "show", show=True)
+
+
+def _whoami_parse(doc: Any) -> None:
+    detect_mod._parse_whoami(as_result(doc))
+
+
+def _comments_parse(doc: Any) -> None:
+    detect_mod._parse_comments(as_result(doc), builders.PR)
+
+
+# (schema id, fixture, parser)
+FIXTURES: dict[str, tuple[str, Callable[[], Any], Callable[[Any], None]]] = {
+    "prs": ("forgectl/cli/prs.json", lambda: builders.forgectl_prs([pr_item(1)]), _listing_parse),
+    "show": ("forgectl/cli/show.json", builders.forgectl_show, _show_parse),
+    "whoami": ("forgectl/cli/whoami.json", _whoami_doc, _whoami_parse),
+    "comments": (
+        "forgectl/cli/comments.json",
+        lambda: builders.real_shape_comments(),
+        _comments_parse,
+    ),
+}
+
+
+def _objects(node: Any, path: tuple[Any, ...] = ()) -> Iterator[tuple[Any, ...]]:
+    if isinstance(node, dict):
+        yield path
+        for key, value in node.items():  # pyright: ignore[reportUnknownVariableType]
+            yield from _objects(value, (*path, key))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):  # pyright: ignore[reportUnknownVariableType]
+            yield from _objects(value, (*path, index))
+
+
+def _at(doc: Any, path: tuple[Any, ...]) -> Any:
+    for step in path:
+        doc = doc[step]
+    return doc
+
+
+def _mutations(doc: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    import copy
+
+    for path in _objects(doc):
+        for key in list(_at(doc, path)):
+            mutated = copy.deepcopy(doc)
+            del _at(mutated, path)[key]
+            yield f"drop {path}/{key}", mutated
+        mutated = copy.deepcopy(doc)
+        _at(mutated, path)["zz_extra"] = 1
+        yield f"extra {path}", mutated
+
+
+def _both_reject(schema: str, parse: Callable[[Any], None], doc: Any) -> None:
+    from jsonschema import ValidationError
+
+    with pytest.raises(ValidationError):
+        pinned_schemas.validate(schema, doc)
+    with pytest.raises((detect_mod._Bad, detect_mod._HostFailed)):
+        parse(doc)
+
+
+@pytest.mark.parametrize("name", sorted(FIXTURES))
+def test_every_fixture_is_valid_and_every_required_or_extra_key_mutation_is_rejected_by_both(
+    name: str,
+) -> None:
+    schema, fixture, parse = FIXTURES[name]
+    pinned_schemas.validate(schema, fixture())
+    parse(fixture())  # the valid fixture parses
+    count = 0
+    for _label, mutated in _mutations(fixture()):
+        _both_reject(schema, parse, mutated)
+        count += 1
+    assert count > 8
+
+
+def _set(doc: dict[str, Any], path: tuple[Any, ...], value: Any) -> dict[str, Any]:
+    import copy
+
+    out = copy.deepcopy(doc)
+    _at(out, path[:-1])[path[-1]] = value
+    return out
+
+
+VALUE_CASES: dict[str, tuple[str, tuple[Any, ...], Any]] = {
+    "prs_url_http": ("prs", ("items", 0, "url"), "http://x.example.test/pull/1"),
+    "prs_url_too_short": ("prs", ("items", 0, "url"), "https://"),
+    "prs_author_login_empty": ("prs", ("items", 0, "author", "login"), ""),
+    "prs_author_id_bad": ("prs", ("items", 0, "author", "id"), "a b"),
+    "prs_author_is_bot_text": ("prs", ("items", 0, "author", "is_bot"), "no"),
+    "prs_draft_text": ("prs", ("items", 0, "draft"), "no"),
+    "prs_labels_not_text": ("prs", ("items", 0, "labels"), [1]),
+    "prs_labels_not_list": ("prs", ("items", 0, "labels"), "x"),
+    "prs_state_unknown": ("prs", ("items", 0, "state"), "weird"),
+    "prs_rate_limit_negative": ("prs", ("rate_limit", "remaining"), -1),
+    "prs_hosts_queried_bad": ("prs", ("hosts_queried", 0), "NOT A HOST"),
+    "show_backend": ("show", ("backend",), "bitbucket"),
+    "show_url": ("show", ("url",), "ftp://x"),
+    "show_fetch_ref": ("show", ("head_fetch_ref",), "refs/heads/main"),
+    "show_review_decision": ("show", ("review_decision",), "maybe"),
+    "show_approvals_negative": ("show", ("approvals",), -1),
+    "show_draft": ("show", ("draft",), 1),
+    "show_labels": ("show", ("labels",), [None]),
+    "show_author_login_empty": ("show", ("author", "login"), ""),
+    "show_merge_methods": ("show", ("merge_methods_allowed",), ["octopus"]),
+    "show_open_with_closed_at": ("show", ("closed_at",), builders.TS),
+    "whoami_token_source": ("whoami", ("hosts", 0, "token_source"), "bogus"),
+    "whoami_backend": ("whoami", ("hosts", 0, "backend"), "bitbucket"),
+    "whoami_login_empty": ("whoami", ("hosts", 0, "login"), ""),
+    "whoami_error_code": ("whoami", ("errors", 0, "code"), "weird_code"),
+    "whoami_error_host": ("whoami", ("errors", 0, "host"), "Not A Host"),
+    "whoami_scopes": ("whoami", ("hosts", 0, "scopes"), [1]),
+    "comments_side": ("comments", ("threads", 0, "side"), "up"),
+    "comments_start_line_zero": ("comments", ("threads", 0, "start_line"), 0),
+    "comments_line_zero": ("comments", ("threads", 0, "line"), 0),
+    "comments_commit_sha": ("comments", ("threads", 0, "commit_sha"), "abc"),
+    "comments_review_id": (
+        "comments",
+        ("threads", 0, "comments", 0, "review_id"),
+        "../x",
+    ),
+    "comments_author_login_empty": (
+        "comments",
+        ("threads", 0, "comments", 0, "author", "login"),
+        "",
+    ),
+    "comments_author_bot_text": (
+        "comments",
+        ("threads", 0, "comments", 0, "author", "is_bot"),
+        "no",
+    ),
+    "comments_pr_other": ("comments", ("pr",), "no spaces allowed"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(VALUE_CASES))
+def test_enum_pattern_and_bound_violations_are_rejected_by_the_parser_and_the_schema(
+    case: str,
+) -> None:
+    name, path, value = VALUE_CASES[case]
+    schema, fixture, parse = FIXTURES[name]
+    _both_reject(schema, parse, _set(fixture(), path, value))
+
+
+def test_a_side_of_null_and_a_start_line_are_accepted() -> None:
+    doc = builders.real_shape_comments()
+    doc = _set(doc, ("threads", 0, "start_line"), 2)
+    doc = _set(doc, ("threads", 0, "side"), "left")
+    pinned_schemas.validate("forgectl/cli/comments.json", doc)
+    _comments_parse(doc)
+    _comments_parse(_set(doc, ("threads", 0, "side"), None))
+
+
+# R3: a repeated host cannot forge the account id
+
+
+@pytest.mark.parametrize("duplicate", ["hosts", "errors", "both"])
+def test_a_host_listed_twice_by_whoami_is_bad_output(
+    duplicate: str, gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    doc = builders.forgectl_whoami_hosts(HOST)
+    if duplicate == "hosts":
+        doc = builders.forgectl_whoami_hosts(HOST, HOST, ids={HOST: "acct-forged"})
+    elif duplicate == "errors":
+        doc["errors"] = [builders.host_error(HOST_B), builders.host_error(HOST_B)]
+    else:
+        doc["errors"] = [builders.host_error(HOST)]
+    whoami_script(fakes, doc, exit=12 if doc["errors"] else 0)
+    with pytest.raises(CliError) as caught:
+        Detection(gateway, lease, Config.model_validate({})).run()
+    assert caught.value.code == "lower_failed"
+    assert forgectl_calls(fakes, "prs") == []  # nothing is read on a forged identity
+
+
+# R4: the show loop rotates and always runs once
+
+
+def test_unlisted_open_prs_rotate_so_a_blocked_front_cannot_starve_the_show_loop(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    refs = [insert_pr(store, n) for n in (1, 2, 3, 4)]
+    config = settings(budget=3)  # the listing and two shows per pass
+    for ref in refs[:2]:
+        fakes.script("forgectl", "show", json=builders.error_envelope("not_found", "gone"),
+                     exit=10, times=None, match={"positionals": {"pr": ref}})  # fmt: skip
+    fakes.script("forgectl", "show", json=builders.forgectl_show(pr=refs[2], state="open"),
+                 times=None, match={"positionals": {"pr": refs[2]}})  # fmt: skip
+    fakes.script("forgectl", "show", json=builders.forgectl_show(pr=refs[3], state="closed"),
+                 times=None, match={"positionals": {"pr": refs[3]}})  # fmt: skip
+    learned_in = None
+    for number in range(1, 4):
+        script_prs(fakes, [])
+        result = make(gateway, lease, config=config).run().hosts[0]
+        if refs[3] in result.closed:
+            learned_in = number
+            break
+        gateway.clock.advance(60)  # type: ignore[attr-defined]
+    assert learned_in == 2  # pass 1 asks #1 and #2, pass 2 starts with the never asked #3 and #4
+    stored = rows(store)
+    assert stored[refs[3]]["host_state"] == "closed"
+    assert stored[refs[0]]["last_show_attempt_at"] is not None  # stamped before the call
+
+
+def test_with_a_budget_of_one_every_pass_still_learns_one_closure(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    refs = [insert_pr(store, n) for n in (1, 2, 3)]
+    for ref in refs:
+        fakes.script("forgectl", "show", json=builders.forgectl_show(pr=ref, state="merged"),
+                     times=None, match={"positionals": {"pr": ref}})  # fmt: skip
+    config = settings(budget=1)
+    learned: list[tuple[str, ...]] = []
+    for _ in refs:
+        script_prs(fakes, [])
+        learned.append(make(gateway, lease, config=config).run().hosts[0].closed)
+        gateway.clock.advance(60)  # type: ignore[attr-defined]
+    assert learned == [(refs[0],), (refs[1],), (refs[2],)]
+    assert len(forgectl_calls(fakes, "show")) == 3
+
+
+# R5: hosts whoami reports as errors are failed hosts
+
+
+def test_hosts_whoami_reports_as_errors_are_failed_hosts_even_when_none_is_credentialed(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    doc = builders.forgectl_whoami_hosts(
+        errors=[
+            builders.host_error(HOST, "auth_required"),
+            builders.host_error(HOST_B, "network_error"),
+        ]
+    )
+    whoami_script(fakes, doc, exit=12)
+    result = Detection(gateway, lease, Config.model_validate({})).run()
+    assert [(h.host, h.ok, h.code) for h in result.hosts] == [
+        (HOST, False, "auth_required"),
+        (HOST_B, False, "network_error"),
+    ]
+    assert result.all_failed
+    assert forgectl_calls(fakes, "prs") == []
+
+
+def test_one_good_host_and_one_whoami_error_report_both(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    doc = builders.forgectl_whoami_hosts(
+        HOST, errors=[builders.host_error(HOST_B, "network_error")]
+    )
+    whoami_script(fakes, doc, exit=12)
+    script_prs(fakes, [])
+    files = open_jsonl_files(store.source)  # type: ignore[arg-type]
+    log = LogWriter(files[1], clock=gateway.clock)
+    result = Detection(gateway, lease, Config.model_validate({}), log=log).run()
+    files[0].close()
+    files[1].close()
+    assert [(h.host, h.ok, h.code) for h in result.hosts] == [
+        (HOST, True, None),
+        (HOST_B, False, "network_error"),
+    ]
+    assert not result.all_failed
+    events = [json.loads(x) for x in (store.state_path / "log.jsonl").read_text().splitlines()]
+    assert [(e["event"], e["host"], e["code"]) for e in events] == [
+        ("host_failed", HOST_B, "network_error")
+    ]
+
+
+# R6: an incomplete read is not a read
+
+
+def test_an_incomplete_read_keeps_the_count_the_failures_and_the_read_time(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = insert_pr(store, 7, comment_count=10, read_failures=2, last_comments_read_at=3.0)
+    threads = [builders.thread("gh:rt:T1", [builders.comment("gh:rc:C1", "a")])]
+    script_comments(fakes, ref, builders.forgectl_comments(threads, pr=ref, complete=False))
+    assert make(gateway, lease).read_comments(ref).complete is False
+    row = rows(store)[ref]
+    assert (row["comment_count"], row["read_failures"], row["last_comments_read_at"]) == (
+        10,
+        2,
+        3.0,
+    )
+    assert row["last_comments_attempt_at"] == gateway.clock.now().timestamp()
+
+
+def test_an_incomplete_read_with_more_comments_raises_the_count(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = insert_pr(store, 7, comment_count=1)
+    doc = builders.real_shape_comments(ref)
+    script_comments(fakes, ref, {**doc, "complete": False})
+    make(gateway, lease).read_comments(ref)
+    assert rows(store)[ref]["comment_count"] == 5
+
+
+# R7: no read of a fork or a closed PR
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [({"is_fork": 1}, "ineligible"), ({"host_state": "closed"}, "pr_closed"),
+     ({"host_state": "merged"}, "pr_closed")],
+    ids=["fork", "closed", "merged"],
+)  # fmt: skip
+def test_comments_of_a_fork_or_closed_pr_are_refused_before_any_call(
+    overrides: dict[str, Any],
+    reason: str,
+    gateway: Gateway,
+    fakes: Fakes,
+    store: Store,
+    lease: Lease,
+) -> None:
+    ref = insert_pr(store, 7, **overrides)
+    with pytest.raises(CliError) as caught:
+        make(gateway, lease).read_comments(ref)
+    assert (caught.value.code, caught.value.reason) == ("refused", reason)
+    assert fakes.calls("forgectl") == []
+    assert rows(store)[ref]["last_comments_attempt_at"] is None
+
+
+# R8: author checks
+
+
+def test_a_listing_item_by_another_author_fails_the_host(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    other = {"login": "someone", "id": "acct-other", "is_bot": False}
+    script_prs(fakes, [pr_item(1), pr_item(2, author=other)])
+    result = make(gateway, lease).run().hosts[0]
+    assert (result.ok, result.code) == (False, "bad_output")
+    assert rows(store) == {}
+
+
+def test_a_listing_item_that_is_not_open_fails_the_host(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    script_prs(fakes, [pr_item(1, state="closed")])
+    result = make(gateway, lease).run().hosts[0]
+    assert (result.ok, result.code) == (False, "bad_output")
+    assert rows(store) == {}
+
+
+def test_without_a_known_account_the_author_is_not_checked_for_refresh(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = pr_ref(7)
+    whoami_script(fakes, builders.forgectl_whoami_hosts(HOST, ids={HOST: None}))
+    fakes.script("forgectl", "show", json=builders.forgectl_show(pr=ref))
+    refreshed = make(gateway, lease, config=settings(accounts=False)).refresh_pr(ref)
+    assert refreshed.stored is not None and not refreshed.not_yours
+    assert refreshed.author_id == "acct-me"
+
+
+def test_refresh_pr_does_not_store_a_pr_of_another_author_and_says_so(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = pr_ref(7)
+    doc = builders.forgectl_show(pr=ref)
+    doc["author"] = {"login": "someone", "id": "acct-other", "is_bot": False}
+    fakes.script("forgectl", "show", json=doc)
+    refreshed = make(gateway, lease).refresh_pr(ref)
+    assert refreshed.stored is None
+    assert refreshed.not_yours
+    assert refreshed.author_id == "acct-other"
+    assert rows(store) == {}
+
+
+# R9: one-line text
+
+
+@pytest.mark.parametrize(
+    "char",
+    ["\x80", "\x85", "\x9f", " ", " ", "​", "‏", "‪", "‮",
+     "⁦", "⁩", "﻿", "\x00", "\x1f", "\x7f", "\n"],
+)  # fmt: skip
+def test_one_line_text_refuses_bidi_zero_width_c1_and_control_characters(char: str) -> None:
+    with pytest.raises(detect_mod._Bad):
+        detect_mod._text(f"feat{char}x", "ref", 255, one_line=True)
+
+
+@pytest.mark.parametrize("char", [" ", "é", "‧", " ", "‰", "⁥", "�"])
+def test_one_line_text_keeps_the_neighbours_of_the_refused_ranges(char: str) -> None:
+    assert detect_mod._text(f"a{char}b", "ref", 255, one_line=True) == f"a{char}b"
+
+
+def test_an_empty_ref_is_refused() -> None:
+    with pytest.raises(detect_mod._Bad):
+        detect_mod._parse_facts(pr_item(1, head_ref=""), "item")
+    bad = {**pr_item(1), "base": {"ref": ""}}
+    with pytest.raises(detect_mod._Bad):
+        detect_mod._parse_facts(bad, "item")
+
+
+def test_a_ref_with_a_bidi_control_fails_the_listing_host(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    script_prs(fakes, [pr_item(1, head_ref="feat/‮evil")])
+    result = make(gateway, lease).run().hosts[0]
+    assert (result.ok, result.code) == (False, "bad_output")
+
+
+# R10: timestamps are real instants
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-13-45T99:99:99Z", "2026-02-30T00:00:00Z", "2026-01-01T24:00:00Z",
+     "2026-01-01T12:00:00+25:00", "2026-01-01T12:00:00+01:60", "2026-00-10T00:00:00Z"],
+)  # fmt: skip
+def test_a_timestamp_that_matches_the_pattern_but_is_not_an_instant_is_refused(value: str) -> None:
+    with pytest.raises(detect_mod._Bad):
+        detect_mod._ts(value, "ts")
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-01-01T12:00:00Z", "2026-01-01t12:00:00.123456z", "2026-02-28T23:59:59+05:30",
+     "2016-12-31T23:59:60Z"],
+)  # fmt: skip
+def test_real_instants_are_accepted(value: str) -> None:
+    assert detect_mod._ts(value, "ts") == value
+
+
+def test_a_listing_with_an_impossible_created_at_fails_the_host(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    script_prs(fakes, [pr_item(1, created_at="2026-13-45T99:99:99Z")])
+    result = make(gateway, lease).run().hosts[0]
+    assert (result.ok, result.code) == (False, "bad_output")
+
+
+# R11: a full page may have cut older items
+
+
+def test_a_listing_of_exactly_the_limit_is_not_trusted_as_complete(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    gone = insert_pr(store, 5000)
+    items = [pr_item(n, is_fork=True, head_repo=f"{HOST}/f/r") for n in range(1, 1001)]
+    script_prs(fakes, items, complete=True)
+    result = make(gateway, lease).run().hosts[0]
+    assert result.ok and len(result.listed) == 1000
+    assert forgectl_calls(fakes, "show") == []  # no closure learned from an unreliable listing
+    assert rows(store)[gone]["host_state"] == "open"
+
+
+# R12 (g): output caps for the other reads
+
+
+def test_show_output_past_the_bound_is_lower_failed_too_large(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    fakes.script("forgectl", "show", stdout="x" * (9 * 1024 * 1024), schema=False)
+    with pytest.raises(CliError) as caught:
+        make(gateway, lease).refresh_pr(pr_ref(7))
+    assert caught.value.lower is not None and caught.value.lower["code"] == "output_too_large"
+    assert rows(store) == {}
+
+
+def test_show_output_past_the_bound_learns_no_closure(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    ref = insert_pr(store, 8)
+    script_prs(fakes, [])
+    fakes.script("forgectl", "show", stdout="x" * (9 * 1024 * 1024), schema=False)
+    result = make(gateway, lease).run().hosts[0]
+    assert result.ok and result.closed == ()
+    assert rows(store)[ref]["host_state"] == "open"
+
+
+def test_whoami_output_past_the_bound_is_lower_failed_too_large(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    fakes.script("forgectl", "whoami", stdout="x" * (9 * 1024 * 1024), schema=False)
+    with pytest.raises(CliError) as caught:
+        Detection(gateway, lease, Config.model_validate({})).run()
+    assert caught.value.lower is not None and caught.value.lower["code"] == "output_too_large"
+
+
+def test_comments_output_past_the_bound_fails_the_read_and_counts_the_failure(
+    gateway: Gateway,
+    fakes: Fakes,
+    store: Store,
+    lease: Lease,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gateway_mod, "FORGECTL_COMMENTS_CAP", 1024 * 1024)
+    ref = insert_pr(store, 7, comment_count=3)
+    fakes.script("forgectl", "comments", stdout="x" * (2 * 1024 * 1024), schema=False)
+    with pytest.raises(CliError) as caught:
+        make(gateway, lease).read_comments(ref)
+    assert caught.value.lower is not None and caught.value.lower["code"] == "output_too_large"
+    row = rows(store)[ref]
+    assert (row["comment_count"], row["read_failures"]) == (3, 1)
+
+
+# R12 (h): who writes what
+
+
+def test_a_blind_bump_between_a_cas_writers_read_and_write_makes_the_cas_fail(
+    gateway: Gateway, fakes: Fakes, store: Store, lease: Lease
+) -> None:
+    from review_respond.store import cas_update
+
+    ref = insert_pr(store, 7)
+    with lease.transaction() as conn:
+        seen_rev = detect_mod.get_pr(conn, ref).rev  # type: ignore[union-attr]
+    script_comments(fakes, ref)
+    make(gateway, lease).read_comments(ref)  # detection's blind stamps bump the rev
+    with lease.transaction() as conn:
+        assert not cas_update(conn, "prs", "pr", ref, seen_rev, {"host_state": "closed"})
+        current = detect_mod.get_pr(conn, ref)
+        assert current is not None and current.rev > seen_rev
+        assert current.host_state == "open"
+        assert cas_update(conn, "prs", "pr", ref, current.rev, {"host_state": "closed"})
+
+
+def test_host_state_changes_only_through_cas_update(
+    gateway: Gateway,
+    fakes: Fakes,
+    store: Store,
+    lease: Lease,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with store.transaction() as conn:
+        conn.execute("CREATE TABLE state_writes (pr TEXT)")
+        conn.execute(
+            "CREATE TRIGGER trace AFTER UPDATE OF host_state ON prs"
+            " BEGIN INSERT INTO state_writes VALUES (NEW.pr); END"
+        )
+    cas_calls: list[str] = []
+    real = detect_mod.cas_update
+
+    def traced(conn: sqlite3.Connection, table: str, key_col: str, key: object, rev: int,
+               changes: Any) -> bool:  # fmt: skip
+        if "host_state" in changes:
+            cas_calls.append(str(key))
+        return real(conn, table, key_col, key, rev, changes)
+
+    monkeypatch.setattr(detect_mod, "cas_update", traced)
+    closing, reopening, steady = insert_pr(store, 1), insert_pr(store, 2), insert_pr(store, 3)
+    with store.transaction() as conn:
+        conn.execute("UPDATE prs SET host_state = 'closed' WHERE pr = ?", (reopening,))
+        conn.execute("DELETE FROM state_writes")
+    script_prs(fakes, [pr_item(2), pr_item(3)])
+    fakes.script("forgectl", "show", json=builders.forgectl_show(pr=closing, state="closed"),
+                 match={"positionals": {"pr": closing}})  # fmt: skip
+    script_comments(fakes, reopening)
+    script_comments(fakes, steady)
+    make(gateway, lease).run()
+    fakes.script("forgectl", "show", json=builders.forgectl_show(pr=steady, state="merged"))
+    make(gateway, lease).refresh_pr(steady)
+    traced_writes = [r[0] for r in store.conn.execute("SELECT pr FROM state_writes")]
+    assert sorted(traced_writes) == sorted(cas_calls) == sorted([closing, reopening, steady])
+    assert {r["pr"]: r["host_state"] for r in rows(store).values()} == {
+        closing: "closed",
+        reopening: "open",
+        steady: "merged",
+    }

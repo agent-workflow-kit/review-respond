@@ -87,7 +87,7 @@ With `--json`, errors print `{"error": {"code", "message", "reason"?, "details"?
 
 The one periodic pass. In order, under the `pass` lease (Concurrency; a second caller exits 0 with `already_running: true`):
 
-1. Resolve your account id per host (`forgectl whoami`, cached).
+1. Resolve your account id per host (`forgectl whoami`, cached for the life of one detection, which is one pass, and not persisted; a persisted cache is the access cache of Eligibility).
 2. List your open PRs per configured host and update the stored PR state (Detection).
 3. Read the comments of each listed non-fork PR, least recently attempted first within the budget; update the comment records and compute the eligible unhandled comments (Eligibility, Handled set).
 4. Start a round for each PR that is due (Settle and round start), oldest due first, while capacity remains (Settle and round start); the `pre-round` hooks run here.
@@ -173,19 +173,27 @@ Per host H in `hosts_to_check` (default: the hosts that `forgectl whoami` lists 
 listing = forgectl prs --host H --author me --state open --limit 1000 --json     (cost 1 per 100 items)
 host error -> host failed, nothing on H changes state this pass
 upsert every listed PR (state open, head, is_fork, created_at)
-if listing.complete: a stored open PR of H that is not listed is read with forgectl show (budget) to learn closed or merged
+if listing.complete: a stored open PR of H that is not listed is read with forgectl show (budget; least recently asked first) to learn closed or merged
 work = listed non-fork PRs, ordered by last_comments_attempt_at ascending (never attempted first)
 for pr in work while budget(H) allows:      # estimate: 1 + (stored comments of pr) / 100, plus 2 per uncached access lookup
    last_comments_attempt_at = now
    read_comments(pr)
 read_comments(pr):         # the one per-PR read: check, check --pr, respond and _job
    forgectl comments <pr>; failed: nothing changes; complete: false: nothing is marked deleted
-   update comment records (Handled set), eligibility, last_comments_read_at = now on success
+   update comment records (Handled set), eligibility, last_comments_read_at = now on a complete read
 ```
 
-There is no cursor and no `updated_at` filter: every pass reads every open PR, least recently attempted first, so a failing PR cannot starve the others, because a host's `updated_at` does not change on every edit, deletion or resolution. A per-host request budget (`limits.requests_per_host`, default 120 per pass; the cost of a read is an estimate, since forgectl reports no request count) bounds a pass. The listing and each `forgectl show` of a possibly closed PR are charged against the budget first; the first comment read of a pass on a host always goes ahead, so a PR whose estimate exceeds the whole budget is still read. PRs not reached are attempted first in the next pass. A failed listing for one host does not stop the other hosts. When a decision needs facts, `forgectl show` supplies the head ref and sha, head repo, fork flag, base, state and draft flag. The start of the first command that reads comments is stored as `installed_at` (Handled set).
+There is no cursor and no `updated_at` filter: every pass reads every open PR, least recently attempted first, so a failing PR cannot starve the others, because a host's `updated_at` does not change on every edit, deletion or resolution. A per-host request budget (`limits.requests_per_host`, default 120 per pass; the cost of a read is an estimate, since forgectl reports no request count) bounds a pass. The listing and each `forgectl show` of a possibly closed PR are charged against the budget first. The first `show` of a pass (when the listing was complete and a stored open PR was not listed) and the first comment read of a pass on a host always go ahead, so a budget the listing used up still learns one closure per pass and a PR whose estimate exceeds the whole budget is still read. The unlisted PRs are asked in the order never asked first, then least recently asked (`last_show_attempt_at`, stamped before each `show`), then by reference, so a `not_found`, failing or still-open PR cannot hold the front. PRs not reached are attempted first in the next pass. A failed listing for one host does not stop the other hosts. When a decision needs facts, `forgectl show` supplies the head ref and sha, head repo, fork flag, base, state and draft flag. The start of the first command that reads comments is stored as `installed_at` (Handled set).
 
-A forgectl read with `complete: false` never marks anything as deleted. `not_found` for a PR means unknown, never closed: a PR counts as closed only when forgectl reports `state` `closed` or `merged`. Review bodies (forgectl `reviews`) are not read in 0.x; a review's inline comments are.
+A listing of exactly 1000 items (the `--limit`) is treated as `complete: false` whatever it says, since older items may have been cut: no closure is learned from it. A listed item must be open and must be authored by your account on that host (when the account id is known); otherwise the whole host fails with `bad_output`. A stored closed or merged PR that a listing names as open is stored as open again (a reopened PR).
+
+A forgectl read with `complete: false` never marks anything as deleted, and it is not a read: it only raises the stored comment count (the larger of the old and the new count); it does not reset `read_failures` and does not set `last_comments_read_at`. `read_comments` of a fork PR (`refused`, reason `ineligible`, `details.reason` `fork_pr`) or of a PR whose stored state is closed or merged (`refused`, reason `pr_closed`) is refused before any forgectl call. `not_found` for a PR means unknown, never closed: a PR counts as closed only when forgectl reports `state` `closed` or `merged`. Review bodies (forgectl `reviews`) are not read in 0.x; a review's inline comments are.
+
+Every forgectl answer is checked against its pinned schema: each object has exactly its schema's members (a missing or an extra member fails the answer), enums, patterns, URL (`https://`), non-empty logins and RFC 3339 instants are checked (a date such as `2026-13-45T99:99:99Z` is refused), one-line text (refs, paths, logins, titles, labels) refuses control characters, C1 controls, U+2028, U+2029, zero-width and bidirectional controls and U+FEFF, a ref is never empty, and every text must encode as UTF-8 (a lone surrogate fails the host or the read). An answer that does not fit fails its host (a listing) or its read (comments) as `bad_output`. `whoami` naming a host twice (in `hosts`, in `errors` or in both) is `bad_output`.
+
+**Host failure codes.** A failed host (`HostResult.ok` false) has one of a closed set of codes: `whoami_failed`, `identity_unknown` (the host has no `me.accounts` entry and `whoami` gives it a null id or does not list it), `timeout`, `output_too_large`, `exit_N` (forgectl exited with status N and printed no usable envelope), `spawn_failed`, `bad_output`, and forgectl's own plain-name codes, which are the `error_code` enum of its pinned schema (for example `auth_required`, `rate_limited`, `network_error`, `upstream_error`). A host `whoami` reports in its `errors` is a failed host of the pass (with that code) even when `hosts_to_check` is not set; when every host failed, `PassDetection.all_failed` is true. A `whoami` that fails outright (it does not run, times out, exits other than 0 or 12, or prints something that does not fit) with `hosts_to_check` unset makes the host list impossible: detection raises `lower_failed` (exit 12) with forgectl's error as `lower_error`. How `check` reports that (#17) is decided there.
+
+`refresh_pr` (the `forgectl show` of `check --pr` and `respond`) returns the stored PR with the author id the host reported. When your account id is known and the author differs, the PR is not stored: the result has `stored` empty and `not_yours` true, so the caller refuses it with `ineligible` (`not_yours`).
 
 ### Eligibility
 
