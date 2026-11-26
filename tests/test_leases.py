@@ -911,3 +911,79 @@ def test_a_forked_child_never_touches_the_parents_lease(store: Store) -> None:  
     assert row is not None and row.token == lease.token  # the child left the row alone
     lease.release()
     assert store.read_lease(PR) is None
+
+
+def test_release_retries_a_busy_database(store: Store) -> None:  # T1
+    lease = store.try_acquire(PR, heartbeat=None)
+    assert lease is not None
+    real = store.transaction
+    calls = {"n": 0}
+
+    def flaky() -> object:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise store_mod._busy_error()  # pyright: ignore[reportPrivateUsage]
+        return real()
+
+    store.transaction = flaky  # type: ignore[method-assign,assignment]
+    lease.release()
+    assert calls["n"] == 3
+    store.transaction = real  # type: ignore[method-assign]
+    assert store.read_lease(PR) is None
+
+
+def test_release_gives_up_silently_after_three_busy_attempts(store: Store) -> None:  # T1
+    lease = store.try_acquire(PR, heartbeat=None)
+    assert lease is not None
+    calls = {"n": 0}
+
+    def busy() -> object:
+        calls["n"] += 1
+        raise store_mod._busy_error()  # pyright: ignore[reportPrivateUsage]
+
+    store.transaction = busy  # type: ignore[method-assign,assignment]
+    lease.release()
+    assert calls["n"] == 3
+
+
+def test_busy_errors_are_marked_structurally() -> None:  # T2
+    busy = store_mod._busy_error()  # pyright: ignore[reportPrivateUsage]
+    assert store_mod._is_busy_error(busy)  # pyright: ignore[reportPrivateUsage]
+    reworded = store_mod._BusyError("internal", "a different wording")  # pyright: ignore[reportPrivateUsage]
+    assert store_mod._is_busy_error(reworded)  # pyright: ignore[reportPrivateUsage]
+    same_text = CliError("internal", str(busy))
+    assert not store_mod._is_busy_error(same_text)  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_forked_child_reports_no_lost_event(store: Store) -> None:  # T3
+    events: list[tuple[str, str]] = []
+    lease = store.try_acquire(PR, heartbeat=None, on_event=lambda *e: events.append(e))
+    assert lease is not None
+    pid = os.fork()
+    if pid == 0:
+        code = 3
+        try:
+            codes: list[int] = []
+            for attempt in (lease.renew, lambda: lease.transaction().__enter__()):
+                try:
+                    attempt()
+                    codes.append(5)
+                except CliError as error:
+                    codes.append(0 if error.code == "lease_lost" else 4)
+            code = 0 if codes == [0, 0] and not events and not lease.lost else 6
+        finally:
+            os._exit(code)
+    deadline = time.monotonic() + 20
+    status = None
+    while time.monotonic() < deadline:
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.01)
+    else:
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        raise AssertionError("forked child did not finish")
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert events == [] and not lease.lost
+    lease.release()

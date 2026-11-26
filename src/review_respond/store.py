@@ -474,8 +474,12 @@ def _busy(exc: sqlite3.Error) -> bool:
     return "locked" in text or "busy" in text
 
 
+class _BusyError(CliError):
+    """The state database is busy; a marker type so callers never compare message text."""
+
+
 def _busy_error() -> CliError:
-    return CliError("internal", "the state database is busy (another command holds it)")
+    return _BusyError("internal", "the state database is busy (another command holds it)")
 
 
 def _arm(conn: sqlite3.Connection, deadline: float | None) -> None:
@@ -918,6 +922,7 @@ _IDENT_RE: Final = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 
 EventCallback = Callable[[str, str], None]
 # TODO(#11): wire the event callback to the `lease` event of log.jsonl (`stalled`, `taken_over`).
+# The callback must be thread-safe: the heartbeat thread may call it (the `lost` event).
 
 
 def pass_lease_key() -> str:
@@ -996,7 +1001,7 @@ def cas_update(
 
 
 def _is_busy_error(error: CliError) -> bool:
-    return error.code == "internal" and str(error) == str(_busy_error())
+    return isinstance(error, _BusyError)
 
 
 def _lease_lost(key: str) -> CliError:
@@ -1012,6 +1017,9 @@ def _contended(kind: Literal["busy", "lease_timeout"], key: str, wait: float) ->
         reason="busy",
         details={"lease": key},
     )
+
+
+RELEASE_ATTEMPTS: Final = 3
 
 
 class Lease:
@@ -1058,7 +1066,7 @@ class Lease:
 
     def _renew_on(self, store: Store) -> None:
         if os.getpid() != self._pid:
-            raise self._lose()
+            raise _lease_lost(self.key)  # a forked child: not a loss, the parent still holds it
         now = store.clock.now().timestamp()
         with store.transaction() as conn:
             cursor = conn.execute(
@@ -1113,23 +1121,26 @@ class Lease:
         thread, self._thread = self._thread, None
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=10)
-        try:
-            with self.store.transaction() as conn:
-                conn.execute(
-                    "DELETE FROM leases WHERE key = ? AND token = ?", (self.key, self.token)
-                )
-        except sqlite3.Error:
-            pass  # the row is taken over later: its holder is gone
-        except CliError as error:
-            if not _is_busy_error(error):
-                raise
+        for _attempt in range(RELEASE_ATTEMPTS):
+            try:
+                with self.store.transaction() as conn:
+                    conn.execute(
+                        "DELETE FROM leases WHERE key = ? AND token = ?", (self.key, self.token)
+                    )
+                return
+            except sqlite3.Error:
+                return  # the row is taken over later: its holder is gone
+            except CliError as error:
+                if not _is_busy_error(error):
+                    raise
+                # busy: try again, then give up (the row is taken over later)
 
     @contextlib.contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """A write transaction that first checks, under the write lock, that this holder still
         owns the row: ``lease_lost`` (exit 1) otherwise, and nothing is written."""
         if os.getpid() != self._pid:
-            raise self._lose()
+            raise _lease_lost(self.key)  # a forked child: not a loss, the parent still holds it
         with self.store.transaction() as conn:
             held = conn.execute(
                 "SELECT 1 FROM leases WHERE key = ? AND token = ?", (self.key, self.token)
