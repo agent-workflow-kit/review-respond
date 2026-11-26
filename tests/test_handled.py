@@ -326,6 +326,7 @@ def test_an_edited_handled_comment_becomes_unhandled_and_edited(env: Env) -> Non
     assert record.handled_reason is None
     assert record.body_sha256 == sha("two")
     assert record.handled_sha256 == sha("one")  # what was answered stays on record
+    assert (record.round, record.delivered_sha256, record.delivered_from) == (None, None, None)
 
 
 def test_an_edit_is_held_back_while_a_record_of_the_pr_is_open(env: Env) -> None:
@@ -407,10 +408,14 @@ def test_a_resolved_thread_marks_a_comment_handled_as_resolved(env: Env, start: 
         _handled(env)
     env.read(rc(resolved=True), verdicts={CID: ineligible("resolved")})
     record = env.get()
-    assert (record.state, record.handled_reason) == ("handled", "resolved")
+    assert record.state == "handled"
+    if start != "handled":
+        assert record.handled_reason == "resolved"
     if start == "handled":
         assert record.round == "r-1"  # the answer already given stays on record
         assert record.handled_sha256 == sha("one")
+        assert record.handled_reason is None  # a round-handled comment gains no reason
+        assert record.thread_resolved
     else:
         assert record.handled_sha256 == record.body_sha256
 
@@ -422,7 +427,33 @@ def test_a_delivered_comment_keeps_delivered_when_its_thread_is_resolved(env: En
     assert env.get().state == "delivered"
     env.hs.mark_handled(env.ref, "r-1")
     env.read(rc(resolved=True), verdicts={CID: ineligible("resolved")})
-    assert (env.get().state, env.get().handled_reason) == ("handled", "resolved")
+    assert (env.get().state, env.get().handled_reason) == ("handled", None)
+
+
+def test_resolve_then_unresolve_then_redo_still_returns_a_round_handled_comment(env: Env) -> None:
+    _handled(env)
+    env.read(rc(body="one", resolved=True), verdicts={CID: ineligible("resolved")})
+    env.read(rc(body="one", resolved=False))
+    assert env.hs.redo(env.ref, "r-1") == [CID]
+    assert env.get().state == "unhandled"
+
+
+def test_a_resolution_clears_edited_on_the_comment_it_hands_over(env: Env) -> None:
+    _handled(env, "one")
+    env.read(rc(body="two"))
+    assert env.get().edited
+    env.read(rc(body="two", resolved=True), verdicts={CID: ineligible("resolved")})
+    record = env.get()
+    assert (record.state, record.handled_reason, record.edited) == ("handled", "resolved", False)
+    assert record.handled_sha256 == sha("two")
+
+
+def test_an_edit_made_while_the_thread_is_resolved_reopens_when_it_is_unresolved(env: Env) -> None:
+    env.read(rc(body="one", resolved=True), verdicts={CID: ineligible("resolved")})
+    env.read(rc(body="two", resolved=True), verdicts={CID: ineligible("resolved")})
+    assert env.get().state == "handled"
+    env.read(rc(body="two", resolved=False))
+    assert (env.get().state, env.get().edited) == ("unhandled", True)
 
 
 def test_an_unresolved_thread_stays_handled(env: Env) -> None:
@@ -596,12 +627,11 @@ def test_reject_redo_makes_the_rounds_handled_comments_unhandled(env: Env) -> No
 
 def test_redo_leaves_resolved_comments_handled(env: Env) -> None:
     _handled(env, cid="gh:rc:a")
-    _handled_second = rc("gh:rc:b")
-    env.read(rc("gh:rc:a", body="one"), _handled_second)
-    env.hs.deliver(env.ref, ["gh:rc:b"], round_id="r-1")
-    env.hs.mark_handled(env.ref, "r-1")
-    env.read(rc("gh:rc:a", body="one"), rc("gh:rc:b", resolved=True), verdicts={
-        "gh:rc:a": ELIGIBLE, "gh:rc:b": ineligible("resolved")})  # fmt: skip
+    env.read(
+        rc("gh:rc:a", body="one"),
+        rc("gh:rc:b", resolved=True),
+        verdicts={"gh:rc:a": ELIGIBLE, "gh:rc:b": ineligible("resolved")},
+    )
     assert env.hs.redo(env.ref, "r-1") == ["gh:rc:a"]
     assert env.get("gh:rc:b").state == "handled"
 
@@ -754,7 +784,9 @@ def test_every_state_change_is_a_compare_and_set_that_fails_loudly(
     env.read(rc())
     calls: list[str] = []
 
-    def lost(conn: Any, table: str, key_col: str, key: object, rev: int, changes: Any) -> bool:
+    def lost(
+        conn: Any, table: str, key_col: str, key: object, rev: int, changes: Any, **kw: Any
+    ) -> bool:
         calls.append(table)
         return False
 
@@ -962,3 +994,166 @@ def test_a_read_for_another_pr_than_the_stored_one_is_refused(env: Env, store: S
     with pytest.raises(CliError) as caught:
         env.hs.record_read(stored, CommentRead(PR + "9", "a" * 40, True, (), {}))
     assert caught.value.code == "internal"
+
+
+# ---- review round 1 ------------------------------------------------------------------------
+
+
+def test_records_lists_a_pr_and_filters_by_state(env: Env) -> None:
+    env.read(rc("gh:rc:a"), rc("gh:rc:b"), rc("gh:rc:c", created=BEFORE))
+    env.hs.deliver(env.ref, ["gh:rc:a"], round_id="r-1")
+    assert [r.id for r in env.hs.records(env.ref)] == ["gh:rc:a", "gh:rc:b", "gh:rc:c"]
+    assert [r.id for r in env.hs.records(env.ref, "unhandled")] == ["gh:rc:b"]
+    assert [r.id for r in env.hs.records(env.ref, "delivered")] == ["gh:rc:a"]
+    assert env.hs.records(env.ref, "handled") == []
+    assert env.hs.records("gh:none#1") == []
+
+
+def test_round_transitions_compose_in_the_callers_transaction(env: Env) -> None:
+    env.read(rc("gh:rc:a"), rc("gh:rc:b"))
+    with env.lease.transaction() as conn:
+        assert env.hs.deliver(env.ref, ["gh:rc:a", "gh:rc:b"], round_id="r-1", conn=conn) == [
+            "gh:rc:a", "gh:rc:b",
+        ]  # fmt: skip
+        assert env.hs.release(env.ref, "r-1", conn=conn) == ["gh:rc:a", "gh:rc:b"]
+        env.hs.deliver(env.ref, ["gh:rc:a", "gh:rc:b"], round_id="r-2", conn=conn)
+        assert env.hs.mark_handled(env.ref, "r-2", conn=conn) == ["gh:rc:a", "gh:rc:b"]
+        assert env.hs.redo(env.ref, "r-2", conn=conn) == ["gh:rc:a", "gh:rc:b"]
+    assert {r.state for r in env.hs.records(env.ref)} == {"unhandled"}
+
+
+def test_a_failing_caller_transaction_rolls_every_transition_back(env: Env) -> None:
+    env.read(rc())
+    with pytest.raises(RuntimeError), env.lease.transaction() as conn:
+        env.hs.deliver(env.ref, [CID], round_id="r-1", conn=conn)
+        env.hs.mark_handled(env.ref, "r-1", conn=conn)
+        raise RuntimeError("the round row failed")
+    assert env.get().state == "unhandled"
+
+
+def test_the_same_comment_id_in_two_prs_is_updated_per_pr(
+    env: Env, store: Store, lease: Lease, gateway: Gateway
+) -> None:
+    other = Env(store, lease, insert_pr(store, 8), gateway)
+    env.read(rc(body="one"))
+    other.read(rc(body="one"))
+    for e in (env, other):
+        assert e.hs.deliver(e.ref, [CID], round_id=f"r-{e.ref}") == [CID]
+    assert env.hs.mark_handled(env.ref, f"r-{env.ref}") == [CID]
+    assert other.get().state == "delivered"
+    env.read(rc(body="two"))
+    other.read(rc(body="two"))
+    assert env.get().state == "unhandled"
+    assert other.get().state == "delivered"
+    assert other.hs.release(other.ref, f"r-{other.ref}") == [CID]
+    assert other.get().state == "unhandled"
+
+
+def _bodies(store: Store, ref: str) -> Path:
+    return store.state_path / "files" / get_pr(store.conn, ref).digest  # type: ignore[union-attr]
+
+
+def _backdate(directory: Path, seconds: float = 7200) -> None:
+    old = time.time() - seconds
+    for entry in directory.iterdir():
+        os.utime(entry, (old, old))
+
+
+def test_files_no_row_refers_to_are_removed_after_the_grace_period(env: Env, store: Store) -> None:
+    for text in ("v1", "v2", "v3", "v4", "v5", "v6"):
+        env.read(rc(body=text))
+    directory = _bodies(store, env.ref)
+    assert len(list(directory.iterdir())) == 6  # recent: all kept
+    _backdate(directory)
+    (directory / ".tmp-leftover").write_bytes(b"x")
+    _backdate(directory)
+    env.read(rc(body="v6"))
+    assert [e.name for e in directory.iterdir()] == [env.get().body_file]
+
+
+def test_a_recent_unreferenced_file_is_kept(env: Env, store: Store) -> None:
+    env.read(rc(body="one"))
+    env.read(rc(body="two"))
+    directory = _bodies(store, env.ref)
+    env.read(rc(body="two"))
+    assert len(list(directory.iterdir())) == 2
+
+
+def test_a_file_another_comment_still_uses_is_kept(env: Env, store: Store) -> None:
+    env.read(rc("gh:rc:a", body="same"), rc("gh:rc:b", body="same"))
+    directory = _bodies(store, env.ref)
+    env.read(rc("gh:rc:a", body="same"), rc("gh:rc:b", body="other"))
+    _backdate(directory)
+    env.read(rc("gh:rc:a", body="same"), rc("gh:rc:b", body="other"))
+    assert sorted(e.name for e in directory.iterdir()) == sorted(
+        {env.get("gh:rc:a").body_file, env.get("gh:rc:b").body_file}  # type: ignore[arg-type]
+    )
+    assert env.hs.body(env.ref, "gh:rc:a").text == "same"
+
+
+def test_a_changed_row_is_retried_and_ends_recorded_with_its_own_hash(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env.read(rc(body="old"))
+    real = HandledSet._put_files
+    calls: list[int] = []
+
+    def meddle(*args: Any) -> Any:
+        result = real(*args)
+        calls.append(1)
+        if len(calls) == 1:  # another writer changes the row after the first look
+            with env.lease.transaction() as conn:
+                conn.execute("UPDATE comments SET body_sha256 = ?, rev = rev + 1", ("e" * 64,))
+        return result
+
+    monkeypatch.setattr(HandledSet, "_put_files", staticmethod(meddle))
+    env.read(rc(body="old"))  # known equal: no file is put, so the changed row needs a retry
+    assert len(calls) == 2
+    assert env.get().body_sha256 == sha("old")
+    assert env.hs.body(env.ref, CID).text == "old"
+
+
+def test_a_row_that_changes_on_every_attempt_fails_after_three(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env.read(rc(body="old"))
+    real = HandledSet._put_files
+    calls: list[int] = []
+
+    def meddle(*args: Any) -> Any:
+        real(*args)
+        calls.append(1)
+        with env.lease.transaction() as conn:
+            conn.execute(
+                "UPDATE comments SET body_sha256 = ?, rev = rev + 1", (str(len(calls)) * 64,)
+            )
+        return {}  # the file the rows need is never there when they are written
+
+    monkeypatch.setattr(HandledSet, "_put_files", staticmethod(meddle))
+    with pytest.raises(CliError) as caught:
+        env.read(rc(body="old"))
+    assert caught.value.code == "internal"
+    assert len(calls) == 3
+    assert env.get().body_sha256 == "3" * 64  # the reader wrote nothing
+
+
+def test_deliver_skips_a_comment_edited_since_the_caller_saw_it(env: Env) -> None:
+    env.read(rc("gh:rc:a", body="one"), rc("gh:rc:b", body="one"))
+    env.read(rc("gh:rc:a", body="two"), rc("gh:rc:b", body="one"))
+    got = env.hs.deliver(
+        env.ref,
+        ["gh:rc:a", "gh:rc:b"],
+        round_id="r-1",
+        expected={"gh:rc:a": sha("one"), "gh:rc:b": sha("one")},
+    )
+    assert got == ["gh:rc:b"]
+    assert got.stale == ["gh:rc:a"]
+    assert env.get("gh:rc:a").state == "unhandled"
+    assert env.hs.deliver(
+        env.ref, ["gh:rc:a"], round_id="r-1", expected={"gh:rc:a": sha("two")}
+    ) == ["gh:rc:a"]
+
+
+def test_deliver_without_expected_hashes_has_nothing_stale(env: Env) -> None:
+    env.read(rc())
+    assert env.hs.deliver(env.ref, [CID], round_id="r-1").stale == []

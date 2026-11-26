@@ -23,9 +23,10 @@ Seams owned by later issues:
 
 from __future__ import annotations
 
+import contextlib
 import re
 import sqlite3
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from hashlib import sha256
@@ -38,6 +39,7 @@ from .store import Lease, StateDir, cas_update
 
 MAX_STORED_BODY_BYTES: Final = 64 * 1024
 _ATTEMPTS: Final = 3
+PRUNE_GRACE_SECONDS: Final = 3600.0
 
 _COLUMNS: Final = (
     "pr, comment_id, thread_id, author_id, author_login, created_at, host_updated_at,"
@@ -89,6 +91,15 @@ class StoredBody:
     text: str  # sanitized, untrusted
     truncated: bool
     original_bytes: int
+
+
+class Delivered(list[str]):
+    """The ids ``deliver`` moved to ``delivered`` (a list), plus ``stale``: the ids it skipped
+    because the stored body hash differs from the one the caller expected."""
+
+    def __init__(self, delivered: Sequence[str] = (), stale: Sequence[str] = ()) -> None:
+        super().__init__(delivered)
+        self.stale = list(stale)
 
 
 class _Retry(Exception):
@@ -147,8 +158,10 @@ class HandledSet:
         *,
         record_open: RecordOpen | None = None,
         now: Callable[[], float] | None = None,
+        prune_grace: float = PRUNE_GRACE_SECONDS,
     ) -> None:
         self.lease = lease
+        self._prune_grace = prune_grace
         self._record_open = record_open
         self._now = now or (lambda: lease.store.clock.now().timestamp())
 
@@ -171,7 +184,11 @@ class HandledSet:
 
     def body(self, pr: str, comment_id: str) -> StoredBody:
         """The stored text of a comment, sanitized (control and invisible characters become
-        visible markers; line breaks stay). ``state_unsafe`` when the file is missing or altered."""
+        visible markers; line breaks stay).
+
+        Errors: ``internal`` when there is nothing to read (an unknown comment or PR, a row without
+        a file, a store not opened from a state directory); ``state_unsafe`` when the stored file
+        is missing, altered or unsafe."""
         record = self.get(pr, comment_id)
         stored = self.lease.store.source
         if record is None or stored is None:
@@ -189,7 +206,15 @@ class HandledSet:
 
     def record_read(self, pr: StoredPr, read: CommentRead) -> None:
         """Record one good read of ``pr`` (the ``Detection(on_read=...)`` hook): first sight,
-        verdicts, edits, resolution and deletion, in one transaction."""
+        verdicts, edits, resolution and deletion, in one transaction.
+
+        The caller must serialize reads of one PR on one lease: two readers on different leases
+        could apply an older read over a newer one. TODO(#17): ``check`` must hold the PR lease
+        around the detection that calls this hook.
+
+        After the rows commit, stored body files no row refers to (and older than the grace
+        period) are removed; files are shared between rows, so only the set of the PR is compared.
+        """
         if read.pr != pr.pr:
             raise CliError("internal", "a read of another PR was given for recording")
         stored = self.lease.store.source
@@ -206,10 +231,20 @@ class HandledSet:
             try:
                 with self.lease.transaction() as conn:
                     self._apply(conn, pr, read, files)
-                return
             except _Retry:
                 continue
+            self._prune(stored, pr)
+            return
         raise CliError("internal", "the comment rows kept changing while they were recorded")
+
+    def _prune(self, stored: StateDir, pr: StoredPr) -> None:
+        keep = {
+            name
+            for (name,) in self.lease.store.conn.execute(
+                "SELECT body_file FROM comments WHERE pr = ? AND body_file IS NOT NULL", (pr.pr,)
+            )
+        }
+        stored.prune_owner_files(pr.digest, keep, min_age=self._prune_grace)
 
     @staticmethod
     def _put_files(
@@ -346,59 +381,97 @@ class HandledSet:
             )
         # `delivered` keeps its state until its round ends; the next read applies the rest
         if row.state in ("seen", "unhandled", "handled") and c.thread_resolved:
-            if row.state != "handled":
-                changes.update(state="handled", handled_reason="resolved", handled_sha256=digest)
-            elif row.handled_reason is None:
-                changes["handled_reason"] = "resolved"
+            if row.state != "handled":  # a comment a round handled keeps its round and no reason
+                changes.update(
+                    state="handled", handled_reason="resolved", handled_sha256=digest, edited=0
+                )
         elif (
             row.state == "handled"
             and digest != row.handled_sha256
             and eligible
             and not record_open()
         ):
-            changes.update(state="unhandled", edited=1, handled_reason=None)
+            # handled_sha256 stays: it records what was last answered (no CHECK needs it here)
+            changes.update(
+                state="unhandled",
+                edited=1,
+                handled_reason=None,
+                round=None,
+                delivered_sha256=None,
+                delivered_from=None,
+            )
         self._change(conn, row, changes)
 
     @staticmethod
     def _change(conn: sqlite3.Connection, row: CommentRecord, changes: dict[str, object]) -> None:
-        if changes and not cas_update(conn, "comments", "comment_id", row.id, row.rev, changes):
+        if changes and not cas_update(
+            conn, "comments", "comment_id", row.id, row.rev, changes, where={"pr": row.pr}
+        ):
             # cannot happen inside the write transaction that read the row
             raise CliError("internal", f"comment {row.id} changed under the write lock")
 
     # -- round transitions ------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _write(self, conn: sqlite3.Connection | None) -> Iterator[sqlite3.Connection]:
+        """The caller's open transaction (``conn``), or one of this lease's own."""
+        if conn is not None:
+            yield conn
+        else:
+            with self.lease.transaction() as own:
+                yield own
+
     def _transition(
-        self, pr: str, ids: Sequence[str] | None, round_id: str | None, want: str,
+        self, conn: sqlite3.Connection, pr: str, ids: Sequence[str] | None,
+        round_id: str | None, want: str,
         change: Callable[[CommentRecord], dict[str, object] | None],
     ) -> list[str]:  # fmt: skip
         done: list[str] = []
-        with self.lease.transaction() as conn:
-            sql = f"SELECT {_COLUMNS} FROM comments WHERE pr = ? AND state = ?"
-            args: list[object] = [pr, want]
-            if round_id is not None:
-                sql += " AND round = ?"
-                args.append(round_id)
-            rows = [_record(r) for r in conn.execute(sql + " ORDER BY comment_id", args)]
-            order = {c: i for i, c in enumerate(ids)} if ids is not None else None
-            if order is not None:
-                rows = sorted((r for r in rows if r.id in order), key=lambda r: order[r.id])
-            for row in rows:
-                changes = change(row)
-                if changes is not None:
-                    self._change(conn, row, changes)
-                    done.append(row.id)
+        sql = f"SELECT {_COLUMNS} FROM comments WHERE pr = ? AND state = ?"
+        args: list[object] = [pr, want]
+        if round_id is not None:
+            sql += " AND round = ?"
+            args.append(round_id)
+        rows = [_record(r) for r in conn.execute(sql + " ORDER BY comment_id", args)]
+        order = {c: i for i, c in enumerate(ids)} if ids is not None else None
+        if order is not None:
+            rows = sorted((r for r in rows if r.id in order), key=lambda r: order[r.id])
+        for row in rows:
+            changes = change(row)
+            if changes is not None:
+                self._change(conn, row, changes)
+                done.append(row.id)
         return done
 
-    def deliver(
-        self, pr: str, ids: Sequence[str], *, round_id: str, include_seen: bool = False
-    ) -> list[str]:
-        """A job selects comments into its prompt: eligible ``unhandled`` ones (and ``seen`` ones
-        of an ``--include-existing`` round) become ``delivered``. Returns the ids delivered."""
-        done: list[str] = []
-        for want in ("unhandled", "seen") if include_seen else ("unhandled",):
+    # Each transition below runs in the caller's open transaction when ``conn`` is given (the
+    # round rows of #18 and #23 must change atomically with the comments), else in its own.
 
-            def change(row: CommentRecord, source: str = want) -> dict[str, object] | None:
+    def deliver(
+        self,
+        pr: str,
+        ids: Sequence[str],
+        *,
+        round_id: str,
+        include_seen: bool = False,
+        expected: Mapping[str, str] | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> Delivered:
+        """A job selects comments into its prompt: eligible ``unhandled`` ones (and ``seen`` ones
+        of an ``--include-existing`` round) become ``delivered``. Returns the ids delivered.
+
+        ``expected`` maps comment ids to the body sha256 the caller showed; an id whose stored hash
+        differs (an edit between showing and delivering) is skipped and listed in ``.stale``."""
+        done: list[str] = []
+        stale: list[str] = []
+
+        def make(source: str) -> Callable[[CommentRecord], dict[str, object] | None]:
+            def change(row: CommentRecord) -> dict[str, object] | None:
                 if not row.eligible:
+                    return None
+                if expected is not None and expected.get(row.id, row.body_sha256) != (
+                    row.body_sha256
+                ):
+                    stale.append(row.id)
                     return None
                 return {
                     "state": "delivered",
@@ -407,47 +480,58 @@ class HandledSet:
                     "delivered_sha256": row.body_sha256,
                 }
 
-            done += self._transition(pr, ids, None, want, change)
-        order = {c: i for i, c in enumerate(ids)}
-        return sorted(done, key=lambda c: order[c])
+            return change
 
-    def mark_handled(self, pr: str, round_id: str) -> list[str]:
+        with self._write(conn) as c:
+            for want in ("unhandled", "seen") if include_seen else ("unhandled",):
+                done += self._transition(c, pr, ids, None, want, make(want))
+        order = {i: n for n, i in enumerate(ids)}
+        return Delivered(sorted(done, key=order.__getitem__), sorted(stale, key=order.__getitem__))
+
+    def mark_handled(
+        self, pr: str, round_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> list[str]:
         """The round became ``pending``: its delivered comments are handled (as delivered)."""
-        return self._transition(
-            pr, None, round_id, "delivered",
-            lambda row: {
-                "state": "handled",
-                "handled_sha256": row.delivered_sha256,
-                "handled_reason": None,
-                "edited": 0,
-            },
-        )  # fmt: skip
+        with self._write(conn) as c:
+            return self._transition(
+                c, pr, None, round_id, "delivered",
+                lambda row: {
+                    "state": "handled",
+                    "handled_sha256": row.delivered_sha256,
+                    "handled_reason": None,
+                    "edited": 0,
+                },
+            )  # fmt: skip
 
-    def release(self, pr: str, round_id: str) -> list[str]:
+    def release(
+        self, pr: str, round_id: str, *, conn: sqlite3.Connection | None = None
+    ) -> list[str]:
         """The round ended ``failed``, ``canceled`` or ``escalated``: its comments go back to the
         state they were delivered from."""
-        return self._transition(
-            pr, None, round_id, "delivered",
-            lambda row: {
-                "state": row.delivered_from or "unhandled",
-                "round": None,
-                "delivered_sha256": None,
-                "delivered_from": None,
-            },
-        )  # fmt: skip
+        with self._write(conn) as c:
+            return self._transition(
+                c, pr, None, round_id, "delivered",
+                lambda row: {
+                    "state": row.delivered_from or "unhandled",
+                    "round": None,
+                    "delivered_sha256": None,
+                    "delivered_from": None,
+                },
+            )  # fmt: skip
 
-    def redo(self, pr: str, round_id: str) -> list[str]:
+    def redo(self, pr: str, round_id: str, *, conn: sqlite3.Connection | None = None) -> list[str]:
         """``reject --redo``: the comments the round handled (not those handled as resolved)
         become ``unhandled`` again."""
-        return self._transition(
-            pr, None, round_id, "handled",
-            lambda row: None
-            if row.handled_reason is not None
-            else {
-                "state": "unhandled",
-                "round": None,
-                "delivered_sha256": None,
-                "delivered_from": None,
-                "handled_sha256": None,
-            },
-        )  # fmt: skip
+        with self._write(conn) as c:
+            return self._transition(
+                c, pr, None, round_id, "handled",
+                lambda row: None
+                if row.handled_reason is not None
+                else {
+                    "state": "unhandled",
+                    "round": None,
+                    "delivered_sha256": None,
+                    "delivered_from": None,
+                    "handled_sha256": None,
+                },
+            )  # fmt: skip

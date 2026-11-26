@@ -1134,6 +1134,8 @@ class Detection:
                 )
             stored = get_pr(conn, pr)
         read = replace(read, verdicts=self._judge(row, read, account))
+        # TODO(#16): last_comments_read_at was stored above, before on_read records the comments, so
+        # it is not proof the comment records are current; the due rule must not rely on it alone.
         if self.on_read is not None and stored is not None:
             self.on_read(stored, read)
         return read

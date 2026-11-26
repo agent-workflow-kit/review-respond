@@ -23,7 +23,7 @@ import stat
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -116,7 +116,9 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
         # directory and `body_bytes` is the full size. `first_seen_at` is the local time the
         # comment was first stored, `body_seen_at` the local time its current hash was first
         # stored (the settle timestamp). Times are epoch seconds. The CHECKs keep a `delivered`
-        # row complete and the closed value sets closed.
+        # row complete and the closed value sets closed. `pr` is an enforced foreign key
+        # (PRAGMA foreign_keys = ON) without a cascade: deleting a PR must first delete its
+        # comment rows and then call `StateDir.delete_owner_files` for the PR's digest.
         """CREATE TABLE comments (
             pr TEXT NOT NULL REFERENCES prs (pr),
             comment_id TEXT NOT NULL,
@@ -326,6 +328,9 @@ def _stored_owner(owner: str) -> None:
         raise _unsafe("a stored record has an invalid owner id") from None
 
 
+_DIGEST_RE: Final = re.compile(r"[0-9a-f]{64}")
+
+
 def _stored_digest(digest: str) -> None:
     try:
         _check_digest(digest)
@@ -450,6 +455,53 @@ class StateDir:
             return self._read(dfd, owner, digest)
         finally:
             os.close(dfd)
+
+    def prune_owner_files(
+        self, owner: str, keep: Collection[str], *, min_age: float, now: float | None = None
+    ) -> int:
+        """Remove the owner's stored files that are not in ``keep`` and are older than ``min_age``
+        seconds (by modification time), stale ``.tmp-*`` leftovers included. Returns how many.
+
+        Only plain one-link files named by a sha256 or ``.tmp-*`` are considered; anything else
+        stays. The owner directory itself is checked like any stored directory.
+        """
+        _stored_owner(owner)
+        try:
+            os.lstat(FILES_DIR, dir_fd=self.fd)
+        except FileNotFoundError:
+            return 0
+        root_fd = _open_dir(self.path / FILES_DIR, euid=self.euid, create=False, dir_fd=self.fd)
+        try:
+            try:
+                os.lstat(owner, dir_fd=root_fd)
+            except FileNotFoundError:
+                return 0
+            dfd = _open_dir(
+                self.path / FILES_DIR / owner, euid=self.euid, create=False, dir_fd=root_fd
+            )
+        finally:
+            os.close(root_fd)
+        current = time.time() if now is None else now
+        removed = 0
+        try:
+            for name in os.listdir(dfd):
+                if name in keep or not (name.startswith(".tmp-") or _DIGEST_RE.fullmatch(name)):
+                    continue
+                try:
+                    info = os.lstat(name, dir_fd=dfd)
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_nlink != 1
+                        or current - info.st_mtime < min_age
+                    ):
+                        continue
+                    os.unlink(name, dir_fd=dfd)
+                    removed += 1
+                except FileNotFoundError:
+                    continue
+        finally:
+            os.close(dfd)
+        return removed
 
     def delete_owner_files(self, owner: str) -> None:
         """Remove the owner's directory and its files (they go only with their owner).
@@ -1067,15 +1119,19 @@ def cas_update(
     key: object,
     rev: int,
     changes: Mapping[str, object],
+    *,
+    where: Mapping[str, object] | None = None,
 ) -> bool:
     """Set ``changes`` on the row ``key_column = key`` only while its ``rev`` is still ``rev``, and
-    bump the ``rev``. True when this call made the transition, False when the row is missing or
-    another writer got there first (the caller decides what that means for its table).
+    bump the ``rev``. ``where`` adds column equalities for a table whose key has several columns.
+    True when this call made the transition, False when the row is missing or another writer got
+    there first (the caller decides what that means for its table).
 
     Must run inside a transaction. Names are checked as plain identifiers; values are parameters.
     ``rev`` itself cannot be set through ``changes``.
     """
-    names = [table, key_column, *changes]
+    extra = dict(where or {})
+    names = [table, key_column, *changes, *extra]
     if not changes or any(
         not isinstance(n, str) or not _IDENT_RE.fullmatch(n)  # pyright: ignore[reportUnnecessaryIsInstance]
         for n in names
@@ -1084,9 +1140,11 @@ def cas_update(
     if key_column.lower() == "rev" or any(name.lower() == "rev" for name in changes):
         raise ValueError("rev is managed by the compare-and-set")  # SQLite names are case-blind
     assignments = ", ".join(f"{name} = ?" for name in changes)
+    conditions = "".join(f" AND {name} = ?" for name in extra)
     cursor = conn.execute(
-        f"UPDATE {table} SET {assignments}, rev = rev + 1 WHERE {key_column} = ? AND rev = ?",
-        (*changes.values(), key, rev),
+        f"UPDATE {table} SET {assignments}, rev = rev + 1"
+        f" WHERE {key_column} = ? AND rev = ?{conditions}",
+        (*changes.values(), key, rev, *extra.values()),
     )
     if cursor.rowcount > 1:
         raise CliError(
