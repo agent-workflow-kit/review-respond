@@ -432,13 +432,22 @@ class _Tool:
         stdin: str | None = None,
         cwd: PathLike | None = None,
         timeout: Timeout = "default",
+        max_output: int | None = None,
     ) -> Result:
-        return self.gateway.run([self.prog, *args], stdin=stdin, cwd=cwd, timeout=timeout)
+        return self.gateway.run(
+            [self.prog, *args], stdin=stdin, cwd=cwd, timeout=timeout, max_output=max_output
+        )
 
     def version(self) -> Result:
         return self.gateway.run(
             [self.prog, "--version"], timeout=15.0, max_output=VERSION_OUTPUT_CAP
         )
+
+
+# Output bounds for forgectl reads (its output is untrusted): a stream past the cap stops the
+# program and the result reports `overflow`.
+FORGECTL_OUTPUT_CAP = 8 * 1024 * 1024
+FORGECTL_COMMENTS_CAP = 64 * 1024 * 1024
 
 
 class Forgectl(_Tool):
@@ -463,13 +472,13 @@ class Forgectl(_Tool):
             args += ["--state", _arg(state, "state")]
         if limit is not None:
             args += ["--limit", _arg(limit, "limit")]
-        return self._run([*args, "--json"])
+        return self._run([*args, "--json"], max_output=FORGECTL_OUTPUT_CAP)
 
     def show(self, pr: str) -> Result:
-        return self._run(["show", _arg(pr, "pr"), "--json"])
+        return self._run(["show", _arg(pr, "pr"), "--json"], max_output=FORGECTL_OUTPUT_CAP)
 
     def comments(self, pr: str) -> Result:
-        return self._run(["comments", _arg(pr, "pr"), "--json"])
+        return self._run(["comments", _arg(pr, "pr"), "--json"], max_output=FORGECTL_COMMENTS_CAP)
 
     def access(self, repo: str, user: str) -> Result:
         return self._run(["access", _arg(repo, "repo"), _arg(user, "user"), "--json"])
@@ -478,7 +487,7 @@ class Forgectl(_Tool):
         args = ["whoami"]
         if host is not None:
             args += ["--host", _arg(host, "host")]
-        return self._run([*args, "--json"])
+        return self._run([*args, "--json"], max_output=FORGECTL_OUTPUT_CAP)
 
     def compare(self, pr: str, from_sha: str, to_sha: str, *, no_diff: bool = True) -> Result:
         args = ["compare"]
