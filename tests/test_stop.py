@@ -96,7 +96,12 @@ def running(world: World, capsys: pytest.CaptureFixture[str]) -> Scene:
 
 
 def fixed(doc: dict[str, Any], rid: str) -> dict[str, Any]:
-    return json.loads(json.dumps(doc).replace(rid, "rd-abcdefgh"))  # type: ignore[no-any-return]
+    """The document with the round id and the real clock times replaced (a stable golden)."""
+    out = json.loads(json.dumps(doc).replace(rid, "rd-abcdefgh"))
+    for key in ("cancel_requested_at", "started", "ended"):
+        if out["round"][key] is not None:
+            out["round"][key] = "2026-01-01T12:00:00.000000Z"
+    return out  # type: ignore[no-any-return]
 
 
 # ---- a queued round -----------------------------------------------------------------------------
