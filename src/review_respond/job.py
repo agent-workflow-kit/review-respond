@@ -63,7 +63,7 @@ from .prompt import (
     sanitize,
     write_prompt_file,
 )
-from .rounds import TERMINAL_STATES, RoundRow, Rounds, Transition, get_round
+from .rounds import TERMINAL_STATES, RoundRow, Rounds, Transition, get_round, round_options
 from .settings import (
     SessionSettings,
     build_session_settings,
@@ -408,8 +408,14 @@ class Job:
         """What needs no sibling: the settings and the stored note. A failure ends the round
         while it is still queued and its comments untouched."""
         try:
+            skill, mode = round_options(self.store.conn, row.id)
             build_session_settings(
-                self.cfg, self.repo, config_dir=self.config_dir, state_dir=self.state_dir
+                self.cfg,
+                self.repo,
+                config_dir=self.config_dir,
+                state_dir=self.state_dir,
+                mode=mode or "headless",
+                skill=skill,
             )
         except CliError as error:
             return self._queued_failed("settings_invalid", error)
@@ -703,12 +709,15 @@ class Job:
                 raise CliError("internal", "the round has no base agent and no fresh opt-in")
         elif not lineage.is_agent_id(base):
             raise CliError("internal", "the round's base agent id is not valid")
+        skill, mode = round_options(self.store.conn, row.id)  # respond --skill / --mode
         settings = build_session_settings(
             self.cfg,
             self.repo,
             config_dir=self.config_dir,
             state_dir=self.state_dir,
             throwaway=root,
+            mode=mode or "headless",
+            skill=skill,
         )
         built = self._build(root, self._pcs)
         if built.status != "ok" or set(built.included) != {c.id for c in self._pcs}:
