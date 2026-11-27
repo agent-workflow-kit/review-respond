@@ -41,6 +41,7 @@ from .gateway import Gateway, GatewayError
 from .handled import HandledSet, read_records
 from .output import Context, Outcome, sanitize_line
 from .placement import Placement
+from .prompt import is_visible
 from .prref import parse_pr
 from .prstate import round_object
 from .rounds import Rounds, get_round
@@ -67,10 +68,10 @@ class Request:
 
 
 def _has_visible_text(text: str) -> bool:
-    """A note needs one printable character that is not whitespace: control and format
-    characters (NUL, U+200B) are rendered as ``<U+XXXX>`` markers by the prompt sanitizer, so
-    they cannot make a note."""
-    return any(ch.isprintable() and not ch.isspace() for ch in text)
+    """A note needs one character that is not whitespace and that the prompt sanitizer keeps:
+    the characters it renders as ``<U+XXXX>`` markers (control, format, variation selectors,
+    fillers, NUL, U+200B) cannot make a note."""
+    return any(is_visible(ch) for ch in text)
 
 
 def read_request(args: argparse.Namespace) -> Request:

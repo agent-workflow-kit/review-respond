@@ -64,6 +64,11 @@ def _piece(ch: str, newlines: bool) -> str:
     return ch
 
 
+def is_visible(ch: str) -> bool:
+    """True when ``ch`` is neither whitespace nor a character the sanitizer turns into a marker."""
+    return not ch.isspace() and _piece(ch, False) == ch
+
+
 def _render(
     text: str, newlines: bool, max_chars: int | None, max_bytes: int | None
 ) -> tuple[str, str]:

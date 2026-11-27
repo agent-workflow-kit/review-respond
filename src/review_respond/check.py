@@ -49,7 +49,7 @@ from .output import Context, Outcome, sanitize_line
 from .placement import Placement
 from .prref import host_of, parse_pr
 from .stop import ACTOR as STOP_ACTOR
-from .stop import Stopper
+from .stop import AGENT_STOPPED, Stopper
 from .store import Lease, Store, pass_lease_key, pr_digest, pr_lease_key
 from .validate import child_env
 
@@ -376,8 +376,8 @@ class _Pass:
         next pass. The ``stop`` function is the command's own, with the actor
         ``auto:review-respond`` (Reject, expiry and closed PRs). A round that already carries a
         cancel flag was stopped before: its job, the finalizer or the reconcile ends it, except a
-        running round flagged ``pr_closed`` (by an earlier sweep whose ``agent-spawn stop`` may
-        have failed): it is stopped again, which is idempotent."""
+        running round flagged ``pr_closed`` with a recorded fork whose ``agent-spawn stop`` did
+        not succeed yet (no ``agent_stopped`` round warning): it is stopped again."""
         if self.ctx.audit is None:
             return
         where, args = ("", ()) if only is None else (" AND r.pr = ?", (only,))
@@ -385,7 +385,11 @@ class _Pass:
             "SELECT r.id, r.pr FROM rounds r JOIN prs p ON p.pr = r.pr"
             " WHERE r.state IN ('queued', 'running') AND p.host_state != 'open'"
             " AND (r.cancel_requested_at IS NULL"
-            "      OR (r.state = 'running' AND r.cancel_reason = 'pr_closed'))"
+            "      OR (r.state = 'running' AND r.cancel_reason = 'pr_closed'"
+            "          AND r.agent_id IS NOT NULL"
+            "          AND EXISTS (SELECT 1 FROM forks f WHERE f.agent_id = r.agent_id)"
+            "          AND NOT EXISTS (SELECT 1 FROM json_each(r.warnings)"
+            f"                          WHERE value = '{AGENT_STOPPED}')))"
             f"{where} ORDER BY r.created_at, r.id",
             args,
         ).fetchall()

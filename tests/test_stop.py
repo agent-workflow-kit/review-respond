@@ -513,14 +513,48 @@ def test_check_stops_the_running_round_of_a_closed_pr_through_agent_spawn(
     assert call.positionals["agent_id"] == FORK and call.flags["--actor"] == "auto:review-respond"
     row = running.round()
     assert row["cancel_reason"] == "pr_closed" and row["state"] == "running"
-    # the run then ends stopped: canceled `pr_closed`, no block (the flagged round that still
-    # ran was stopped again by this sweep: agent-spawn answers that the agent is gone)
-    running.fakes.script("agent-spawn", "stop", json=stop_doc(running))
+    # the run then ends stopped: canceled `pr_closed`, no block
     script_show(running, final_run(running, "killed", end_reason="stopped"))
     sweep(running, capsys)
     row = running.round()
     assert (row["state"], row["cancel_reason"]) == ("canceled", "pr_closed")
     assert block(running) is None
+    assert len(running.fakes.calls("agent-spawn", "stop")) == 1
+
+
+def test_a_successful_sweep_stop_is_not_repeated_by_the_next_sweep(
+    running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    close_pr(running)
+    running.fakes.script("agent-spawn", "stop", json=stop_doc(running))
+    script_show(running, show_after(running, status="live"))
+    sweep(running, capsys)
+    records = audit(running.world)
+    assert [r["phase"] for r in records] == ["attempted", "outcome"]
+    script_show(running, show_after(running, status="live"))
+    sweep(running, capsys)
+    assert len(running.fakes.calls("agent-spawn", "stop")) == 1
+    assert audit(running.world) == records  # no second attempted + outcome pair
+
+
+@pytest.mark.parametrize("recorded", ["no_agent", "unrecorded_agent"])
+def test_the_sweep_does_not_select_a_pr_closed_round_without_a_recorded_fork(
+    recorded: str, running: Scene, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if recorded == "no_agent":
+        running.sql("UPDATE rounds SET agent_id = NULL")
+    else:
+        running.sql("DELETE FROM forks")
+    running.sql("UPDATE rounds SET cancel_requested_at = 1.0, cancel_reason = 'pr_closed'")
+    close_pr(running)
+    if recorded == "no_agent":  # the finalizer looks the agent up by label
+        running.fakes.script("agent-spawn", "list", json={"agents": []}, times=None, schema=False)
+    else:
+        script_show(running, show_after(running, status="live"), times=None)
+    sweep(running, capsys)
+    sweep(running, capsys)
+    assert running.fakes.calls("agent-spawn", "stop") == []
+    assert audit(running.world) == []
 
 
 def test_the_sweep_stops_a_closed_prs_running_round_again_when_agent_spawn_stop_failed(
@@ -541,6 +575,10 @@ def test_the_sweep_stops_a_closed_prs_running_round_again_when_agent_spawn_stop_
     sweep(running, capsys)
     calls = running.fakes.calls("agent-spawn", "stop")
     assert len(calls) == 2 and calls[1].positionals["agent_id"] == FORK
+    # the retry succeeded: a third sweep leaves the agent alone
+    script_show(running, show_after(running, status="live"))
+    sweep(running, capsys)
+    assert len(running.fakes.calls("agent-spawn", "stop")) == 2
 
 
 def test_the_sweep_does_not_touch_a_running_round_a_human_stopped(
@@ -665,24 +703,26 @@ def test_a_stop_racing_the_end_of_a_running_round_leaves_one_consistent_end(
     gate = running.root.parent / "stop-may-answer"  # the fake answers once this file exists
     running.fakes.script("agent-spawn", "stop", json=stop_doc(running), wait_for=gate)
     proc = spawn_stop(running)
-    deadline = time.monotonic() + 30
-    while running.round()["cancel_requested_at"] is None:
-        assert time.monotonic() < deadline, "the stop never set its flag"
-        time.sleep(0.02)
-    from review_respond.outcomes import RunEnd
-    from review_respond.rounds import Rounds
-
-    store = Store.open(open_state_dir(running.state), write=True, close_state=True)
-    lease = store.try_acquire(round_lease_key(running.rid), heartbeat=None)
-    assert lease is not None
     try:
-        moved = Rounds(lease).finish_run(
-            running.rid, RunEnd(command="wait", exit=15, end_reason="stopped")
-        )
+        deadline = time.monotonic() + 30
+        while running.round()["cancel_requested_at"] is None:
+            assert time.monotonic() < deadline, "the stop never set its flag"
+            time.sleep(0.02)
+        from review_respond.outcomes import RunEnd
+        from review_respond.rounds import Rounds
+
+        store = Store.open(open_state_dir(running.state), write=True, close_state=True)
+        lease = store.try_acquire(round_lease_key(running.rid), heartbeat=None)
+        assert lease is not None
+        try:
+            moved = Rounds(lease).finish_run(
+                running.rid, RunEnd(command="wait", exit=15, end_reason="stopped")
+            )
+        finally:
+            lease.release()
+            store.close()
     finally:
-        lease.release()
-        store.close()
-    gate.touch()
+        gate.touch()  # always release the fake, even when an assertion above failed
     code, doc = finish(proc)
     assert code == 0 and moved.changed
     row = running.round()

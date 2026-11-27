@@ -45,6 +45,7 @@ from .validate import child_env
 
 ACTOR: Final = lineage.ACTOR
 PR_LEASE_WAIT: Final = 30.0  # `stop` waits up to 30 s for the PR's lease, then exits 20 busy
+AGENT_STOPPED: Final = "agent_stopped"  # round warning: agent-spawn stop succeeded (or not_found)
 STOP_SLACK_SECONDS: Final = 60.0  # the gateway waits the grace plus agent-spawn's 30 s plus this
 
 
@@ -184,7 +185,7 @@ class Stopper:
                 changed = changed or ended.changed
                 row = ended.row
         if row.state == "running":
-            self._running(row)
+            self._running(machine, row)
         elif row.state == "pending":
             # the round went pending between the check and the flag: nothing was stopped
             raise CliError(
@@ -243,7 +244,7 @@ class Stopper:
 
     # -- a running round ---------------------------------------------------------------------
 
-    def _running(self, row: RoundRow) -> None:
+    def _running(self, machine: Rounds, row: RoundRow) -> None:
         if row.agent_id is None:
             return  # the job sees the flag before it launches the agent
         if not lineage.is_recorded(self.store.conn, row.agent_id):
@@ -267,7 +268,10 @@ class Stopper:
         if result.ok or (
             result.returncode == 10 and not result.timed_out and _error_code(result) == "not_found"
         ):
-            return  # stopped, or the agent is gone: the job or the finalizer ends the round
+            # stopped, or the agent is gone: the job or the finalizer ends the round. The
+            # warning tells the closed-PR sweep not to ask agent-spawn again.
+            machine.add_warning(row.id, AGENT_STOPPED)
+            return
         raise CliError(
             "lower_failed", "agent-spawn stop failed", lower=lower_of(result, "agent-spawn stop")
         )

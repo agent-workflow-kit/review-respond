@@ -737,7 +737,18 @@ def test_an_unusable_note_is_a_usage_error_before_anything_happens(
     assert len(world.fakes.calls()) == before and rounds_of(world) == []
 
 
-@pytest.mark.parametrize("data", ["\u200b\u200b".encode(), b"\x00", b" \x00\n" + "\u200b".encode()])
+@pytest.mark.parametrize(
+    "data",
+    [
+        "\u200b\u200b".encode(),
+        b"\x00",
+        b" \x00\n" + "\u200b".encode(),
+        "\ufe0f".encode(),
+        "\u3164".encode(),
+        "\u2800".encode(),
+        " \u034f\u3164\n".encode(),
+    ],
+)
 def test_a_note_without_a_printable_character_is_a_usage_error(
     data: bytes, world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
@@ -745,6 +756,13 @@ def test_a_note_without_a_printable_character_is_a_usage_error(
     code, doc, _ = respond_cmd(capsys, config, "--note-file", str(_note(world, data)))
     assert (code, doc["error"]["code"]) == (2, "usage")
     assert rounds_of(world) == []
+
+
+@pytest.mark.parametrize("text", ["\u65e5\u672c\u8a9e", "\U0001f44d", "ok", "\u00e9"])
+def test_a_note_of_visible_non_ascii_text_is_accepted(text: str) -> None:
+    from review_respond.respond import _has_visible_text
+
+    assert _has_visible_text(text)
 
 
 def test_a_missing_note_file_is_a_usage_error(
