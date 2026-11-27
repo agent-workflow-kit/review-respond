@@ -374,7 +374,8 @@ class _Pass:
         """Stop the queued and running rounds of closed or merged PRs (``cancel_reason:
         pr_closed``), each under its PR's lease taken without waiting; a held lease is left for the
         next pass. The ``stop`` function is the command's own, with the actor
-        ``auto:review-respond`` (Reject, expiry and closed PRs)."""
+        ``auto:review-respond`` (Reject, expiry and closed PRs). A round that already carries a
+        cancel flag was stopped before: its job, the finalizer or the reconcile ends it."""
         if self.ctx.audit is None:
             return
         where, args = ("", ()) if only is None else (" AND r.pr = ?", (only,))

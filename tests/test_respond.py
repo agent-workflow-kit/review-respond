@@ -726,11 +726,8 @@ def test_human_only_flags_with_an_automatic_actor_exit_2_before_any_work(
 ) -> None:
     code, doc, _ = run(capsys, "respond", PR7, flag, *actor, config=config)
     assert (code, doc["error"]["code"]) == (2, "human_only")
-    assert (
-        world.fakes.calls() == [] and sql(world, "SELECT count(*) FROM rounds") == [(0,)]
-        if (Path(world.env["XDG_STATE_HOME"]) / "review-respond" / "state.db").exists()
-        else True
-    )
+    assert world.fakes.calls() == []  # refused before any sibling was asked or any round made
+    assert sql(world, "SELECT count(*) FROM rounds") == [(0,)]
 
 
 def test_an_automatic_actor_may_respond_without_the_human_flags(
@@ -801,3 +798,34 @@ def test_dry_run_with_nothing_to_answer_is_exit_22(
 # keep the parser and the module wired
 def test_the_handler_is_registered() -> None:
     assert cli.HANDLERS["respond"] is respond.handle
+
+
+# ---- the round's job honors what respond stored ---------------------------------------
+
+
+def test_the_job_of_a_respond_round_uses_its_skill_mode_and_note(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    from tests.test_job import FORK, HEAD, Scene, happy
+
+    prepared(world, capsys, config)
+    world.drop_tool("jobsctl")
+    note = _note(world, b"Use the helper, not a copy.\n")
+    script_reads(world)
+    code, doc, _ = respond_cmd(
+        capsys, config, "--skill", "my-skill:v2", "--mode", "interactive", "--note-file", str(note)
+    )
+    assert code == 0
+    rid = doc["round"]["id"]
+    root = world.root / "tw" / "throw1"
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    sc = Scene(world, config, rid, root, Path(world.env["XDG_STATE_HOME"]) / "review-respond")
+    world.fakes.install()
+    happy(sc)
+    assert sc.job() == 0
+    (resume,) = sc.calls("agent-spawn", "resume")
+    assert resume.flags["--skill"] == "my-skill:v2" and resume.flags["--mode"] == "interactive"
+    row = sc.round()
+    assert (row["state"], row["agent_id"], row["head_sha"]) == ("running", FORK, HEAD)
+    assert row["note_sha256"] == doc["round"]["note_sha256"]  # the job read the stored note back

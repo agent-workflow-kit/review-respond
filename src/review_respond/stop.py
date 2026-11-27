@@ -39,11 +39,11 @@ from .gateway import Gateway, GatewayError, Result
 from .output import Context, Outcome, sanitize_line
 from .placement import SUBMIT_GRACE_SECONDS, Placement
 from .prstate import round_object
-from .rounds import TERMINAL_STATES, RoundRow, Rounds, get_round, resolve_round_id
+from .rounds import TERMINAL_STATES, RoundRow, Rounds, Transition, get_round, resolve_round_id
 from .store import Lease, Store, pr_digest, pr_lease_key, round_lease_key
 from .validate import child_env
 
-ACTOR: Final = "auto:review-respond"
+ACTOR: Final = lineage.ACTOR
 PR_LEASE_WAIT: Final = 30.0  # `stop` waits up to 30 s for the PR's lease, then exits 20 busy
 STOP_SLACK_SECONDS: Final = 60.0  # the gateway waits the grace plus agent-spawn's 30 s plus this
 
@@ -200,7 +200,7 @@ class Stopper:
 
     # -- a queued round ----------------------------------------------------------------------
 
-    def _queued(self, machine: Rounds, row: RoundRow) -> Any:
+    def _queued(self, machine: Rounds, row: RoundRow) -> Transition | None:
         """End a queued round whose job is canceled, never submitted or verifiably gone; leave one
         whose job may still run (it reads the flag). Returns the transition, or None."""
         if row.job_id is not None:
