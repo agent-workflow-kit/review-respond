@@ -375,14 +375,17 @@ class _Pass:
         pr_closed``), each under its PR's lease taken without waiting; a held lease is left for the
         next pass. The ``stop`` function is the command's own, with the actor
         ``auto:review-respond`` (Reject, expiry and closed PRs). A round that already carries a
-        cancel flag was stopped before: its job, the finalizer or the reconcile ends it."""
+        cancel flag was stopped before: its job, the finalizer or the reconcile ends it, except a
+        running round flagged ``pr_closed`` (by an earlier sweep whose ``agent-spawn stop`` may
+        have failed): it is stopped again, which is idempotent."""
         if self.ctx.audit is None:
             return
         where, args = ("", ()) if only is None else (" AND r.pr = ?", (only,))
         found = self.store.conn.execute(
             "SELECT r.id, r.pr FROM rounds r JOIN prs p ON p.pr = r.pr"
             " WHERE r.state IN ('queued', 'running') AND p.host_state != 'open'"
-            " AND r.cancel_requested_at IS NULL"
+            " AND (r.cancel_requested_at IS NULL"
+            "      OR (r.state = 'running' AND r.cancel_reason = 'pr_closed'))"
             f"{where} ORDER BY r.created_at, r.id",
             args,
         ).fetchall()

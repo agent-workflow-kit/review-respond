@@ -2,10 +2,24 @@
 
 from __future__ import annotations
 
+import os
+import stat
 import sys
-from pathlib import Path
 
 from .errors import CliError
+
+
+def _read_regular(path: str, flag: str, max_bytes: int) -> bytes:
+    """Read a regular file. It is opened without blocking, so a FIFO nobody writes to is refused
+    at once instead of hanging the command."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise CliError("usage", f"{flag}: not a regular file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read(max_bytes + 1)
+    finally:
+        os.close(fd)
 
 
 def read_text_arg(path: str, *, flag: str, max_bytes: int) -> str:
@@ -20,8 +34,9 @@ def read_text_arg(path: str, *, flag: str, max_bytes: int) -> str:
         if path == "-":
             raw = sys.stdin.buffer.read(max_bytes + 1)
         else:
-            with Path(path).open("rb") as handle:
-                raw = handle.read(max_bytes + 1)
+            raw = _read_regular(path, flag, max_bytes)
+    except CliError:
+        raise
     except (OSError, ValueError) as exc:
         raise CliError("usage", f"{flag}: cannot read the file ({type(exc).__name__})") from None
     if len(raw) > max_bytes:

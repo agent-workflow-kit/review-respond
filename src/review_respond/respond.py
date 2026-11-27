@@ -66,16 +66,25 @@ class Request:
     mode: str | None
 
 
+def _has_visible_text(text: str) -> bool:
+    """A note needs one printable character that is not whitespace: control and format
+    characters (NUL, U+200B) are rendered as ``<U+XXXX>`` markers by the prompt sanitizer, so
+    they cannot make a note."""
+    return any(ch.isprintable() and not ch.isspace() for ch in text)
+
+
 def read_request(args: argparse.Namespace) -> Request:
     """The usage checks, before any lease or sibling call."""
     pr = parse_pr(args.pr)
+    # todo(#37): record override_escalation for respond when the pre-round hooks land
+    # (the flag is accepted by the parser and has no effect until then)
     skill: str | None = args.skill
     if skill is not None and (not _SKILL.fullmatch(skill) or ".." in skill):
         raise CliError("usage", "--skill does not match agent-spawn's skill grammar")
     note: bytes | None = None
     if args.note_file is not None:
         text = read_text_arg(args.note_file, flag="--note-file", max_bytes=MAX_NOTE_BYTES)
-        if not text.strip():
+        if not _has_visible_text(text):
             raise CliError("usage", "--note-file: the note is empty")
         note = text.encode("utf-8")
     return Request(
@@ -224,21 +233,19 @@ def _read(det: Detection, lease: Lease, req: Request) -> StoredPr:
     return stored
 
 
-def _clear_block(
-    lease: Lease, conn: sqlite3.Connection, req: Request, stored: StoredPr, settings: Config
-) -> None:
-    """A human ``respond`` clears every block but ``round_limit``, which needs ``--force`` (or a
-    raised ``max_rounds``)."""
+def _block_clearing(
+    conn: sqlite3.Connection, req: Request, stored: StoredPr, settings: Config
+) -> tuple[str, str] | None:
+    """``(reason, cause)`` of the block a human ``respond`` clears: every block but
+    ``round_limit``, which needs ``--force`` (or a raised ``max_rounds``)."""
     block = due.get_block(conn, req.pr)
     if block is None:
-        return
+        return None
     if block.reason == "round_limit":
         counted = rounds.round_facts(conn, req.pr).counted
         over = counted >= settings.repo_settings(stored.repo).max_rounds
-        cause = "human_force" if over else "max_rounds_raised"
-    else:
-        cause = "human_respond"
-    due.clear_block(lease, req.pr, cause, expect=block.reason)
+        return block.reason, "human_force" if over else "max_rounds_raised"
+    return block.reason, "human_respond"
 
 
 def _start(
@@ -279,14 +286,11 @@ def _start(
     placement = Placement(settings, state, gateway, config=ctx.config, log=ctx.log)
     placement.jobsctl_present()  # a too old jobsctl is found before anything changes
     # TODO(#37): the `pre-round` hooks run here, before the block is cleared and the round exists
-    _clear_block(lease, conn, req, stored, settings)
+    clearing = _block_clearing(conn, req, stored, settings)
     note_sha256 = state.put_file(stored.digest, req.note) if req.note is not None else None
     machine = Rounds(lease, log=ctx.log)
-    with lease.transaction() as tx:  # a human respond resets the read-failure count
-        tx.execute(
-            "UPDATE prs SET read_failures = 0, rev = rev + 1 WHERE pr = ? AND read_failures != 0",
-            (req.pr,),
-        )
+    # one transaction: the block clear, the read-failure reset (a human respond resets the count
+    # even when the comment read was partial) and the round INSERT
     row = machine.create(
         req.pr,
         trigger="respond",
@@ -296,6 +300,8 @@ def _start(
         base_agent_id=base.agent_id,
         skill=req.skill,
         mode=req.mode,
+        clear_block=clearing,
+        reset_read_failures=True,
     )
     try:
         placement.submit(machine, row)

@@ -12,9 +12,10 @@ from typing import Any
 
 import pytest
 
-from review_respond import cli, placement, respond
+from review_respond import cli, due, placement, respond, rounds
 from review_respond.cli import main
 from review_respond.deps import DepStatus
+from review_respond.errors import CliError
 from review_respond.store import Store, open_state_dir, pr_digest, pr_lease_key
 from tests.harness import builders, schemas
 from tests.harness.agents import original, show_doc
@@ -72,11 +73,14 @@ def script_reads(
     comments: list[dict[str, Any]] | None = None,
     *,
     agent_status: str | None = "parked",
+    complete: bool = True,
     **show: Any,
 ) -> None:
     """What one ``respond`` reads: the PR, its comments and (a stored base) the base agent."""
     script_show(world.fakes, PR7, **show)
-    script_comments(world.fakes, PR7, comments if comments is not None else one_comment())
+    script_comments(
+        world.fakes, PR7, comments if comments is not None else one_comment(), complete=complete
+    )
     if agent_status is not None:
         world.fakes.script(
             "agent-spawn", "show", json=show_doc(original(AGENT, PR7, status=agent_status))
@@ -349,6 +353,17 @@ def test_a_live_agent_is_refused_and_never_overridden(
     assert rounds_of(world) == []
 
 
+def test_live_is_decided_before_the_round_limit(
+    world: World, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config = write_config(world, max_rounds=1)
+    prepared(world, capsys, config)
+    _counted_round(world)
+    script_reads(world, agent_status="live")
+    code, doc, _ = respond_cmd(capsys, config)
+    assert (code, doc["error"]["reason"]) == (20, "live")
+
+
 def test_an_unreadable_agent_is_lower_failed_not_a_guess(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
@@ -372,6 +387,18 @@ def _counted_round(world: World, n: int = 1) -> None:
             " 'agent_failed', 1)",
             f"rd-aaaaaaa{'abcdefgh'[i]}", PR7, i + 1,
         )  # fmt: skip
+
+
+def _record_clear_causes(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    causes: list[str] = []
+    real = due.clear_block_in
+
+    def spy(conn: Any, pr: str, cause: str, *, expect: str | None = None) -> bool:
+        causes.append(cause)
+        return real(conn, pr, cause, expect=expect)
+
+    monkeypatch.setattr(due, "clear_block_in", spy)
+    return causes
 
 
 def test_the_round_limit_is_refused_without_force(
@@ -400,7 +427,10 @@ def test_force_starts_a_round_past_the_limit_and_records_it(
     assert [r[1:4] for r in rounds_of(world)][-1] == ("queued", "respond", 1)
 
 
-def test_force_clears_a_round_limit_block(world: World, capsys: pytest.CaptureFixture[str]) -> None:
+def test_force_clears_a_round_limit_block(
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    causes = _record_clear_causes(monkeypatch)
     config = write_config(world, max_rounds=1)
     prepared(world, capsys, config)
     _counted_round(world)
@@ -417,11 +447,13 @@ def test_force_clears_a_round_limit_block(world: World, capsys: pytest.CaptureFi
     script_reads(world)
     assert respond_cmd(capsys, config, "--force")[0] == 0
     assert block_reason(world) is None
+    assert causes == ["human_force"]
 
 
 def test_a_round_limit_block_goes_when_max_rounds_was_raised(
-    world: World, capsys: pytest.CaptureFixture[str]
+    world: World, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    causes = _record_clear_causes(monkeypatch)
     config = write_config(world, max_rounds=3)
     prepared(world, capsys, config)
     world.drop_tool("jobsctl")
@@ -431,6 +463,7 @@ def test_a_round_limit_block_goes_when_max_rounds_was_raised(
     script_reads(world)
     assert respond_cmd(capsys, config)[0] == 0
     assert block_reason(world) is None
+    assert causes == ["max_rounds_raised"]
 
 
 BLOCKS = ["escalated", "failed", "stopped", "no_agent", "hook_vetoed", "hook_escalated"]
@@ -513,13 +546,14 @@ def test_a_busy_pr_lease_is_refused_busy(
     assert world.fakes.calls("forgectl", "show") == [] and rounds_of(world) == []
 
 
-def test_a_human_respond_resets_the_read_failures(
+def test_a_human_respond_resets_the_read_failures_even_after_a_partial_comment_read(
     world: World, capsys: pytest.CaptureFixture[str], config: Path
 ) -> None:
     prepared(world, capsys, config)
     world.drop_tool("jobsctl")
     sql(world, "UPDATE prs SET read_failures = 2")
-    script_reads(world)
+    # a read with complete=false does not reset the count itself: only respond's own reset does
+    script_reads(world, complete=False)
     assert respond_cmd(capsys, config)[0] == 0
     assert sql(world, "SELECT read_failures FROM prs") == [(0,)]
 
@@ -545,6 +579,47 @@ def test_a_jobsctl_that_is_too_old_starts_no_round_and_keeps_the_block(
     code, doc, _ = respond_cmd(capsys, config)
     assert (code, doc["error"]["code"]) == (12, "tool_too_old")
     assert rounds_of(world) == [] and block_reason(world) == "failed"
+
+
+def test_a_failure_while_creating_the_round_keeps_the_block_and_the_failures(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared(world, capsys, config)
+    sql(world, "UPDATE prs SET read_failures = 2, block = ?", json.dumps(
+        {"reason": "failed", "set_at": 1.0, "comment_set_sha256": "0" * 64}))  # fmt: skip
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise CliError("internal", "injected")
+
+    monkeypatch.setattr(rounds, "get_round", boom)  # the last statement of create's transaction
+    script_reads(world, complete=False)
+    code, doc, _ = respond_cmd(capsys, config)
+    assert (code != 0, doc["error"]["code"]) == (True, "internal")
+    assert rounds_of(world) == [] and block_reason(world) == "failed"
+    assert sql(world, "SELECT read_failures FROM prs") == [(2,)]
+
+
+def test_a_placement_failure_of_another_code_names_the_round(
+    world: World,
+    capsys: pytest.CaptureFixture[str],
+    config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared(world, capsys, config)
+
+    def refuse(*_a: Any, **_k: Any) -> None:
+        raise CliError("internal", "placement broke")
+
+    monkeypatch.setattr(placement.Placement, "submit", refuse)
+    script_reads(world)
+    code, doc, _ = respond_cmd(capsys, config)
+    ((rid, state, *_),) = rounds_of(world)
+    assert (doc["error"]["code"], state) == ("internal", "queued")
+    assert doc["error"]["details"] == {"round": rid}
+    assert "placement broke" in doc["error"]["message"] and code != 0
 
 
 def test_a_jobsctl_add_that_fails_leaves_the_round_queued_for_the_reconcile(
@@ -660,6 +735,16 @@ def test_an_unusable_note_is_a_usage_error_before_anything_happens(
     code, doc, _ = respond_cmd(capsys, config, "--note-file", str(_note(world, data)))
     assert (code, doc["error"]["code"]) == (2, "usage")
     assert len(world.fakes.calls()) == before and rounds_of(world) == []
+
+
+@pytest.mark.parametrize("data", ["\u200b\u200b".encode(), b"\x00", b" \x00\n" + "\u200b".encode()])
+def test_a_note_without_a_printable_character_is_a_usage_error(
+    data: bytes, world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    prepared(world, capsys, config)
+    code, doc, _ = respond_cmd(capsys, config, "--note-file", str(_note(world, data)))
+    assert (code, doc["error"]["code"]) == (2, "usage")
+    assert rounds_of(world) == []
 
 
 def test_a_missing_note_file_is_a_usage_error(
@@ -829,3 +914,34 @@ def test_the_job_of_a_respond_round_uses_its_skill_mode_and_note(
     row = sc.round()
     assert (row["state"], row["agent_id"], row["head_sha"]) == ("running", FORK, HEAD)
     assert row["note_sha256"] == doc["round"]["note_sha256"]  # the job read the stored note back
+
+
+def test_a_human_respond_with_no_base_agent_and_no_fresh_opt_in_fails_the_round_internal(
+    world: World, capsys: pytest.CaptureFixture[str], config: Path
+) -> None:
+    from tests.test_job import Scene, log_text, script_throwaway
+
+    prepared(world, capsys, config)
+    world.drop_tool("jobsctl")
+    sql(world, "UPDATE prs SET base_agent = NULL, block = ?", json.dumps(
+        {"reason": "no_agent", "set_at": 1.0, "comment_set_sha256": "0" * 64}))  # fmt: skip
+    script_reads(world, agent_status=None)
+    code, doc, _ = respond_cmd(capsys, config)
+    assert code == 0, doc  # the round is created: the literal behavior of the interface
+    assert block_reason(world) is None and doc["round"]["base_agent_id"] is None
+    rid = doc["round"]["id"]
+    root = world.root / "tw" / "throw1"
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    sc = Scene(world, config, rid, root, Path(world.env["XDG_STATE_HOME"]) / "review-respond")
+    world.fakes.install()
+    script_reads(world, agent_status=None)
+    script_throwaway(sc)
+    assert sc.job() == 1
+    row = sc.round()
+    assert (row["state"], row["failure_reason"]) == ("failed", "internal")
+    assert json.loads(row["warnings"]) == ["no_base_agent"]
+    line = next(ln for ln in log_text(sc).splitlines() if '"job_internal"' in ln)
+    assert "no base agent" in line and "fresh" in line
+    code, shown, _ = run(capsys, "show", rid, config=config)
+    assert code == 0 and shown["round"]["warnings"] == ["no_base_agent"]

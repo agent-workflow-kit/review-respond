@@ -584,6 +584,11 @@ def main(prog: str, base: Path | None = None, argv: Sequence[str] | None = None)
     delay = float(result.get("sleep", 0))
     if delay:
         time.sleep(delay)
+    gate = result.get("wait_for")
+    if gate:  # a handshake with the test: answer once this file exists (at most 60 s)
+        limit = time.monotonic() + 60
+        while not os.path.exists(gate) and time.monotonic() < limit:
+            time.sleep(0.02)
     if "stdout_json" in result:
         out = _enc(json.dumps(result["stdout_json"]) + "\n")
     else:

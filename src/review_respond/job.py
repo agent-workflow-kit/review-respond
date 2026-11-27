@@ -706,7 +706,11 @@ class Job:
         base = row.base_agent_id
         if base is None:
             if not self.cfg.repo_settings(self.repo).respond_fresh:
-                raise CliError("internal", "the round has no base agent and no fresh opt-in")
+                self.rounds.add_warning(self.rid, "no_base_agent")  # shown by `show`
+                raise CliError(
+                    "internal",
+                    "no base agent for this PR and `fresh` (respond_fresh) is not enabled",
+                )
         elif not lineage.is_agent_id(base):
             raise CliError("internal", "the round's base agent id is not valid")
         skill, mode = round_options(self.store.conn, row.id)  # respond --skill / --mode
