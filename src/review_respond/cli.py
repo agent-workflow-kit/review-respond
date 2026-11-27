@@ -21,6 +21,8 @@ from .durations import parse_duration, parse_since
 from .errors import CliError, error_envelope
 from .job import handle as handle_job
 from .output import PROG, Context, Outcome, emit, sanitize_line, warn
+from .respond import handle as handle_respond
+from .stop import handle as handle_stop
 from .store import Store, open_state_dir, state_dir_path
 from .validate import handle as handle_validate
 from .views import handle_list, handle_show
@@ -38,7 +40,9 @@ HANDLERS: dict[str, Handler] = {
     "_job": handle_job,
     "check": handle_check,
     "list": handle_list,
+    "respond": handle_respond,
     "show": handle_show,
+    "stop": handle_stop,
     "validate": handle_validate,
 }
 
@@ -253,12 +257,16 @@ def _build_context(
         loaded = load_config(config_path)
     except ConfigError as exc:
         config_error = exc
+    actor_source = "default"  # audit inputs.actor_source: flag, tty or default
     if explicit_actor is not None:
         actor = explicit_actor
+        actor_source = "flag"
     elif args.command == "_job":
         actor = "auto:review-respond"  # a job acts on its own (interface: Global flags)
     else:
         actor = default_actor(user=loaded.config.me.name if loaded is not None else None)
+        if not actor.startswith("auto:"):
+            actor_source = "tty"
     check_human_only(
         actor,
         {
@@ -279,8 +287,7 @@ def _build_context(
             actor=actor,
             decision_ids=check_decision_ids(args.decision_id or ()),
             config_sha256=loaded.config.sha256() if loaded is not None else None,
-            # todo(#25): actor_source (flag, tty, default) is reserved: the actor resolution above
-            # does not report its source yet; the first command that writes audit records passes it.
+            actor_source=actor_source,
             override_escalation=getattr(args, "override_escalation", False),
         )
     if loaded is not None:

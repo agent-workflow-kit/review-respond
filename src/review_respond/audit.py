@@ -422,6 +422,17 @@ class AuditLog:
             defaults["override_escalation"] = True
         self._defaults = _check_fields(defaults, {}, _INPUT_CHECKS, "inputs")
 
+    def with_actor(self, actor: str) -> AuditLog:
+        """The same file, decision ids and defaults under another actor: the closed-PR sweep
+        records its stops as ``auto:review-respond`` whoever ran the ``check``."""
+        other = object.__new__(AuditLog)
+        other._file = self._file
+        other._clock = self._clock
+        other._actor = _pattern(_ACTOR)(actor)
+        other._decision_ids = self._decision_ids
+        other._defaults = dict(self._defaults)
+        return other
+
     @staticmethod
     def _ids(ids: Sequence[str]) -> list[str]:
         found: list[str] = []

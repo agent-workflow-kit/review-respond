@@ -27,7 +27,8 @@ Seams owned by later issues (``RoundFacts`` carries them, all defaulting to "non
 - ``agent_busy`` is ``prs.agent_busy``, the last observation of the base agent; its writer, and
   the writer of ``prs.base_agent``, is ``lineage.resolve_base`` (#19).
 - TODO(#37): ``post-attention`` ``round_limit`` fires once when ``apply`` reports ``new_block``.
-- TODO(#25): ``respond`` calls ``clear_block`` with ``human_respond`` or ``human_force``.
+- ``respond`` (``respond.py``) calls ``clear_block`` with ``human_respond``, ``human_force`` for
+  ``round_limit`` (or ``max_rounds_raised``), under the PR's lease.
 """
 
 from __future__ import annotations
