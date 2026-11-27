@@ -1,0 +1,27 @@
+{
+  "cancel_requested": true,
+  "changed": true,
+  "dry_run": false,
+  "round": {
+    "agent_id": null,
+    "base_agent_id": "ag-bcdefghi",
+    "cancel_reason": "stopped",
+    "cancel_requested_at": "2026-11-27T01:49:49.664436Z",
+    "comment_ids": [],
+    "counted": false,
+    "delivered": [],
+    "ended": "2026-11-27T01:49:49.665368Z",
+    "escalation": null,
+    "failure": null,
+    "head_sha": null,
+    "id": "rd-abcdefgh",
+    "include_existing": false,
+    "job_id": null,
+    "note_sha256": null,
+    "number": 1,
+    "pr": "git.example.test/org/repo#7",
+    "started": null,
+    "state": "canceled",
+    "warnings": []
+  }
+}

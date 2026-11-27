@@ -1,5 +1,6 @@
 """`respond` end to end through the CLI entry with the strict sibling fakes (docs/interface.md:
-respond). Every sibling call goes through the gateway; the fakes' recorded calls are the evidence."""
+respond). Every sibling call goes through the gateway; the fakes' recorded calls are the
+evidence."""
 
 from __future__ import annotations
 
@@ -163,8 +164,9 @@ def test_a_human_respond_is_not_bound_by_the_job_cap_or_the_settle_delay(
         " is_fork, base_ref, created_at, updated_at, first_seen_at, listed_at) VALUES ("
         "'git.example.test/org/other#1', 'a', 'git.example.test', 'git.example.test/org/other', 1,"
         " 'open', 'a', 'x', 0, 'main', 't', 't', 1, 1)")  # fmt: skip
+    other = "git.example.test/org/other#1"
     sql(world, "INSERT INTO rounds (id, pr, number, state, trigger_kind, created_at)"
-        " VALUES ('rd-aaaaaaaa', 'git.example.test/org/other#1', 1, 'queued', 'check', 1)")  # fmt: skip
+        " VALUES ('rd-aaaaaaaa', ?, 1, 'queued', 'check', 1)", other)  # fmt: skip
     world.drop_tool("jobsctl")
     script_reads(world)
     assert respond_cmd(capsys, config)[0] == 0

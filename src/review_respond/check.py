@@ -381,6 +381,7 @@ class _Pass:
         found = self.store.conn.execute(
             "SELECT r.id, r.pr FROM rounds r JOIN prs p ON p.pr = r.pr"
             " WHERE r.state IN ('queued', 'running') AND p.host_state != 'open'"
+            " AND r.cancel_requested_at IS NULL"
             f"{where} ORDER BY r.created_at, r.id",
             args,
         ).fetchall()
