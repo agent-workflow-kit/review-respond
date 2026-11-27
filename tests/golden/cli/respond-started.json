@@ -1,0 +1,28 @@
+{
+  "comment_ids": [
+    "gh:rc:c1"
+  ],
+  "dry_run": false,
+  "round": {
+    "agent_id": null,
+    "base_agent_id": "ag-sssssss2",
+    "cancel_reason": null,
+    "cancel_requested_at": null,
+    "comment_ids": [],
+    "counted": false,
+    "delivered": [],
+    "ended": null,
+    "escalation": null,
+    "failure": null,
+    "head_sha": null,
+    "id": "rd-abcdefgh",
+    "include_existing": false,
+    "job_id": null,
+    "note_sha256": null,
+    "number": 1,
+    "pr": "git.example.test/org/repo#7",
+    "started": null,
+    "state": "queued",
+    "warnings": []
+  }
+}
