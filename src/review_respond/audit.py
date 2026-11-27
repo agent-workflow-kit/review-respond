@@ -413,6 +413,7 @@ class AuditLog:
         self._clock: Clock = clock or SystemClock()
         self._actor = _pattern(_ACTOR)(actor)
         self._decision_ids = tuple(self._ids(decision_ids))
+        self._config_sha256 = config_sha256
         defaults: dict[str, object] = {}
         if config_sha256 is not None:
             defaults["config_sha256"] = config_sha256
@@ -421,6 +422,19 @@ class AuditLog:
         if override_escalation:
             defaults["override_escalation"] = True
         self._defaults = _check_fields(defaults, {}, _INPUT_CHECKS, "inputs")
+
+    def with_actor(self, actor: str) -> AuditLog:
+        """The same file and config hash under an automatic actor: the closed-PR sweep records its
+        stops as ``auto:review-respond`` whoever ran the ``check``. The caller's decision ids,
+        ``actor_source`` and ``override_escalation`` belong to that human decision and are not
+        carried over (``actor_source`` is ``default``)."""
+        return AuditLog(
+            self._file,
+            actor=actor,
+            config_sha256=self._config_sha256,
+            actor_source="default",
+            clock=self._clock,
+        )
 
     @staticmethod
     def _ids(ids: Sequence[str]) -> list[str]:

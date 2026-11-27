@@ -909,6 +909,9 @@ def test_a_round_without_a_base_and_without_the_opt_in_fails_internal(
     script_throwaway(sc)
     assert sc.job() == 1
     assert sc.round()["failure_reason"] == "internal"
+    assert json.loads(sc.round()["warnings"]) == ["no_base_agent"]  # what `show` lists
+    line = next(ln for ln in log_text(sc).splitlines() if '"job_internal"' in ln)
+    assert "no base agent" in line and "fresh" in line
     assert sc.calls("agent-spawn") == []
     assert sc.temp_files() == []
 
@@ -1779,6 +1782,15 @@ def test_refused_session_settings_fail_the_queued_round_before_any_call(
     assert scene.comment_states()[C1] == "unhandled"
     assert scene.calls() == []
     assert scene.sql("SELECT json_extract(block, '$.reason') FROM prs") == [("failed",)]
+
+
+def test_an_invalid_stored_skill_fails_the_queued_round_settings_invalid(scene: Scene) -> None:
+    scene.sql("UPDATE rounds SET skill = ?", "bad..skill")  # the queued precheck uses the skill
+    assert scene.job() == 1
+    failed_internal(scene)
+    assert '"settings_invalid"' in log_text(scene)
+    assert scene.calls() == []
+    assert scene.comment_states()[C1] == "unhandled"
 
 
 def test_a_stored_note_over_the_size_cap_fails_the_queued_round(

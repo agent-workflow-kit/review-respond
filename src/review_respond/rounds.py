@@ -31,7 +31,9 @@ Seams owned by later issues:
   ``cancel_read_failed``, ``cancel_flagged``, ``start``'s ``nothing_to_respond``): it runs in the
   same transaction after the block is set and is told whether this call set it (``new_block``,
   also on ``Transition``); the post is queued only for a new block.
-- TODO(#25): ``respond`` clears blocks. The forks rows and ``agent_busy`` are ``lineage``'s (#19).
+- ``respond`` (``respond.py``, #25) clears the block (``due.clear_block``) before it creates its
+  round, and ``stop`` (``stop.py``) sets the cancel flag with ``request_cancel``. The forks rows and
+  ``agent_busy`` are ``lineage``'s (#19).
 """
 
 from __future__ import annotations
@@ -224,6 +226,15 @@ def round_facts(conn: sqlite3.Connection, pr: str) -> due.RoundFacts:
     )
 
 
+def round_options(conn: sqlite3.Connection, round_id: str) -> tuple[str | None, str | None]:
+    """``(skill, mode)`` of ``respond --skill --mode``; ``(None, None)`` for a round without them
+    (or a database from before the columns, which a read-only open never migrates)."""
+    if not any(r[1] == "skill" for r in conn.execute("PRAGMA table_info(rounds)")):
+        return None, None
+    found = conn.execute("SELECT skill, mode FROM rounds WHERE id = ?", (round_id,)).fetchone()
+    return (None, None) if found is None else (found[0], found[1])
+
+
 def count_rounds(conn: sqlite3.Connection, pr: str) -> int:
     return int(conn.execute("SELECT count(*) FROM rounds WHERE pr = ?", (pr,)).fetchone()[0])
 
@@ -362,12 +373,24 @@ class Rounds:
         include_existing: bool = False,
         note_sha256: str | None = None,
         base_agent_id: str | None = None,
+        skill: str | None = None,
+        mode: str | None = None,
+        clear_block: tuple[str, str] | None = None,
+        reset_read_failures: bool = False,
     ) -> RoundRow:
         """The round row of a due PR or a human ``respond`` (the ``pre-round`` hooks continued).
+        ``clear_block`` is ``(expected reason, cause)``: the block is cleared (a no-op when the
+        stored reason differs) and ``reset_read_failures`` zeroes the PR's read-failure count, in
+        the same transaction as the INSERT, so a failure leaves the block set and no round.
         Needs the PR's own lease. ``refused`` ``round_active`` while the PR has a queued or
-        running round."""
+        running round. ``skill`` and ``mode`` are the options of ``respond --skill --mode`` (null:
+        the config's skill and headless); the caller has checked the skill's grammar."""
         if trigger not in ("check", "respond"):
             raise ValueError("trigger is check or respond")
+        if mode not in (None, "headless", "interactive"):
+            raise ValueError("mode is headless or interactive")
+        if skill is not None and not (0 < len(skill) <= 128):
+            raise ValueError("skill is 1 to 128 characters")
         if note_sha256 is not None and not _SHA256_RE.fullmatch(note_sha256):
             raise ValueError("note_sha256 is 64 lowercase hex characters")
         if base_agent_id is not None and not _AGENT_RE.fullmatch(base_agent_id):
@@ -398,11 +421,19 @@ class Rounds:
                 raise CliError("internal", "could not find a free round id")
             conn.execute(
                 "INSERT INTO rounds (id, pr, number, state, trigger_kind, forced,"
-                " include_existing, note_sha256, base_agent_id, created_at)"
-                " VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
+                " include_existing, note_sha256, base_agent_id, created_at, skill, mode)"
+                " VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)",
                 (rid, pr, number, trigger, int(forced), int(include_existing), note_sha256,
-                 base_agent_id, self._now()),
+                 base_agent_id, self._now(), skill, mode),
             )  # fmt: skip
+            if clear_block is not None:
+                due.clear_block_in(conn, pr, clear_block[1], expect=clear_block[0])
+            if reset_read_failures:
+                conn.execute(
+                    "UPDATE prs SET read_failures = 0, rev = rev + 1"
+                    " WHERE pr = ? AND read_failures != 0",
+                    (pr,),
+                )
             row = get_round(conn, rid)
             assert row is not None
         self._emit(row, None, "queued", "created")
@@ -422,6 +453,18 @@ class Rounds:
             {"job_id": job_id} if job_id is not None else {"detached_started_at": detached_at}
         )
         return self._run(round_id, frozenset({"queued"}), lambda c, r: _Plan(changes, "job"))
+
+    def add_warning(self, round_id: str, code: str) -> Transition:
+        """Add a warning code to the warnings of a queued or running round (shown by ``show``)."""
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
+            raise ValueError("a warning is a snake_case code")
+
+        def body(conn: sqlite3.Connection, row: RoundRow) -> _Plan | None:
+            if code in row.warnings:
+                return None
+            return _Plan({"warnings": json.dumps([*row.warnings, code])}, "warning")
+
+        return self._run(round_id, frozenset({"queued", "running"}), body)
 
     def record_agent(
         self, round_id: str, agent_id: str, *, throwaway_id: str | None = None
@@ -811,5 +854,6 @@ __all__ = [
     "new_round_id",
     "resolve_round_id",
     "round_facts",
+    "round_options",
     "settle_pending",
 ]

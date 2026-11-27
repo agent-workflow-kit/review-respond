@@ -295,6 +295,14 @@ MIGRATIONS: tuple[tuple[str, ...], ...] = (
             OR NEW.source IS NOT OLD.source
         BEGIN SELECT RAISE(ABORT, 'a fork keeps its agent, PR, round and source'); END""",
     ),
+    (
+        # `respond --skill S --mode M` (#25): the options of one round, read by `_job`. Null: the
+        # config's skill and the headless mode. The skill is checked against agent-spawn's grammar
+        # by the command and again when the settings are built.
+        "ALTER TABLE rounds ADD COLUMN skill TEXT CHECK (skill IS NULL OR length(skill) <= 128)",
+        "ALTER TABLE rounds ADD COLUMN mode TEXT CHECK (mode IS NULL OR mode IN ('headless',"
+        " 'interactive'))",
+    ),
 )
 SCHEMA_VERSION: int = len(MIGRATIONS)
 

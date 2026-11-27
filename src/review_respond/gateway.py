@@ -668,11 +668,14 @@ class AgentSpawn(_Tool):
             args += ["--label", _arg(f"{key}={value}", "label")]
         return self._run([*args, "--json"])
 
-    def stop(self, agent_id: str, *, actor: str, grace: str | None = None) -> Result:
+    def stop(
+        self, agent_id: str, *, actor: str, grace: str | None = None, timeout: Timeout = "default"
+    ) -> Result:
+        """``timeout`` bounds the call: agent-spawn waits up to the grace plus 30 s itself."""
         args = ["stop", _arg(agent_id, "agent id")]
         if grace is not None:
             args += ["--grace", _arg(grace, "grace")]
-        return self._run([*args, "--actor", _arg(actor, "actor"), "--json"])
+        return self._run([*args, "--actor", _arg(actor, "actor"), "--json"], timeout=timeout)
 
     def teardown(self, agent_id: str, *, actor: str) -> Result:
         return self._run(

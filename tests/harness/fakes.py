@@ -78,6 +78,7 @@ class Fakes:
         match: dict[str, Any] | None = None,
         times: int | None = 1,
         sleep: float = 0.0,
+        wait_for: Path | str | None = None,
     ) -> int:
         """Script one answer. ``json`` is validated against the pinned schema first.
 
@@ -97,6 +98,8 @@ class Fakes:
             )
         self._check_target(tool, command, match or {})
         result: dict[str, Any] = {"exit": exit, "stderr": stderr, "sleep": sleep}
+        if wait_for is not None:
+            result["wait_for"] = str(wait_for)
         if json is not None:
             if schema is not False:
                 sid = (

@@ -128,8 +128,8 @@ def test_job_is_hidden_from_top_level_help(capsys: pytest.CaptureFixture[str]) -
 
 
 # validate is implemented (tests/test_validate.py), check, list and show in tests/test_check.py,
-# the hidden _job in tests/test_job.py
-IMPLEMENTED = {"validate", "check", "list", "show", "_job"}
+# the hidden _job in tests/test_job.py, respond and stop in tests/test_respond.py and test_stop.py
+IMPLEMENTED = {"validate", "check", "list", "show", "_job", "respond", "stop"}
 
 
 @pytest.mark.parametrize("command", [c for c in [*COMMANDS, "_job"] if c not in IMPLEMENTED])
@@ -401,6 +401,10 @@ def test_human_only_with_automatic_actor(
 def test_human_flags_pass_with_human_actor(
     flag: str, argv: list[str], capsys: pytest.CaptureFixture[str]
 ) -> None:
+    if argv[0] == "respond":  # implemented: it reaches its handler (nothing stored: not_found)
+        code, _, err = run(capsys, *argv, "--actor", "human:alice", "--dry-run")
+        assert code == 10
+        return
     code, _, err = run(capsys, *argv, "--actor", "human:alice")
     assert code == 1  # reaches dispatch: the command itself is not implemented yet
     assert "not implemented yet" in err
@@ -770,7 +774,7 @@ def test_subprocess_validate_without_siblings_fails_its_checks(tmp_path: Path) -
 
 # config: test_config.py; tool_missing, tool_too_old: test_validate.py;
 # not_found, all_hosts_failed, lower_failed, refused: test_check.py (refused: the per-PR error
-# of check --pr; the exit-20 refusal of respond belongs to #25);
+# of check --pr; the exit-20 refusals of respond and stop: test_respond.py, test_stop.py);
 # state_unsafe, version_skew: test_store.py; lease_*: test_leases.py
 PRODUCED_HERE = {
     "lease_lost",
@@ -788,6 +792,8 @@ PRODUCED_HERE = {
     "all_hosts_failed",
     "lower_failed",
     "refused",
+    # test_respond.py
+    "nothing_to_respond",
 }
 # error.code -> the issue whose feature produces it (tracked, per #6's acceptance criteria).
 OWNER_ISSUE = {
@@ -800,7 +806,6 @@ OWNER_ISSUE = {
     "throwaway_missing": 32,
     "confirmation_required": 32,
     "escalated": 37,
-    "nothing_to_respond": 25,
 }
 
 
@@ -1115,16 +1120,20 @@ def test_dry_run_is_accepted_only_where_documented(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     code = run(capsys, *argv_for(command, "--dry-run"))[0]
-    # `check --dry-run` is implemented: with no state directory it prints an empty result
-    assert code == (0 if command == "check" else 1 if command in DRY_RUN else 2)
+    # `check --dry-run` is implemented: with no state directory it prints an empty result;
+    # `respond` and `stop` have nothing stored to answer from: exit 10 `not_found`
+    expected = 0 if command == "check" else 10 if command in ("respond", "stop") else 1
+    assert code == (expected if command in DRY_RUN else 2)
 
 
 @pytest.mark.parametrize("command", [*COMMANDS, "_job"])
 def test_override_escalation_is_accepted_only_on_respond_and_confirm(
     command: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    code = run(capsys, *argv_for(command, "--override-escalation", "--actor", "human:a"))[0]
-    assert code == (1 if command in {"respond", "confirm", "approve"} else 2)
+    extra = ["--dry-run"] if command == "respond" else []  # nothing to ask: exit 10 not_found
+    code = run(capsys, *argv_for(command, "--override-escalation", "--actor", "human:a", *extra))[0]
+    accepted = {"respond": 10, "confirm": 1, "approve": 1}
+    assert code == accepted.get(command, 2)
 
 
 @pytest.mark.parametrize("value", ["A" * 64, "a" * 65, "a" * 63, "a" * 64 + "\n", "g" * 64])

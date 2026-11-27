@@ -882,8 +882,10 @@ def build_session_settings(
     state_dir: str,
     mode: str = "headless",
     throwaway: str | None = None,
+    skill: str | None = None,
 ) -> SessionSettings:
-    """The settings of a round for ``repo_id``; ``config_invalid`` for an unsafe value."""
+    """The settings of a round for ``repo_id``; ``config_invalid`` for an unsafe value. ``skill``
+    (``respond --skill``) replaces the config's skill and is checked by the same grammar."""
     if mode not in MODES:
         raise ValueError("mode is headless or interactive")
     if config.sandbox not in ("required", "preferred", "off"):
@@ -898,7 +900,7 @@ def build_session_settings(
         base=base,
         throwaway=throwaway,
     )
-    skill = _check_skill(config.skill)
+    skill = _check_skill(config.skill if skill is None else skill)
     timeout = _check_timeout(config.agent.timeout)
     assert skill is not None
     return SessionSettings(

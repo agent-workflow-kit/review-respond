@@ -308,8 +308,8 @@ def v7_with_data() -> sqlite3.Connection:
 
 def test_the_v0_14_schema_upgrades_to_forks_keeping_its_rows() -> None:
     conn = v7_with_data()
-    assert migrate(conn, MIGRATIONS) == SCHEMA_VERSION == 8
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert migrate(conn, MIGRATIONS) == SCHEMA_VERSION == 9
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 9
     assert conn.execute("SELECT pr, base_agent, agent_busy FROM prs").fetchall() == [
         (PR_UP, OLD_AG, 0)
     ]

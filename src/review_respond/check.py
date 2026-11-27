@@ -12,8 +12,11 @@ Seams owned by later issues:
   placed by `placement.Placement` (jobsctl or detached). TODO(#37): the `pre-round` hooks run
   between the due rule and the round row; a PR whose hooks vetoed or escalated is `waiting`.
 - Step 5 (#24): housekeeping reconciles queued rounds, finalizes running rounds whose job is gone
-  and resolves held jobs of escalated rounds (`finalizer.py`). TODO(#25): the closed-PR stop;
-  TODO(#29): expiry and the `remote_moved` comparison; TODO(#26): the cleanup of throwaways.
+  and resolves held jobs of escalated rounds (`finalizer.py`). The rounds of closed or merged PRs
+  are stopped first, by the same function as `stop` (`stop.py`, actor `auto:review-respond`,
+  `cancel_reason: pr_closed`) under the PR's lease taken without waiting; TODO(#37):
+  `post-attention` `pr_closed`. TODO(#29): expiry and the `remote_moved` comparison; TODO(#26):
+  the cleanup of throwaways.
 - Before the due rule, a PR with eligible comments and no round or record in progress gets
   `lineage.resolve_base` (agent-spawn `show`/`list`, wtctl `show`): it stores `prs.base_agent` and
   the `agent_busy` observation the rule reads. When agent-spawn cannot be read the PR reports
@@ -45,6 +48,8 @@ from .handled import HandledSet
 from .output import Context, Outcome, sanitize_line
 from .placement import Placement
 from .prref import host_of, parse_pr
+from .stop import ACTOR as STOP_ACTOR
+from .stop import AGENT_STOPPED, Stopper
 from .store import Lease, Store, pass_lease_key, pr_digest, pr_lease_key
 from .validate import child_env
 
@@ -335,13 +340,14 @@ class _Pass:
 
     def housekeeping(self, only: str | None = None) -> None:
         """Reconcile queued rounds, finalize running rounds whose job is gone and resolve held
-        jobs of escalated rounds. TODO(#25): stop the rounds of closed PRs; TODO(#29): end expired
+        jobs of escalated rounds, after stopping the rounds of closed PRs. TODO(#29): end expired
         and closed records and compare the head of a record's PR (`remote_moved`); TODO(#26): the
         cleanup of throwaways and forks. A failure of one round is logged and does not stop the
         others."""
         fin = Finalizer(self.ctx, self.settings, self.store, placement=self.placement)
         conn = self.store.conn
         where, args = ("", ()) if only is None else (" AND pr = ?", (only,))
+        self._sweep_closed(only)
         queued = [
             r[0]
             for r in conn.execute(
@@ -363,6 +369,51 @@ class _Pass:
             self._guard(round_id, lambda rid=round_id: fin.finalize(rid))
         self._guard("jobs", lambda: fin.resolve_held_jobs(only))
         self._guard("bases", lambda: self._reset_lost_bases(only))
+
+    def _sweep_closed(self, only: str | None) -> None:
+        """Stop the queued and running rounds of closed or merged PRs (``cancel_reason:
+        pr_closed``), each under its PR's lease taken without waiting; a held lease is left for the
+        next pass. The ``stop`` function is the command's own, with the actor
+        ``auto:review-respond`` (Reject, expiry and closed PRs). A round that already carries a
+        cancel flag was stopped before: its job, the finalizer or the reconcile ends it, except a
+        running round flagged ``pr_closed`` with a recorded fork whose ``agent-spawn stop`` did
+        not succeed yet (no ``agent_stopped`` round warning): it is stopped again."""
+        if self.ctx.audit is None:
+            return
+        where, args = ("", ()) if only is None else (" AND r.pr = ?", (only,))
+        found = self.store.conn.execute(
+            "SELECT r.id, r.pr FROM rounds r JOIN prs p ON p.pr = r.pr"
+            " WHERE r.state IN ('queued', 'running') AND p.host_state != 'open'"
+            " AND (r.cancel_requested_at IS NULL"
+            "      OR (r.state = 'running' AND r.cancel_reason = 'pr_closed'"
+            "          AND r.agent_id IS NOT NULL"
+            "          AND EXISTS (SELECT 1 FROM forks f WHERE f.agent_id = r.agent_id)"
+            "          AND NOT EXISTS (SELECT 1 FROM json_each(r.warnings)"
+            f"                          WHERE value = '{AGENT_STOPPED}')))"
+            f"{where} ORDER BY r.created_at, r.id",
+            args,
+        ).fetchall()
+        if not found:
+            return
+        stopper = Stopper(
+            self.settings,
+            self.store,
+            self.gateway,
+            self.placement,
+            actor=STOP_ACTOR,
+            audit=self.ctx.audit.with_actor(STOP_ACTOR),
+            log=self.ctx.log,
+        )
+        for round_id, pr in found:
+            self.lease.renew()
+            self._guard(
+                f"closed:{round_id}", lambda rid=round_id, p=pr: self._stop_closed(stopper, rid, p)
+            )
+
+    def _stop_closed(self, stopper: Stopper, round_id: str, pr: str) -> None:
+        with self.scope(pr) as free:
+            if free:
+                stopper.stop(self.leases[pr], round_id, "pr_closed")
 
     def _guard(self, what: str, work: Callable[[], object]) -> None:
         try:

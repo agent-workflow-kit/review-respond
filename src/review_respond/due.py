@@ -27,7 +27,8 @@ Seams owned by later issues (``RoundFacts`` carries them, all defaulting to "non
 - ``agent_busy`` is ``prs.agent_busy``, the last observation of the base agent; its writer, and
   the writer of ``prs.base_agent``, is ``lineage.resolve_base`` (#19).
 - TODO(#37): ``post-attention`` ``round_limit`` fires once when ``apply`` reports ``new_block``.
-- TODO(#25): ``respond`` calls ``clear_block`` with ``human_respond`` or ``human_force``.
+- ``respond`` (``respond.py``) calls ``clear_block`` with ``human_respond``, ``human_force`` for
+  ``round_limit`` (or ``max_rounds_raised``), under the PR's lease.
 """
 
 from __future__ import annotations
@@ -307,13 +308,22 @@ def clear_block(lease: Lease, pr: str, cause: str, *, expect: str | None = None)
         raise ValueError("cause is not a documented cause")
     _require_lease(lease, pr)
     with lease.transaction() as conn:
-        row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
-        stored = None if row is None else _parse_block(row[1])
-        if row is None or stored is None or (expect is not None and stored.reason != expect):
-            return False
-        if cause not in CLEAR_CAUSES[stored.reason]:
-            raise ValueError(f"cause does not clear a {stored.reason} block")
-        return cas_update(conn, "prs", "pr", pr, row[0], {"block": None})
+        return clear_block_in(conn, pr, cause, expect=expect)
+
+
+def clear_block_in(
+    conn: sqlite3.Connection, pr: str, cause: str, *, expect: str | None = None
+) -> bool:
+    """``clear_block`` inside the caller's transaction (the caller holds the PR's lease)."""
+    if cause not in _ALL_CAUSES:
+        raise ValueError("cause is not a documented cause")
+    row = conn.execute("SELECT rev, block FROM prs WHERE pr = ?", (pr,)).fetchone()
+    stored = None if row is None else _parse_block(row[1])
+    if row is None or stored is None or (expect is not None and stored.reason != expect):
+        return False
+    if cause not in CLEAR_CAUSES[stored.reason]:
+        raise ValueError(f"cause does not clear a {stored.reason} block")
+    return cas_update(conn, "prs", "pr", pr, row[0], {"block": None})
 
 
 def apply(lease: Lease, pr: str, i: DueInputs) -> Applied:

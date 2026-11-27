@@ -17,7 +17,7 @@ round's job is stored (``rounds.job_id``, ``rounds.detached_started_at``) is the
 round was submitted with: the queued reconcile (finalizer.py) reads that, not the present state of
 the machine.
 
-TODO(#25): ``respond`` places its round with ``Placement.submit`` too.
+``respond`` places its round with ``Placement.submit`` too.
 """
 
 from __future__ import annotations

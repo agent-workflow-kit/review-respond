@@ -191,6 +191,27 @@ def test_read_text_from_file_and_stdin(tmp_path: Path, monkeypatch: pytest.Monke
     assert read_text_arg("-", flag="--note-file", max_bytes=100) == "from stdin"
 
 
+def test_a_fifo_without_a_writer_is_a_usage_error_not_a_hang(tmp_path: Path) -> None:
+    import os
+    import threading
+
+    fifo = tmp_path / "pipe"
+    os.mkfifo(fifo)
+    seen: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            read_text_arg(str(fifo), flag="--note-file", max_bytes=100)
+        except CliError as error:
+            seen.append(error)
+
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+    assert not worker.is_alive(), "reading a writerless FIFO blocked"
+    assert [e.code for e in seen if isinstance(e, CliError)] == ["usage"]
+
+
 def test_read_text_limits_and_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     big = tmp_path / "big.txt"
     big.write_bytes(b"x" * 9)

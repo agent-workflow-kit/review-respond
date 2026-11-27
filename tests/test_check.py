@@ -815,6 +815,8 @@ def test_dry_run_on_a_schema_7_database_reads_it_unmigrated(
     for statement in (
         "DROP TABLE forks",
         "ALTER TABLE prs DROP COLUMN agent_busy",
+        "ALTER TABLE rounds DROP COLUMN skill",
+        "ALTER TABLE rounds DROP COLUMN mode",
         "PRAGMA user_version = 7",
     ):
         sql(world, statement)
